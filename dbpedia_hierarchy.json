@@ -1,0 +1,32 @@
+{
+  "People": {
+    "Arts": "Artist",
+    "Sports": "Athlete",
+    "PublicLife": "Politician"
+  },
+  "Places": {
+    "Nature": "NaturalPlace",
+    "Settlements": "Village",
+    "Structures": "Building"
+  },
+  "Organizations": {
+    "Business": "Company",
+    "Education": "EducationalInstitution",
+    "Sports": "SportsTeam"
+  },
+  "CreativeWorks": {
+    "FilmAndTV": "Film",
+    "Writing": "WrittenWork",
+    "Music": "Album"
+  },
+  "ScienceAndNature": {
+    "Animals": "Animal",
+    "Plants": "Plant",
+    "Medicine": "Disease"
+  },
+  "EventsAndTransport": {
+    "Conflicts": "MilitaryConflict",
+    "SportsEvents": "SportsEvent",
+    "Transport": "MeanOfTransportation"
+  }
+}
