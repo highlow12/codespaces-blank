@@ -394,12 +394,17 @@ def pipeline_to_filename(pipeline: str) -> str:
     return pipeline.replace("/", "_").replace(" ", "_")
 
 
-def save_soft_assignments(
+def build_soft_assignments(
     metadata: pd.DataFrame,
     labels: np.ndarray,
     memberships: np.ndarray,
-    output_path: Path,
-) -> None:
+) -> pd.DataFrame:
+    """Combine hard labels and soft memberships in one assignment frame."""
+
+    labels = np.asarray(labels)
+    if labels.ndim != 1 or labels.shape[0] != len(metadata):
+        raise ValueError("Labels must be a 1D array aligned with metadata")
+
     memberships = np.asarray(memberships, dtype=np.float64)
     if memberships.ndim != 2 or memberships.shape[0] != len(metadata):
         raise ValueError("Soft memberships must be a 2D array aligned with metadata")
@@ -411,4 +416,14 @@ def save_soft_assignments(
     membership_sums = memberships.sum(axis=1)
     if np.any(membership_sums < 1.0 - 1e-8):
         assignments["membership_noise"] = np.clip(1.0 - membership_sums, 0.0, 1.0)
+    return assignments
+
+
+def save_soft_assignments(
+    metadata: pd.DataFrame,
+    labels: np.ndarray,
+    memberships: np.ndarray,
+    output_path: Path,
+) -> None:
+    assignments = build_soft_assignments(metadata, labels, memberships)
     assignments.to_csv(output_path, index=False)

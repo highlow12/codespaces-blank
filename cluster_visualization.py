@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import colorsys
-import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    str(Path(tempfile.gettempdir()) / "codex-matplotlib"),
+)
+os.environ.setdefault(
+    "NUMBA_CACHE_DIR",
+    str(Path(tempfile.gettempdir()) / "codex-numba"),
+)
 import matplotlib
 
 matplotlib.use("Agg")
@@ -17,29 +26,27 @@ from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
+from embedding_data import load_embeddings_from_json
+
 
 _LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\d+)_cluster$")
+_MEMBERSHIP_COLUMN_PATTERN = re.compile(r"^membership_(\d+)$")
+_LEVEL_MEMBERSHIP_COLUMN_PATTERN = re.compile(
+    r"^level_(\d+)_membership_(\d+)$"
+)
 NOISE_COLOR = "#9aa0a6"
 
 
-def load_embeddings(json_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    records = payload.get("records") if isinstance(payload, dict) else payload
-    if not isinstance(records, list) or not records:
-        raise ValueError(f"No embedding records found in {json_path}")
+def _load_umap() -> Any:
+    """Load UMAP with a writable Numba cache in restricted environments."""
 
-    embeddings = np.vstack(
-        [np.asarray(record["embedding"], dtype=np.float64) for record in records]
-    )
-    metadata_rows: list[dict[str, Any]] = []
-    for index, record in enumerate(records):
-        metadata = {
-            key: value for key, value in record.items() if key != "embedding"
-        }
-        metadata.setdefault("id", index)
-        metadata.setdefault("tag", f"Document_{index}")
-        metadata_rows.append(metadata)
-    return embeddings, pd.DataFrame(metadata_rows)
+    from umap import UMAP
+
+    return UMAP
+
+
+def load_embeddings(json_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
+    return load_embeddings_from_json(json_path)
 
 
 def project_embeddings(
@@ -53,8 +60,6 @@ def project_embeddings(
     spread: float,
     densmap: bool,
 ) -> np.ndarray:
-    from umap import UMAP
-
     if pca_components < 1:
         raise ValueError("pca_components must be at least 1")
     normalized = normalize(embeddings)
@@ -64,7 +69,7 @@ def project_embeddings(
         random_state=seed,
     ).fit_transform(normalized)
     pca_features = normalize(pca_features)
-    reducer = UMAP(
+    reducer = _load_umap()(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
@@ -74,6 +79,60 @@ def project_embeddings(
         random_state=seed,
     )
     return reducer.fit_transform(pca_features)
+
+
+def fit_projection_model(
+    embeddings: np.ndarray,
+    *,
+    seed: int,
+    pca_components: int = 32,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+    spread: float,
+    densmap: bool,
+) -> tuple[PCA, Any, np.ndarray]:
+    """Fit PCA+UMAP once and return the model for future point transforms."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    if pca_components < 1:
+        raise ValueError("pca_components must be at least 1")
+    normalized = normalize(embeddings)
+    component_count = min(pca_components, normalized.shape[0], normalized.shape[1])
+    pca = PCA(n_components=component_count, random_state=seed).fit(normalized)
+    pca_features = normalize(pca.transform(normalized))
+    reducer = _load_umap()(
+        n_components=2,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        spread=spread,
+        densmap=densmap,
+        random_state=seed,
+    )
+    reduced = reducer.fit_transform(pca_features)
+    return pca, reducer, reduced
+
+
+def transform_projection(
+    embeddings: np.ndarray,
+    *,
+    pca: PCA,
+    reducer: Any,
+) -> np.ndarray:
+    """Project a new batch using a previously fitted PCA+UMAP model."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    normalized = normalize(embeddings)
+    pca_features = normalize(pca.transform(normalized))
+    reduced = np.asarray(reducer.transform(pca_features), dtype=np.float64)
+    if reduced.ndim != 2 or reduced.shape[1] != 2:
+        raise ValueError("UMAP transform must return two-dimensional coordinates")
+    if not np.all(np.isfinite(reduced)):
+        raise ValueError("UMAP transform returned non-finite coordinates")
+    return reduced
 
 
 def compact_umap_presets() -> list[dict[str, object]]:
@@ -118,20 +177,67 @@ def _level_columns(frame: pd.DataFrame) -> list[str]:
     return sorted(columns, key=lambda column: int(_LEVEL_COLUMN_PATTERN.match(column).group(1)))
 
 
+def _membership_columns(frame: pd.DataFrame) -> list[str]:
+    columns = [
+        column
+        for column in frame.columns
+        if _MEMBERSHIP_COLUMN_PATTERN.match(column)
+    ]
+    return sorted(
+        columns,
+        key=lambda column: int(_MEMBERSHIP_COLUMN_PATTERN.match(column).group(1)),
+    )
+
+
+def _level_membership_columns(frame: pd.DataFrame, level: int) -> list[str]:
+    columns = []
+    for column in frame.columns:
+        match = _LEVEL_MEMBERSHIP_COLUMN_PATTERN.match(column)
+        if match and int(match.group(1)) == level:
+            columns.append(column)
+    return sorted(
+        columns,
+        key=lambda column: int(
+            _LEVEL_MEMBERSHIP_COLUMN_PATTERN.match(column).group(2)
+        ),
+    )
+
+
 def load_assignments(csv_path: Path) -> pd.DataFrame:
     frame = pd.read_csv(csv_path)
     hierarchy_columns = _level_columns(frame)
+    membership_columns = _membership_columns(frame)
+    level_membership_columns = [
+        column
+        for column in frame.columns
+        if _LEVEL_MEMBERSHIP_COLUMN_PATTERN.match(column)
+    ]
+    level_membership_columns.sort(
+        key=lambda column: (
+            int(_LEVEL_MEMBERSHIP_COLUMN_PATTERN.match(column).group(1)),
+            int(_LEVEL_MEMBERSHIP_COLUMN_PATTERN.match(column).group(2)),
+        )
+    )
     if "id" not in frame.columns:
         raise ValueError(f"Missing columns in {csv_path}: ['id']")
-    if "cluster" not in frame.columns and not hierarchy_columns:
+    if (
+        "cluster" not in frame.columns
+        and not hierarchy_columns
+        and not membership_columns
+        and not level_membership_columns
+    ):
         raise ValueError(
-            f"{csv_path} needs 'cluster' or level_N_cluster columns"
+            f"{csv_path} needs 'cluster', membership columns, or level_N columns"
         )
 
     columns = ["id"]
     if "cluster" in frame.columns:
         columns.append("cluster")
     columns.extend(hierarchy_columns)
+    columns.extend(membership_columns)
+    columns.extend(level_membership_columns)
+    if "membership_noise" in frame.columns:
+        columns.append("membership_noise")
     for optional_column in ("cluster_path", "is_noise", "noise_level", "leaf_level"):
         if optional_column in frame.columns:
             columns.append(optional_column)
@@ -156,11 +262,55 @@ def _as_bool(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes", "y"}
 
 
+def _soft_argmax(
+    row: pd.Series,
+    columns: list[str],
+    pattern: re.Pattern[str],
+    *,
+    include_noise: bool = False,
+) -> tuple[int | None, bool]:
+    """Return the largest soft-membership cluster and whether noise wins."""
+
+    values: list[float] = []
+    for column in columns:
+        try:
+            value = float(row[column])
+        except (KeyError, TypeError, ValueError, OverflowError):
+            value = float("nan")
+        values.append(value if np.isfinite(value) else float("-inf"))
+
+    if not values or max(values) == float("-inf"):
+        return None, False
+
+    best_position = int(np.argmax(values))
+    best_value = values[best_position]
+    if include_noise:
+        try:
+            noise_value = float(row.get("membership_noise", np.nan))
+        except (TypeError, ValueError, OverflowError):
+            noise_value = float("nan")
+        if np.isfinite(noise_value) and noise_value > best_value:
+            return None, True
+
+    match = pattern.match(columns[best_position])
+    if match is None:
+        return None, False
+    return int(match.group(match.lastindex)), False
+
+
 def prepare_visual_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
     """Add display labels such as ``3-2-4`` to flat or hierarchical outputs."""
 
     frame = assignments.copy()
     hierarchy_columns = _level_columns(frame)
+    flat_membership_columns = _membership_columns(frame)
+    level_membership_columns = {
+        int(_LEVEL_COLUMN_PATTERN.match(column).group(1)): _level_membership_columns(
+            frame,
+            int(_LEVEL_COLUMN_PATTERN.match(column).group(1)),
+        )
+        for column in hierarchy_columns
+    }
     display_labels: list[str] = []
     top_labels: list[str] = []
     noise_flags: list[bool] = []
@@ -174,7 +324,17 @@ def prepare_visual_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
         if hierarchy_columns:
             parts: list[str] = []
             for column in hierarchy_columns:
-                cluster_number = _as_cluster_number(row[column])
+                level = int(_LEVEL_COLUMN_PATTERN.match(column).group(1))
+                soft_columns = level_membership_columns.get(level, [])
+                if soft_columns:
+                    cluster_number, soft_noise = _soft_argmax(
+                        row,
+                        soft_columns,
+                        _LEVEL_MEMBERSHIP_COLUMN_PATTERN,
+                    )
+                    is_noise = is_noise or soft_noise
+                else:
+                    cluster_number = _as_cluster_number(row[column])
                 if cluster_number is None:
                     break
                 # Internal assignment IDs are 0-based; visual labels are 1-based.
@@ -185,7 +345,16 @@ def prepare_visual_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
                 display_label = "-".join(parts) if parts else "root"
             top_label = parts[0] if parts else ("noise" if is_noise else "root")
         else:
-            cluster_number = _as_cluster_number(row.get("cluster", -1))
+            if flat_membership_columns:
+                cluster_number, soft_noise = _soft_argmax(
+                    row,
+                    flat_membership_columns,
+                    _MEMBERSHIP_COLUMN_PATTERN,
+                    include_noise=True,
+                )
+                is_noise = is_noise or soft_noise
+            else:
+                cluster_number = _as_cluster_number(row.get("cluster", -1))
             if cluster_number is None:
                 display_label = "noise"
                 top_label = "noise"
@@ -329,15 +498,15 @@ def _resolve_color_values(
 ) -> tuple[np.ndarray, str, bool]:
     if color_by == "auto":
         color_by = "cluster"
-    if color_by not in {"cluster", "tag"}:
+    if color_by != "cluster":
+        if color_by == "tag":
+            raise ValueError(
+                "Category-name coloring is disabled; use --color-by cluster"
+            )
         raise ValueError(f"Unsupported color mode: {color_by}")
 
-    if color_by == "cluster":
-        column = "display_label"
-        hierarchical = bool(metadata["is_hierarchical"].iloc[0])
-    else:
-        column = "tag"
-        hierarchical = False
+    column = "display_label"
+    hierarchical = bool(metadata["is_hierarchical"].iloc[0])
     if column not in metadata.columns:
         raise ValueError(f"Missing '{column}' column for coloring")
     return metadata[column].astype(str).to_numpy(), color_by, hierarchical
@@ -389,6 +558,58 @@ def make_cluster_plot(
     )
     axis.set_title(
         f"{title} [PCA-{pca_components} + UMAP | {color_mode}"
+        f"{' | hierarchical' if hierarchical else ''}]"
+    )
+    axis.set_xlabel("UMAP-1")
+    axis.set_ylabel("UMAP-2")
+    axis.legend(
+        handles=handles,
+        loc="best",
+        frameon=True,
+        title="cluster label (count)",
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def make_fixed_coordinate_plot(
+    coordinates: np.ndarray,
+    metadata: pd.DataFrame,
+    output_path: Path,
+    *,
+    title: str,
+    color_by: str,
+) -> None:
+    """Render stored coordinates without refitting or moving existing points."""
+
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError("coordinates must be an N x 2 array")
+    if len(metadata) != coordinates.shape[0]:
+        raise ValueError("metadata and coordinates must have the same row count")
+
+    metadata = prepare_visual_assignments(metadata)
+    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
+    color_map = (
+        hierarchical_color_map(values)
+        if hierarchical
+        else categorical_color_map(values)
+    )
+
+    fig, axis = plt.subplots(figsize=(12, 9))
+    handles = _plot_groups(
+        axis,
+        coordinates,
+        metadata,
+        values,
+        color_map,
+        point_size=18,
+        alpha=0.85,
+        include_labels=True,
+    )
+    axis.set_title(
+        f"{title} [fixed PCA + UMAP | {color_mode}"
         f"{' | hierarchical' if hierarchical else ''}]"
     )
     axis.set_xlabel("UMAP-1")

@@ -39,7 +39,7 @@ def main() -> None:
         "--color-by",
         type=str,
         default="auto",
-        choices=["auto", "cluster", "tag"],
+        choices=["auto", "cluster"],
     )
     parser.add_argument("--n-neighbors", type=int, default=15)
     parser.add_argument("--min-dist", type=float, default=0.02)

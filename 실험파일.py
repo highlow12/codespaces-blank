@@ -10,6 +10,7 @@ from sklearn.preprocessing import normalize
 
 from clustering_pipelines import (
     PIPELINE_NAMES,
+    build_soft_assignments,
     build_compact_umap,
     choose_best_pipeline,
     compact_umap_presets,
@@ -229,8 +230,15 @@ def main() -> None:
     best_pipeline = str(best_row["pipeline"])
     soft_assignment_paths: list[Path] = []
     for pipeline_name, run in pipeline_runs.items():
-        assignments = metadata.copy()
-        assignments["cluster"] = run.labels
+        if run.memberships is not None:
+            assignments = build_soft_assignments(
+                metadata,
+                run.labels,
+                run.memberships,
+            )
+        else:
+            assignments = metadata.copy()
+            assignments["cluster"] = run.labels
         assignments.to_csv(
             args.output_dir / f"assignments_{pipeline_to_filename(pipeline_name)}.csv",
             index=False,
@@ -248,9 +256,16 @@ def main() -> None:
         for pipeline_name, run in pipeline_runs.items()
         if pipeline_name == best_pipeline or run.metrics.get("pipeline") == best_pipeline
     )
-    best_labels = pipeline_runs[best_run_name].labels
-    best_assignments = metadata.copy()
-    best_assignments["cluster"] = best_labels
+    best_run = pipeline_runs[best_run_name]
+    if best_run.memberships is not None:
+        best_assignments = build_soft_assignments(
+            metadata,
+            best_run.labels,
+            best_run.memberships,
+        )
+    else:
+        best_assignments = metadata.copy()
+        best_assignments["cluster"] = best_run.labels
     best_assignments.to_csv(args.output_dir / args.assignments_output, index=False)
 
     print(frame.to_string(index=False, float_format=lambda value: f"{value:.4f}"))
