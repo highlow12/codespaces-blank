@@ -23,6 +23,9 @@ import numpy as np
 import pandas as pd
 
 from cluster_visualization import (
+    DEFAULT_CLUSTER_TARGET_WEIGHT,
+    DEFAULT_VISUAL_PCA_COMPONENTS,
+    build_cluster_supervision,
     fit_projection_model,
     make_fixed_coordinate_plot,
     transform_projection,
@@ -227,6 +230,7 @@ def _cluster_config(
     seed: int,
     noise_threshold: float,
     visual_pca_components: int,
+    visual_cluster_target_weight: float,
     visual_n_neighbors: int,
     visual_min_dist: float,
     visual_metric: str,
@@ -248,6 +252,7 @@ def _cluster_config(
         "m": 2.0,
         "noise_threshold": _validate_noise_threshold(noise_threshold),
         "visual_pca_components": int(visual_pca_components),
+        "visual_cluster_target_weight": float(visual_cluster_target_weight),
         "visual_n_neighbors": int(visual_n_neighbors),
         "visual_min_dist": float(visual_min_dist),
         "visual_metric": visual_metric,
@@ -298,7 +303,8 @@ def fit_incremental_state(
     pca_components: int = 64,
     seed: int = 42,
     noise_threshold: float = DEFAULT_NOISE_THRESHOLD,
-    visual_pca_components: int = 32,
+    visual_pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    visual_cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
     visual_n_neighbors: int = 15,
     visual_min_dist: float = 0.02,
     visual_metric: str = "cosine",
@@ -331,6 +337,7 @@ def fit_incremental_state(
         seed=seed,
         noise_threshold=noise_threshold,
         visual_pca_components=visual_pca_components,
+        visual_cluster_target_weight=visual_cluster_target_weight,
         visual_n_neighbors=visual_n_neighbors,
         visual_min_dist=visual_min_dist,
         visual_metric=visual_metric,
@@ -338,6 +345,7 @@ def fit_incremental_state(
         visual_densmap=visual_densmap,
     )
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
+    cluster_target, cluster_target_metric, _ = build_cluster_supervision(assignments)
     visual_pca, visual_reducer, coordinates = fit_projection_model(
         values,
         seed=seed,
@@ -347,6 +355,9 @@ def fit_incremental_state(
         metric=visual_metric,
         spread=visual_spread,
         densmap=visual_densmap,
+        cluster_target=cluster_target,
+        cluster_target_metric=cluster_target_metric,
+        cluster_target_weight=visual_cluster_target_weight,
     )
     return IncrementalClusterState(
         embeddings=values.copy(),
@@ -556,12 +567,24 @@ def write_outputs(
             encoding="utf-8",
         )
     if plot_output is not None:
+        configured_target_weight = state.config.get("visual_cluster_target_weight")
         make_fixed_coordinate_plot(
             state.coordinates,
             state.assignments,
             plot_output,
             title=title,
             color_by=color_by,
+            pca_components=int(
+                state.config.get(
+                    "visual_pca_components",
+                    DEFAULT_VISUAL_PCA_COMPONENTS,
+                )
+            ),
+            cluster_target_weight=(
+                None
+                if configured_target_weight is None
+                else float(configured_target_weight)
+            ),
         )
 
 
@@ -612,7 +635,21 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_NOISE_THRESHOLD,
         help="Re-cluster when the new batch noise ratio exceeds this value.",
     )
-    parser.add_argument("--visual-pca-components", type=int, default=32)
+    parser.add_argument(
+        "--visual-pca-components",
+        type=int,
+        default=DEFAULT_VISUAL_PCA_COMPONENTS,
+        help="PCA dimensions before the 2D UMAP visualization (default: 64).",
+    )
+    parser.add_argument(
+        "--visual-cluster-target-weight",
+        type=float,
+        default=DEFAULT_CLUSTER_TARGET_WEIGHT,
+        help=(
+            "Weak supervised UMAP weight for cluster membership; 0 disables it "
+            "(default: 0.01)."
+        ),
+    )
     parser.add_argument("--visual-n-neighbors", type=int, default=15)
     parser.add_argument("--visual-min-dist", type=float, default=0.02)
     parser.add_argument("--visual-metric", type=str, default="cosine")
@@ -652,6 +689,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         seed=args.seed,
         noise_threshold=args.noise_threshold,
         visual_pca_components=args.visual_pca_components,
+        visual_cluster_target_weight=args.visual_cluster_target_weight,
         visual_n_neighbors=args.visual_n_neighbors,
         visual_min_dist=args.visual_min_dist,
         visual_metric=args.visual_metric,
