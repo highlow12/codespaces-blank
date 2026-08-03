@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import colorsys
-import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    str(Path(tempfile.gettempdir()) / "codex-matplotlib"),
+)
+os.environ.setdefault(
+    "NUMBA_CACHE_DIR",
+    str(Path(tempfile.gettempdir()) / "codex-numba"),
+)
 import matplotlib
 
 matplotlib.use("Agg")
@@ -17,44 +26,42 @@ from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
+from embedding_data import load_embeddings_from_json
+
 
 _LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\d+)_cluster$")
+_MEMBERSHIP_COLUMN_PATTERN = re.compile(r"^membership_(\d+)$")
 NOISE_COLOR = "#9aa0a6"
+DEFAULT_VISUAL_PCA_COMPONENTS = 64
+DEFAULT_CLUSTER_TARGET_WEIGHT = 0.01
+
+
+def _load_umap() -> Any:
+    """Load UMAP with a writable Numba cache in restricted environments."""
+
+    from umap import UMAP
+
+    return UMAP
 
 
 def load_embeddings(json_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    records = payload.get("records") if isinstance(payload, dict) else payload
-    if not isinstance(records, list) or not records:
-        raise ValueError(f"No embedding records found in {json_path}")
-
-    embeddings = np.vstack(
-        [np.asarray(record["embedding"], dtype=np.float64) for record in records]
-    )
-    metadata_rows: list[dict[str, Any]] = []
-    for index, record in enumerate(records):
-        metadata = {
-            key: value for key, value in record.items() if key != "embedding"
-        }
-        metadata.setdefault("id", index)
-        metadata.setdefault("tag", f"Document_{index}")
-        metadata_rows.append(metadata)
-    return embeddings, pd.DataFrame(metadata_rows)
+    return load_embeddings_from_json(json_path)
 
 
 def project_embeddings(
     embeddings: np.ndarray,
     *,
     seed: int,
-    pca_components: int = 32,
+    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
     n_neighbors: int,
     min_dist: float,
     metric: str,
     spread: float,
     densmap: bool,
+    cluster_target: np.ndarray | None = None,
+    cluster_target_metric: str | None = None,
+    cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> np.ndarray:
-    from umap import UMAP
-
     if pca_components < 1:
         raise ValueError("pca_components must be at least 1")
     normalized = normalize(embeddings)
@@ -64,7 +71,13 @@ def project_embeddings(
         random_state=seed,
     ).fit_transform(normalized)
     pca_features = normalize(pca_features)
-    reducer = UMAP(
+    target, target_metric, target_weight = _validate_cluster_target(
+        cluster_target,
+        cluster_target_metric,
+        cluster_target_weight,
+        n_samples=embeddings.shape[0],
+    )
+    reducer = _make_umap_reducer(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
@@ -72,8 +85,145 @@ def project_embeddings(
         spread=spread,
         densmap=densmap,
         random_state=seed,
+        target_metric=target_metric,
+        target_weight=target_weight,
     )
-    return reducer.fit_transform(pca_features)
+    return reducer.fit_transform(pca_features, y=target)
+
+
+def fit_projection_model(
+    embeddings: np.ndarray,
+    *,
+    seed: int,
+    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+    spread: float,
+    densmap: bool,
+    cluster_target: np.ndarray | None = None,
+    cluster_target_metric: str | None = None,
+    cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
+) -> tuple[PCA, Any, np.ndarray]:
+    """Fit PCA+UMAP once and return the model for future point transforms."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    if pca_components < 1:
+        raise ValueError("pca_components must be at least 1")
+    normalized = normalize(embeddings)
+    component_count = min(pca_components, normalized.shape[0], normalized.shape[1])
+    pca = PCA(n_components=component_count, random_state=seed).fit(normalized)
+    pca_features = normalize(pca.transform(normalized))
+    target, target_metric, target_weight = _validate_cluster_target(
+        cluster_target,
+        cluster_target_metric,
+        cluster_target_weight,
+        n_samples=embeddings.shape[0],
+    )
+    reducer = _make_umap_reducer(
+        n_components=2,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        spread=spread,
+        densmap=densmap,
+        random_state=seed,
+        target_metric=target_metric,
+        target_weight=target_weight,
+    )
+    reduced = reducer.fit_transform(pca_features, y=target)
+    return pca, reducer, reduced
+
+
+def _validate_cluster_target(
+    cluster_target: np.ndarray | None,
+    cluster_target_metric: str | None,
+    cluster_target_weight: float,
+    *,
+    n_samples: int,
+) -> tuple[np.ndarray | None, str | None, float]:
+    """Validate and normalize the optional weakly supervised UMAP target."""
+
+    weight = float(cluster_target_weight)
+    if not np.isfinite(weight) or not 0.0 <= weight <= 1.0:
+        raise ValueError("cluster_target_weight must be between 0 and 1")
+    if cluster_target is None or weight == 0.0:
+        return None, None, 0.0
+    if not cluster_target_metric:
+        raise ValueError("cluster_target_metric is required when a target is used")
+
+    target = np.asarray(cluster_target)
+    if target.shape[0] != n_samples:
+        raise ValueError("cluster_target must contain one value per embedding")
+    if cluster_target_metric == "categorical":
+        if target.ndim != 1:
+            raise ValueError("categorical cluster_target must be one-dimensional")
+        target = target.astype(np.int32, copy=False)
+    else:
+        if target.ndim not in {1, 2}:
+            raise ValueError("continuous cluster_target must be one- or two-dimensional")
+        target = target.astype(np.float64, copy=False)
+        if target.ndim == 1:
+            target = target.reshape(-1, 1)
+    if not np.all(np.isfinite(target)):
+        raise ValueError("cluster_target must contain only finite values")
+
+    unique_count = (
+        np.unique(target, axis=0).shape[0]
+        if target.ndim == 2
+        else np.unique(target).size
+    )
+    if unique_count < 2:
+        return None, None, 0.0
+    return target, cluster_target_metric, weight
+
+
+def _make_umap_reducer(
+    *,
+    n_components: int,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+    spread: float,
+    densmap: bool,
+    random_state: int,
+    target_metric: str | None,
+    target_weight: float,
+) -> Any:
+    kwargs: dict[str, Any] = {
+        "n_components": n_components,
+        "n_neighbors": n_neighbors,
+        "min_dist": min_dist,
+        "metric": metric,
+        "spread": spread,
+        "densmap": densmap,
+        "random_state": random_state,
+    }
+    if target_metric is not None and target_weight > 0.0:
+        kwargs["target_metric"] = target_metric
+        kwargs["target_weight"] = target_weight
+    return _load_umap()(**kwargs)
+
+
+def transform_projection(
+    embeddings: np.ndarray,
+    *,
+    pca: PCA,
+    reducer: Any,
+) -> np.ndarray:
+    """Project a new batch using a previously fitted PCA+UMAP model."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    normalized = normalize(embeddings)
+    pca_features = normalize(pca.transform(normalized))
+    reduced = np.asarray(reducer.transform(pca_features), dtype=np.float64)
+    if reduced.ndim != 2 or reduced.shape[1] != 2:
+        raise ValueError("UMAP transform must return two-dimensional coordinates")
+    if not np.all(np.isfinite(reduced)):
+        raise ValueError("UMAP transform returned non-finite coordinates")
+    return reduced
 
 
 def compact_umap_presets() -> list[dict[str, object]]:
@@ -118,6 +268,18 @@ def _level_columns(frame: pd.DataFrame) -> list[str]:
     return sorted(columns, key=lambda column: int(_LEVEL_COLUMN_PATTERN.match(column).group(1)))
 
 
+def _membership_columns(frame: pd.DataFrame) -> list[str]:
+    columns = [
+        column
+        for column in frame.columns
+        if _MEMBERSHIP_COLUMN_PATTERN.match(column)
+    ]
+    return sorted(
+        columns,
+        key=lambda column: int(_MEMBERSHIP_COLUMN_PATTERN.match(column).group(1)),
+    )
+
+
 def load_assignments(csv_path: Path) -> pd.DataFrame:
     frame = pd.read_csv(csv_path)
     hierarchy_columns = _level_columns(frame)
@@ -135,6 +297,9 @@ def load_assignments(csv_path: Path) -> pd.DataFrame:
     for optional_column in ("cluster_path", "is_noise", "noise_level", "leaf_level"):
         if optional_column in frame.columns:
             columns.append(optional_column)
+    columns.extend(_membership_columns(frame))
+    if "membership_noise" in frame.columns:
+        columns.append("membership_noise")
     return frame[list(dict.fromkeys(columns))]
 
 
@@ -203,6 +368,50 @@ def prepare_visual_assignments(assignments: pd.DataFrame) -> pd.DataFrame:
     frame["is_noise"] = noise_flags
     frame["is_hierarchical"] = bool(hierarchy_columns)
     return frame
+
+
+def build_cluster_supervision(
+    assignments: pd.DataFrame,
+) -> tuple[np.ndarray | None, str | None, str]:
+    """Build a weak UMAP target from soft memberships or cluster labels.
+
+    Soft membership columns are preferred because they preserve ambiguity between
+    clusters. When they are unavailable, the hierarchical display path is encoded
+    as a categorical target. The returned target is intentionally separate from
+    plotting colors so visualization can use assignments without making them the
+    sole source of geometry.
+    """
+
+    frame = prepare_visual_assignments(assignments)
+    membership_columns = _membership_columns(frame)
+    if "membership_noise" in frame.columns:
+        membership_columns.append("membership_noise")
+    if membership_columns:
+        membership_frame = frame[membership_columns].apply(
+            pd.to_numeric,
+            errors="coerce",
+        )
+        membership_target = membership_frame.to_numpy(dtype=np.float64)
+        row_norms = np.linalg.norm(membership_target, axis=1, keepdims=True)
+        if (
+            membership_target.ndim == 2
+            and membership_target.shape[1] >= 2
+            and np.all(np.isfinite(membership_target))
+            and np.all(row_norms > 1e-12)
+        ):
+            membership_target = membership_target / row_norms
+            if np.unique(membership_target, axis=0).shape[0] >= 2:
+                return (
+                    membership_target,
+                    "euclidean",
+                    f"soft cluster membership ({len(membership_columns)} dims)",
+                )
+
+    labels = frame["display_label"].astype(str).to_numpy()
+    unique_labels, encoded = np.unique(labels, return_inverse=True)
+    if unique_labels.size < 2:
+        return None, None, "no varying cluster target"
+    return encoded.astype(np.int32), "categorical", f"cluster labels ({len(unique_labels)} groups)"
 
 
 def _natural_key(value: Any) -> tuple[int, int | str]:
@@ -350,15 +559,19 @@ def make_cluster_plot(
     *,
     title: str,
     seed: int,
-    pca_components: int = 32,
+    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
     color_by: str,
     n_neighbors: int,
     min_dist: float,
     metric: str,
     spread: float,
     densmap: bool,
+    cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
     metadata = prepare_visual_assignments(metadata)
+    cluster_target, cluster_target_metric, target_description = (
+        build_cluster_supervision(metadata)
+    )
     reduced = project_embeddings(
         embeddings,
         seed=seed,
@@ -368,6 +581,9 @@ def make_cluster_plot(
         metric=metric,
         spread=spread,
         densmap=densmap,
+        cluster_target=cluster_target,
+        cluster_target_metric=cluster_target_metric,
+        cluster_target_weight=cluster_target_weight,
     )
     values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
     color_map = (
@@ -387,9 +603,73 @@ def make_cluster_plot(
         alpha=0.85,
         include_labels=True,
     )
+    target_suffix = (
+        f" | weak target: {target_description}, w={cluster_target_weight:.2f}"
+        if cluster_target is not None and cluster_target_weight > 0.0
+        else ""
+    )
     axis.set_title(
-        f"{title} [PCA-{pca_components} + UMAP | {color_mode}"
-        f"{' | hierarchical' if hierarchical else ''}]"
+        f"{title} [PCA-{pca_components} -> UMAP-2 | {color_mode}"
+        f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+    )
+    axis.set_xlabel("UMAP-1")
+    axis.set_ylabel("UMAP-2")
+    axis.legend(
+        handles=handles,
+        loc="best",
+        frameon=True,
+        title="cluster label (count)",
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def make_fixed_coordinate_plot(
+    coordinates: np.ndarray,
+    metadata: pd.DataFrame,
+    output_path: Path,
+    *,
+    title: str,
+    color_by: str,
+    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    cluster_target_weight: float | None = DEFAULT_CLUSTER_TARGET_WEIGHT,
+) -> None:
+    """Render stored coordinates without refitting or moving existing points."""
+
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError("coordinates must be an N x 2 array")
+    if len(metadata) != coordinates.shape[0]:
+        raise ValueError("metadata and coordinates must have the same row count")
+
+    metadata = prepare_visual_assignments(metadata)
+    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
+    color_map = (
+        hierarchical_color_map(values)
+        if hierarchical
+        else categorical_color_map(values)
+    )
+
+    fig, axis = plt.subplots(figsize=(12, 9))
+    handles = _plot_groups(
+        axis,
+        coordinates,
+        metadata,
+        values,
+        color_map,
+        point_size=18,
+        alpha=0.85,
+        include_labels=True,
+    )
+    target_suffix = (
+        f" | weak cluster target, w={cluster_target_weight:.2f}"
+        if cluster_target_weight is not None and cluster_target_weight > 0.0
+        else ""
+    )
+    axis.set_title(
+        f"{title} [fixed PCA-{pca_components} -> UMAP-2 | {color_mode}"
+        f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
     )
     axis.set_xlabel("UMAP-1")
     axis.set_ylabel("UMAP-2")
@@ -412,10 +692,14 @@ def make_comparison_plot(
     *,
     title: str,
     seed: int,
-    pca_components: int = 32,
+    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
     color_by: str,
+    cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
     metadata = prepare_visual_assignments(metadata)
+    cluster_target, cluster_target_metric, target_description = (
+        build_cluster_supervision(metadata)
+    )
     values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
     color_map = (
         hierarchical_color_map(values)
@@ -437,6 +721,9 @@ def make_comparison_plot(
             metric=str(preset["metric"]),
             spread=float(preset["spread"]),
             densmap=bool(preset["densmap"]),
+            cluster_target=cluster_target,
+            cluster_target_metric=cluster_target_metric,
+            cluster_target_weight=cluster_target_weight,
         )
         panel_handles = _plot_groups(
             axis,
@@ -461,9 +748,14 @@ def make_comparison_plot(
     for axis in axes.flat[len(presets) :]:
         axis.axis("off")
 
+    target_suffix = (
+        f" | weak target: {target_description}, w={cluster_target_weight:.2f}"
+        if cluster_target is not None and cluster_target_weight > 0.0
+        else ""
+    )
     fig.suptitle(
-        f"{title} [PCA-{pca_components} + UMAP comparison | {color_mode}"
-        f"{' | hierarchical' if hierarchical else ''}]",
+        f"{title} [PCA-{pca_components} -> UMAP-2 comparison | {color_mode}"
+        f"{' | hierarchical' if hierarchical else ''}{target_suffix}]",
         y=0.995,
     )
     fig.legend(

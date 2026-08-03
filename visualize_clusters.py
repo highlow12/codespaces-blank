@@ -4,15 +4,12 @@ import argparse
 from pathlib import Path
 
 from cluster_visualization import (
-    categorical_color_map,
-    compact_umap_presets,
-    hierarchical_color_map,
+    DEFAULT_CLUSTER_TARGET_WEIGHT,
+    DEFAULT_VISUAL_PCA_COMPONENTS,
     load_assignments,
     load_embeddings,
     make_cluster_plot,
     make_comparison_plot,
-    prepare_visual_assignments,
-    project_embeddings,
 )
 
 
@@ -32,8 +29,17 @@ def main() -> None:
     parser.add_argument(
         "--pca-components",
         type=int,
-        default=32,
-        help="Reduce normalized embeddings to this dimension before UMAP.",
+        default=DEFAULT_VISUAL_PCA_COMPONENTS,
+        help="Reduce normalized embeddings to this dimension before UMAP (default: 64).",
+    )
+    parser.add_argument(
+        "--cluster-target-weight",
+        type=float,
+        default=DEFAULT_CLUSTER_TARGET_WEIGHT,
+        help=(
+            "Weak supervised UMAP weight for cluster membership; 0 disables it "
+            "(default: 0.01)."
+        ),
     )
     parser.add_argument(
         "--color-by",
@@ -74,6 +80,7 @@ def main() -> None:
             seed=args.seed,
             pca_components=args.pca_components,
             color_by=args.color_by,
+            cluster_target_weight=args.cluster_target_weight,
         )
     else:
         make_cluster_plot(
@@ -89,6 +96,7 @@ def main() -> None:
             metric=args.metric,
             spread=args.spread,
             densmap=args.densmap,
+            cluster_target_weight=args.cluster_target_weight,
         )
     print(f"Saved visualization to: {args.output}")
 
