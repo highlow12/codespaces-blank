@@ -186,6 +186,64 @@ def fcm_memberships_from_centers(
     return memberships, distances
 
 
+def path_membership_column(path: str) -> str:
+    """Return a stable assignment-column name for a hierarchy path."""
+
+    if not path:
+        raise ValueError("path membership columns require a non-root path")
+    parts = path.split("/")
+    return f"level_{len(parts)}_path_membership_{'_'.join(parts)}"
+
+
+def conditional_memberships_from_projected(
+    projected: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    *,
+    m: float = 2.0,
+) -> dict[str, np.ndarray]:
+    """Propagate local FCM memberships into conditional path probabilities.
+
+    Each node's FCM membership is conditional on its parent. The returned
+    values are therefore comparable only after multiplying by the probability
+    of reaching that parent. No raw memberships from unrelated parent nodes
+    are compared directly.
+    """
+
+    if projected.ndim != 2 or projected.shape[0] == 0:
+        raise ValueError("projected must be a non-empty 2D array")
+
+    root_probability = np.ones(projected.shape[0], dtype=np.float64)
+    if hierarchy_model.fallback_single_cluster:
+        return {"0": root_probability}
+
+    probabilities: dict[str, np.ndarray] = {"": root_probability}
+    ordered_nodes = sorted(
+        hierarchy_model.nodes.items(),
+        key=lambda item: (item[0].count("/"), item[0]),
+    )
+    for parent_path, node_model in ordered_nodes:
+        parent_probability = probabilities.get(parent_path)
+        if parent_probability is None:
+            continue
+        local_memberships, _ = fcm_memberships_from_centers(
+            projected,
+            node_model.centers,
+            m=m,
+        )
+        for cluster_id in range(local_memberships.shape[1]):
+            child_path = (
+                f"{parent_path}/{cluster_id}"
+                if parent_path
+                else str(cluster_id)
+            )
+            probabilities[child_path] = (
+                parent_probability * local_memberships[:, cluster_id]
+            )
+
+    probabilities.pop("", None)
+    return probabilities
+
+
 def fcm_noise_mask(
     X: np.ndarray,
     result: FCMResult,
@@ -647,6 +705,14 @@ def run_hierarchical_pca_fcm(
     ]
     leaf_cluster[is_noise] = -1
 
+    model = HierarchicalModel(
+        pca=pca,
+        nodes=node_models,
+        max_depth=max_depth,
+        fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
+    )
+    conditional_memberships = conditional_memberships_from_projected(Xp, model)
+
     assignments = metadata.copy()
     for level in range(max_depth):
         assignments[f"level_{level + 1}_cluster"] = labels_by_level[:, level]
@@ -655,6 +721,8 @@ def run_hierarchical_pca_fcm(
                 soft_memberships_by_level[level][:, cluster_id]
             )
     assignments["cluster"] = leaf_cluster
+    for path, path_membership in conditional_memberships.items():
+        assignments[path_membership_column(path)] = path_membership
 
     cluster_paths: list[str] = []
     for row in range(X.shape[0]):
@@ -713,12 +781,6 @@ def run_hierarchical_pca_fcm(
         "seed": int(seed),
     }
     tree = {"config": config, "summary": summary, "root": root}
-    model = HierarchicalModel(
-        pca=pca,
-        nodes=node_models,
-        max_depth=max_depth,
-        fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
-    )
     return HierarchicalResult(
         assignments=assignments,
         tree=tree,
@@ -727,5 +789,6 @@ def run_hierarchical_pca_fcm(
             level + 1: level_memberships
             for level, level_memberships in enumerate(soft_memberships_by_level)
         },
+        conditional_memberships=conditional_memberships,
         model=model,
     )

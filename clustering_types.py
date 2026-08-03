@@ -42,6 +42,7 @@ class HierarchicalResult:
     tree: dict[str, Any]
     summary: dict[str, Any]
     memberships: dict[int, np.ndarray] | None = None
+    conditional_memberships: dict[str, np.ndarray] | None = None
     model: "HierarchicalModel | None" = None
 
 

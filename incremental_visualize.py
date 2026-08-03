@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from cluster_visualization import make_fixed_coordinate_plot
+from cluster_visualization import (
+    DEFAULT_VISUAL_PCA_COMPONENTS,
+    make_fixed_coordinate_plot,
+)
 from incremental_clustering import load_state
 
 
@@ -26,12 +29,23 @@ def main() -> None:
     args = parser.parse_args()
 
     state = load_state(args.state)
+    visual_pca_components = int(
+        state.config.get("visual_pca_components", DEFAULT_VISUAL_PCA_COMPONENTS)
+    )
+    configured_target_weight = state.config.get("visual_cluster_target_weight")
+    cluster_target_weight = (
+        None
+        if configured_target_weight is None
+        else float(configured_target_weight)
+    )
     make_fixed_coordinate_plot(
         state.coordinates,
         state.assignments,
         args.output,
         title=args.title,
         color_by=args.color_by,
+        pca_components=visual_pca_components,
+        cluster_target_weight=cluster_target_weight,
     )
     print(f"Saved fixed-coordinate visualization to: {args.output}")
 
