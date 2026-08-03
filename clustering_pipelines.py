@@ -15,6 +15,7 @@ from sklearn.preprocessing import normalize
 
 from clustering_types import PipelineResult
 from fcm_hierarchy import (
+    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     fuzzy_silhouette_proxy,
     pca_normalized_features,
     spherical_fcm,
@@ -24,12 +25,12 @@ from fcm_hierarchy import (
 
 PIPELINE_NAMES = (
     "1_raw_fcm",
-    "2_pca64_fcm",
-    "2b_pca64_hdbscan",
+    "2_pca256_fcm",
+    "2b_pca256_hdbscan",
     "3_pca50_umap2_hdbscan",
     "4_umap8_hdbscan",
-    "5_pca64_gmm",
-    "6_pca64_hdbscan_cosine",
+    "5_pca256_gmm",
+    "6_pca256_hdbscan_cosine",
 )
 
 
@@ -217,11 +218,15 @@ def run_pipeline_2(
     n_clusters: int,
 ) -> PipelineResult:
     start = time.perf_counter()
-    Xn = pca_normalized_features(X, n_components=64, seed=42)
+    Xn = pca_normalized_features(
+        X,
+        n_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        seed=42,
+    )
     result = spherical_fcm(Xn, n_clusters=n_clusters, seed=42)
     elapsed = time.perf_counter() - start
     metrics = {
-        "pipeline": "2_pca64_fcm",
+        "pipeline": "2_pca256_fcm",
         "runtime_sec": elapsed,
         **evaluate_clustering(y, result.labels, Xn),
         "xie_beni": xie_beni_index(Xn, result),
@@ -237,7 +242,10 @@ def run_pipeline_2(
 
 def run_pipeline_2b(X: np.ndarray, y: np.ndarray | None) -> PipelineResult:
     start = time.perf_counter()
-    Xp = PCA(n_components=64, random_state=42).fit_transform(X)
+    Xp = PCA(
+        n_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        random_state=42,
+    ).fit_transform(X)
     Xn = normalize(Xp, norm="l2")
     labels = HDBSCAN(min_cluster_size=20, min_samples=5).fit_predict(Xn)
     elapsed = time.perf_counter() - start
@@ -245,7 +253,7 @@ def run_pipeline_2b(X: np.ndarray, y: np.ndarray | None) -> PipelineResult:
     metrics.update({"xie_beni": np.nan, "fuzzy_silhouette": np.nan})
     return PipelineResult(
         metrics={
-            "pipeline": "2b_pca64_hdbscan",
+            "pipeline": "2b_pca256_hdbscan",
             "runtime_sec": elapsed,
             **metrics,
         },
@@ -282,7 +290,10 @@ def run_pipeline_5(
     n_clusters: int,
 ) -> PipelineResult:
     start = time.perf_counter()
-    Xp = PCA(n_components=64, random_state=42).fit_transform(X)
+    Xp = PCA(
+        n_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        random_state=42,
+    ).fit_transform(X)
     Xn = normalize(Xp, norm="l2")
     model = GaussianMixture(
         n_components=n_clusters,
@@ -297,7 +308,7 @@ def run_pipeline_5(
     labels = memberships.argmax(axis=1)
     elapsed = time.perf_counter() - start
     metrics = {
-        "pipeline": "5_pca64_gmm",
+        "pipeline": "5_pca256_gmm",
         "runtime_sec": elapsed,
         **evaluate_clustering(y, labels, Xn),
         "xie_beni": np.nan,
@@ -309,7 +320,10 @@ def run_pipeline_5(
 
 def run_pipeline_6(X: np.ndarray, y: np.ndarray | None) -> PipelineResult:
     start = time.perf_counter()
-    Xp = PCA(n_components=64, random_state=42).fit_transform(X)
+    Xp = PCA(
+        n_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        random_state=42,
+    ).fit_transform(X)
     Xn = normalize(Xp, norm="l2")
     # On L2-normalized vectors, Euclidean distance is equivalent to cosine distance.
     clusterer = HDBSCAN(
@@ -325,7 +339,7 @@ def run_pipeline_6(X: np.ndarray, y: np.ndarray | None) -> PipelineResult:
     metrics.update({"xie_beni": np.nan, "fuzzy_silhouette": np.nan})
     return PipelineResult(
         metrics={
-            "pipeline": "6_pca64_hdbscan_cosine",
+            "pipeline": "6_pca256_hdbscan_cosine",
             "runtime_sec": elapsed,
             **metrics,
         },
@@ -342,17 +356,17 @@ def run_pipeline_by_name(
 ) -> PipelineResult:
     if pipeline_name == "1_raw_fcm":
         return run_pipeline_1(X, y, n_clusters)
-    if pipeline_name == "2_pca64_fcm":
+    if pipeline_name == "2_pca256_fcm":
         return run_pipeline_2(X, y, n_clusters)
-    if pipeline_name == "2b_pca64_hdbscan":
+    if pipeline_name == "2b_pca256_hdbscan":
         return run_pipeline_2b(X, y)
     if pipeline_name == "3_pca50_umap2_hdbscan":
         return run_pipeline_3(X, y)
     if pipeline_name == "4_umap8_hdbscan":
         return run_pipeline_4(X, y)
-    if pipeline_name == "5_pca64_gmm":
+    if pipeline_name == "5_pca256_gmm":
         return run_pipeline_5(X, y, n_clusters)
-    if pipeline_name == "6_pca64_hdbscan_cosine":
+    if pipeline_name == "6_pca256_hdbscan_cosine":
         return run_pipeline_6(X, y)
     raise ValueError(f"Unknown pipeline: {pipeline_name}")
 

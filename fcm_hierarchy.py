@@ -19,6 +19,9 @@ from clustering_types import (
 )
 
 
+DEFAULT_CLUSTERING_PCA_COMPONENTS = 256
+
+
 def spherical_fcm(
     X: np.ndarray,
     n_clusters: int,
@@ -116,7 +119,7 @@ def fuzzy_silhouette_proxy(
 def pca_normalized_features(
     X: np.ndarray,
     *,
-    n_components: int = 64,
+    n_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
 ) -> np.ndarray:
     """Create the same normalized PCA representation used by PCA+FCM."""
@@ -132,7 +135,7 @@ def pca_normalized_features(
 def fit_pca_normalized_features(
     X: np.ndarray,
     *,
-    n_components: int = 64,
+    n_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
 ) -> tuple[np.ndarray, PCA]:
     """Fit the PCA representation and return its transformer for later batches."""
@@ -489,7 +492,7 @@ def run_hierarchical_pca_fcm(
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     min_split_silhouette: float = 0.05,
-    pca_components: int = 64,
+    pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
 ) -> HierarchicalResult:
     """Recursively split a dataset with spherical PCA+FCM."""

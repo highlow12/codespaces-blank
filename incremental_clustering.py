@@ -34,6 +34,7 @@ from cluster_visualization import (
 from clustering_types import HierarchicalModel
 from embedding_data import load_embeddings_from_json
 from fcm_hierarchy import (
+    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     conditional_memberships_from_projected,
     fcm_memberships_from_centers,
     path_membership_column,
@@ -340,7 +341,7 @@ def fit_incremental_state(
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     min_split_silhouette: float = 0.05,
-    pca_components: int = 64,
+    pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
     noise_threshold: float = DEFAULT_NOISE_THRESHOLD,
     visual_pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
@@ -747,7 +748,12 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         default="silhouette",
     )
     parser.add_argument("--min-split-silhouette", type=float, default=0.05)
-    parser.add_argument("--pca-components", type=int, default=64)
+    parser.add_argument(
+        "--pca-components",
+        type=int,
+        default=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        help="PCA dimensions used for clustering (default: 256).",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--noise-threshold",

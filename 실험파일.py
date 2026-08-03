@@ -37,6 +37,7 @@ from clustering_types import (
 )
 from embedding_data import load_embeddings_from_json, make_synthetic_embeddings
 from fcm_hierarchy import (
+    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     fcm_noise_mask,
     fuzzy_silhouette_proxy,
     pca_normalized_features,
@@ -84,16 +85,21 @@ def main() -> None:
     parser.add_argument("--hierarchical-min-membership", type=float, default=0.40)
     parser.add_argument("--hierarchical-distance-z", type=float, default=3.5)
     parser.add_argument("--hierarchical-min-silhouette", type=float, default=0.05)
-    parser.add_argument("--hierarchical-pca-components", type=int, default=64)
+    parser.add_argument(
+        "--hierarchical-pca-components",
+        type=int,
+        default=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        help="PCA dimensions used for hierarchical clustering (default: 256).",
+    )
     parser.add_argument(
         "--hierarchical-assignments-output",
         type=Path,
-        default=Path("hierarchical_pca64_fcm_assignments.csv"),
+        default=Path("hierarchical_pca256_fcm_assignments.csv"),
     )
     parser.add_argument(
         "--hierarchical-tree-output",
         type=Path,
-        default=Path("hierarchical_pca64_fcm_tree.json"),
+        default=Path("hierarchical_pca256_fcm_tree.json"),
     )
     parser.add_argument(
         "--pipeline",
