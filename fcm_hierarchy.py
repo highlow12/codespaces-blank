@@ -10,7 +10,13 @@ from sklearn.metrics import silhouette_score
 from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.preprocessing import normalize
 
-from clustering_types import FCMKCandidate, FCMResult, HierarchicalResult
+from clustering_types import (
+    FCMKCandidate,
+    FCMResult,
+    HierarchicalModel,
+    HierarchicalResult,
+    HierarchyNodeModel,
+)
 
 
 def spherical_fcm(
@@ -115,14 +121,69 @@ def pca_normalized_features(
 ) -> np.ndarray:
     """Create the same normalized PCA representation used by PCA+FCM."""
 
+    projected, _ = fit_pca_normalized_features(
+        X,
+        n_components=n_components,
+        seed=seed,
+    )
+    return projected
+
+
+def fit_pca_normalized_features(
+    X: np.ndarray,
+    *,
+    n_components: int = 64,
+    seed: int = 42,
+) -> tuple[np.ndarray, PCA]:
+    """Fit the PCA representation and return its transformer for later batches."""
+
     if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
         raise ValueError("X must be a non-empty 2D array")
     if n_components < 1:
         raise ValueError("n_components must be at least 1")
 
     component_count = min(n_components, X.shape[0], X.shape[1])
-    projected = PCA(n_components=component_count, random_state=seed).fit_transform(X)
+    normalized_input = normalize(X, norm="l2")
+    pca = PCA(n_components=component_count, random_state=seed).fit(
+        normalized_input
+    )
+    projected = pca.transform(normalized_input)
+    return normalize(projected, norm="l2"), pca
+
+
+def transform_pca_normalized_features(X: np.ndarray, pca: PCA) -> np.ndarray:
+    """Transform a future batch with a previously fitted PCA representation."""
+
+    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
+        raise ValueError("X must be a non-empty 2D array")
+    normalized_input = normalize(X, norm="l2")
+    projected = pca.transform(normalized_input)
     return normalize(projected, norm="l2")
+
+
+def fcm_memberships_from_centers(
+    X: np.ndarray,
+    centers: np.ndarray,
+    *,
+    m: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate FCM memberships for new points using fixed centers."""
+
+    if m <= 1.0:
+        raise ValueError("m must be greater than 1")
+    if X.ndim != 2 or centers.ndim != 2:
+        raise ValueError("X and centers must be 2D arrays")
+    if centers.shape[0] < 1 or X.shape[1] != centers.shape[1]:
+        raise ValueError("X and centers have incompatible shapes")
+
+    normalized_X = normalize(X, norm="l2")
+    normalized_centers = normalize(centers, norm="l2")
+    distances = euclidean_distances(normalized_X, normalized_centers)
+    distances = np.maximum(distances, 1e-12)
+    exponent = 2.0 / (m - 1.0)
+    ratios = (distances[:, :, None] / distances[:, None, :]) ** exponent
+    memberships = 1.0 / ratios.sum(axis=2)
+    return memberships, distances
 
 
 def fcm_noise_mask(
@@ -400,10 +461,15 @@ def run_hierarchical_pca_fcm(
     else:
         metadata = metadata.copy()
 
-    Xp = pca_normalized_features(X, n_components=pca_components, seed=seed)
+    Xp, pca = fit_pca_normalized_features(
+        X,
+        n_components=pca_components,
+        seed=seed,
+    )
     labels_by_level = np.full((X.shape[0], max_depth), -1, dtype=int)
     is_noise = np.zeros(X.shape[0], dtype=bool)
     noise_level = np.full(X.shape[0], -1, dtype=int)
+    node_models: dict[str, HierarchyNodeModel] = {}
 
     def node_template(
         *,
@@ -488,6 +554,42 @@ def run_hierarchical_pca_fcm(
 
         current_level = depth
         local_labels = best.labels
+
+        model_centers: list[np.ndarray] = []
+        distance_thresholds: list[float] = []
+        node_features = Xp[indices]
+        for cluster_id in range(len(best.cluster_sizes)):
+            cluster_mask = local_labels == cluster_id
+            source_labels = best.result.labels[cluster_mask]
+            if source_labels.size == 0:
+                raise RuntimeError("Selected cluster has no surviving samples")
+            source_label = int(np.bincount(source_labels).argmax())
+            center = best.result.centers[source_label]
+            model_centers.append(center.copy())
+
+            cluster_distances = euclidean_distances(
+                node_features[cluster_mask],
+                center.reshape(1, -1),
+            ).ravel()
+            if cluster_distances.size < 4:
+                distance_thresholds.append(float("inf"))
+            else:
+                median = float(np.median(cluster_distances))
+                mad = float(np.median(np.abs(cluster_distances - median)))
+                if mad <= 1e-12:
+                    distance_thresholds.append(float("inf"))
+                else:
+                    distance_thresholds.append(
+                        median + distance_z * 1.4826 * mad
+                    )
+
+        node_models[str(node["path"])] = HierarchyNodeModel(
+            path=str(node["path"]),
+            depth=current_level,
+            centers=np.vstack(model_centers),
+            distance_thresholds=np.asarray(distance_thresholds, dtype=np.float64),
+        )
+
         noise_indices = indices[local_labels == -1]
         if noise_indices.size:
             is_noise[noise_indices] = True
@@ -587,4 +689,15 @@ def run_hierarchical_pca_fcm(
         "seed": int(seed),
     }
     tree = {"config": config, "summary": summary, "root": root}
-    return HierarchicalResult(assignments=assignments, tree=tree, summary=summary)
+    model = HierarchicalModel(
+        pca=pca,
+        nodes=node_models,
+        max_depth=max_depth,
+        fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
+    )
+    return HierarchicalResult(
+        assignments=assignments,
+        tree=tree,
+        summary=summary,
+        model=model,
+    )

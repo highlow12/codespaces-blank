@@ -41,3 +41,24 @@ class HierarchicalResult:
     assignments: pd.DataFrame
     tree: dict[str, Any]
     summary: dict[str, Any]
+    model: "HierarchicalModel | None" = None
+
+
+@dataclass
+class HierarchyNodeModel:
+    """A fitted split that can assign future points without refitting."""
+
+    path: str
+    depth: int
+    centers: np.ndarray
+    distance_thresholds: np.ndarray
+
+
+@dataclass
+class HierarchicalModel:
+    """Reusable PCA and hierarchy split models for incremental assignment."""
+
+    pca: Any
+    nodes: dict[str, HierarchyNodeModel]
+    max_depth: int
+    fallback_single_cluster: bool = False

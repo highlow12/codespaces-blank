@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 import colorsys
-import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import Any
 
+os.environ.setdefault(
+    "MPLCONFIGDIR",
+    str(Path(tempfile.gettempdir()) / "codex-matplotlib"),
+)
+os.environ.setdefault(
+    "NUMBA_CACHE_DIR",
+    str(Path(tempfile.gettempdir()) / "codex-numba"),
+)
 import matplotlib
 
 matplotlib.use("Agg")
@@ -17,29 +26,23 @@ from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
+from embedding_data import load_embeddings_from_json
+
 
 _LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\d+)_cluster$")
 NOISE_COLOR = "#9aa0a6"
 
 
-def load_embeddings(json_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
-    records = payload.get("records") if isinstance(payload, dict) else payload
-    if not isinstance(records, list) or not records:
-        raise ValueError(f"No embedding records found in {json_path}")
+def _load_umap() -> Any:
+    """Load UMAP with a writable Numba cache in restricted environments."""
 
-    embeddings = np.vstack(
-        [np.asarray(record["embedding"], dtype=np.float64) for record in records]
-    )
-    metadata_rows: list[dict[str, Any]] = []
-    for index, record in enumerate(records):
-        metadata = {
-            key: value for key, value in record.items() if key != "embedding"
-        }
-        metadata.setdefault("id", index)
-        metadata.setdefault("tag", f"Document_{index}")
-        metadata_rows.append(metadata)
-    return embeddings, pd.DataFrame(metadata_rows)
+    from umap import UMAP
+
+    return UMAP
+
+
+def load_embeddings(json_path: Path) -> tuple[np.ndarray, pd.DataFrame]:
+    return load_embeddings_from_json(json_path)
 
 
 def project_embeddings(
@@ -53,8 +56,6 @@ def project_embeddings(
     spread: float,
     densmap: bool,
 ) -> np.ndarray:
-    from umap import UMAP
-
     if pca_components < 1:
         raise ValueError("pca_components must be at least 1")
     normalized = normalize(embeddings)
@@ -64,7 +65,7 @@ def project_embeddings(
         random_state=seed,
     ).fit_transform(normalized)
     pca_features = normalize(pca_features)
-    reducer = UMAP(
+    reducer = _load_umap()(
         n_components=2,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
@@ -74,6 +75,60 @@ def project_embeddings(
         random_state=seed,
     )
     return reducer.fit_transform(pca_features)
+
+
+def fit_projection_model(
+    embeddings: np.ndarray,
+    *,
+    seed: int,
+    pca_components: int = 32,
+    n_neighbors: int,
+    min_dist: float,
+    metric: str,
+    spread: float,
+    densmap: bool,
+) -> tuple[PCA, Any, np.ndarray]:
+    """Fit PCA+UMAP once and return the model for future point transforms."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    if pca_components < 1:
+        raise ValueError("pca_components must be at least 1")
+    normalized = normalize(embeddings)
+    component_count = min(pca_components, normalized.shape[0], normalized.shape[1])
+    pca = PCA(n_components=component_count, random_state=seed).fit(normalized)
+    pca_features = normalize(pca.transform(normalized))
+    reducer = _load_umap()(
+        n_components=2,
+        n_neighbors=n_neighbors,
+        min_dist=min_dist,
+        metric=metric,
+        spread=spread,
+        densmap=densmap,
+        random_state=seed,
+    )
+    reduced = reducer.fit_transform(pca_features)
+    return pca, reducer, reduced
+
+
+def transform_projection(
+    embeddings: np.ndarray,
+    *,
+    pca: PCA,
+    reducer: Any,
+) -> np.ndarray:
+    """Project a new batch using a previously fitted PCA+UMAP model."""
+
+    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    normalized = normalize(embeddings)
+    pca_features = normalize(pca.transform(normalized))
+    reduced = np.asarray(reducer.transform(pca_features), dtype=np.float64)
+    if reduced.ndim != 2 or reduced.shape[1] != 2:
+        raise ValueError("UMAP transform must return two-dimensional coordinates")
+    if not np.all(np.isfinite(reduced)):
+        raise ValueError("UMAP transform returned non-finite coordinates")
+    return reduced
 
 
 def compact_umap_presets() -> list[dict[str, object]]:
@@ -389,6 +444,58 @@ def make_cluster_plot(
     )
     axis.set_title(
         f"{title} [PCA-{pca_components} + UMAP | {color_mode}"
+        f"{' | hierarchical' if hierarchical else ''}]"
+    )
+    axis.set_xlabel("UMAP-1")
+    axis.set_ylabel("UMAP-2")
+    axis.legend(
+        handles=handles,
+        loc="best",
+        frameon=True,
+        title="cluster label (count)",
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
+def make_fixed_coordinate_plot(
+    coordinates: np.ndarray,
+    metadata: pd.DataFrame,
+    output_path: Path,
+    *,
+    title: str,
+    color_by: str,
+) -> None:
+    """Render stored coordinates without refitting or moving existing points."""
+
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError("coordinates must be an N x 2 array")
+    if len(metadata) != coordinates.shape[0]:
+        raise ValueError("metadata and coordinates must have the same row count")
+
+    metadata = prepare_visual_assignments(metadata)
+    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
+    color_map = (
+        hierarchical_color_map(values)
+        if hierarchical
+        else categorical_color_map(values)
+    )
+
+    fig, axis = plt.subplots(figsize=(12, 9))
+    handles = _plot_groups(
+        axis,
+        coordinates,
+        metadata,
+        values,
+        color_map,
+        point_size=18,
+        alpha=0.85,
+        include_labels=True,
+    )
+    axis.set_title(
+        f"{title} [fixed PCA + UMAP | {color_mode}"
         f"{' | hierarchical' if hierarchical else ''}]"
     )
     axis.set_xlabel("UMAP-1")
