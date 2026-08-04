@@ -261,11 +261,16 @@ type FcmResult = {
 
 ### 7.1 membership 기준
 
+최대 membership이 낮으면서 동시에 1위와 2위 membership 차이가 작으면
+경계 후보로 판정한다.
+
 ```text
 max_j(U[i][j]) < minMembership
+AND
+largestMembership - secondLargestMembership < maxMembershipGap
 ```
 
-이면 노이즈다.
+두 조건 중 하나만 만족하는 문서는 경계 후보가 아니다.
 
 ### 7.2 클러스터별 거리 이상치 기준
 
@@ -278,7 +283,16 @@ robustScale = 1.4826 * MAD
 threshold = median + distanceZ * robustScale
 ```
 
-`distance > threshold`인 샘플도 노이즈로 표시한다. 샘플 수가 4개 미만이거나 `MAD <= epsilon`이면 해당 기준은 건너뛴다.
+membership 경계 후보가 `distance > threshold`까지 동시에 만족하면
+`noise`, 거리 임계값 이내이면 `boundary`, 경계 후보가 아니면 `core`로
+분류한다. 샘플 수가 4개 미만이거나 `MAD <= epsilon`이면 거리 임계값을
+무한대로 두므로 경계 후보는 `boundary`가 된다.
+
+세 신호의 노드 내 백분위 순위를 기하평균한 `noise_score`도 계산한다.
+클러스터링 완료 후 전체 문서에서 점수가 높은 상위 1%를 추가 노이즈로
+선정한다. 이 규칙은 클러스터 구조 학습에는 영향을 주지 않으며, 동점은 문서
+ID 오름차순으로 결정한다. 임계값 기반 노이즈와 순위 기반 노이즈는 각각
+`is_natural_noise`, `is_forced_noise`로 구분한다.
 
 노이즈가 된 샘플은 이후 하위 재귀 클러스터링에 전달하지 않는다.
 
@@ -406,6 +420,12 @@ level_4_cluster
 cluster
 cluster_path
 is_noise
+is_natural_noise
+is_forced_noise
+is_boundary
+document_type
+noise_score
+boundary_level
 noise_level
 leaf_level
 ```

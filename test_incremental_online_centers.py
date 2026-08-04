@@ -244,16 +244,36 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
     def test_noise_above_five_percent_reclusters_without_revisualizing(self) -> None:
         state = self._make_state(center_refresh_interval=10)
         state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
-        state.hierarchy_model.nodes[""].distance_thresholds[:] = 0.0
         previous_coordinates = state.coordinates.copy()
         batch = np.asarray(
             [[3.0, 0.8, 0.4, 0.0], [0.4, 3.0, 0.2, 0.1]],
             dtype=np.float64,
         )
         metadata = pd.DataFrame({"id": [200, 201]})
+        forced_assignments, _ = assign_to_hierarchy(
+            batch,
+            metadata,
+            state.hierarchy_model,
+            min_membership=0.0,
+            forced_noise_ratio=0.0,
+        )
+        forced_assignments["cluster"] = -1
+        forced_assignments["is_noise"] = True
+        forced_assignments["is_natural_noise"] = True
+        forced_assignments["document_type"] = "noise"
 
-        with patch("incremental_clustering._fit_visualization") as fit_visualization:
-            updated, summary = update_incremental_state(state, batch, metadata)
+        with (
+            patch(
+                "incremental_clustering.assign_to_hierarchy",
+                return_value=(forced_assignments, 1.0),
+            ),
+            patch("incremental_clustering._fit_visualization") as fit_visualization,
+        ):
+            updated, summary = update_incremental_state(
+                state,
+                batch,
+                metadata,
+            )
 
         self.assertGreater(summary["new_noise_ratio"], 0.05)
         self.assertTrue(summary["emergency_recluster"])
