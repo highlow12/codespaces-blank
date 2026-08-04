@@ -1,6 +1,14 @@
 # 증분 클러스터링 사용법
 
-`incremental_clustering.py`는 기존 계층형 PCA64 + 구면 FCM 결과를 상태 파일로 저장하고, 이후 임베딩을 기존 클러스터에 배정한다. 신규 배치의 노이즈 비율이 `--noise-threshold`를 초과하면 누적 전체 데이터로 자동 재클러스터링한다.
+`incremental_clustering.py`는 자동 선택된 클러스터링 PCA + 구면 FCM과
+자동 선택된 시각화 PCA + UMAP 모델을 상태 파일로 저장하고, 이후 임베딩을
+기존 클러스터에 배정한다. 신규 배치의 노이즈 비율이 `--noise-threshold`를
+초과하면 누적 전체 데이터로 자동 재클러스터링한다.
+
+초기 `fit`의 기본 동작은 클러스터링 PCA 후보(32부터)와 시각화 PCA 후보(16부터)를
+각각 k-NN 보존율로 선택하는 것이다. 선택된 실제 차원은 state의
+`pca_components_selected`, `visual_pca_components_selected`에 저장된다. 고정
+차원이 필요하면 `--pca-components N`, `--visual-pca-components N`을 지정한다.
 
 AG News 검증에서는 라벨별 1,000개가 묶여 있는 원본 특성을 고려해 각 라벨에서 100개씩 신규 배치로 추출했다. 따라서 초기 3,600개와 신규 400개 모두 네 라벨을 균등하게 포함한다.
 
@@ -30,10 +38,11 @@ python incremental_clustering.py update \
   --plot-output results_incremental/ag_news_100_scatter.png
 ```
 
-전체 재클러스터링 사이의 증분 시각화는 저장된 PCA + UMAP 모델의 `transform`으로
-신규 점만 투영하므로 기존 점의 좌표가 움직이지 않는다. 전체 재클러스터링이
-발생해도 시각화 PCA·UMAP과 기존 좌표는 유지한다. UMAP의 densMAP은 신규 점
-변환을 지원하지 않으므로 증분 모드에서는 `densmap=False`가 사용된다.
+전체 재클러스터링 사이의 증분 시각화는 저장된 선택 PCA prefix + UMAP 모델의
+`transform`으로 신규 점만 투영하므로 기존 점의 좌표가 움직이지 않는다. 전체
+재클러스터링이 발생해도 시각화 PCA·UMAP과 기존 좌표는 유지한다. UMAP의
+densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는 `densmap=False`가
+사용된다.
 
 ## Online center와 주기적 전체 갱신
 

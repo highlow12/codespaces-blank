@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 
+from pca_projection import fit_normalized_pca_projection
+from umap_projection import fit_projection_model, transform_projection
 from visualization_pca_dimension_selection import (
     select_visualization_pca_dimension,
     transform_with_selected_visualization,
@@ -109,6 +113,54 @@ class VisualizationPcaDimensionSelectionTests(unittest.TestCase):
         np.testing.assert_allclose(
             transformed,
             selection.selected_coordinates,
+            atol=1e-12,
+        )
+
+    def test_projection_model_uses_selected_prefix_for_fit_and_transform(self) -> None:
+        fitted = fit_normalized_pca_projection(
+            self.X,
+            n_components=24,
+            seed=42,
+        )
+        fake_umap = _FakeUmap()
+        expected_coordinates = fake_umap.fit_transform(
+            fitted.normalized_prefix(8)
+        )
+        fake_selection = SimpleNamespace(
+            pca=fitted.pca,
+            selected_dimension=8,
+            umap=fake_umap,
+            selected_coordinates=expected_coordinates,
+        )
+
+        with patch(
+            "visualization_pca_dimension_selection."
+            "select_visualization_pca_dimension_for_data",
+            return_value=fake_selection,
+        ):
+            pca, reducer, coordinates = fit_projection_model(
+                self.X,
+                seed=42,
+                pca_components=None,
+                n_neighbors=5,
+                min_dist=0.02,
+                metric="cosine",
+                spread=0.85,
+                densmap=False,
+                cluster_target_weight=0.0,
+            )
+
+        self.assertEqual(pca.n_components_, 8)
+        self.assertIs(reducer, fake_umap)
+        np.testing.assert_allclose(coordinates, expected_coordinates)
+        transformed = transform_projection(
+            self.X[:5],
+            pca=pca,
+            reducer=reducer,
+        )
+        np.testing.assert_allclose(
+            transformed,
+            fake_umap.transform(fitted.normalized_prefix(8)[:5]),
             atol=1e-12,
         )
 

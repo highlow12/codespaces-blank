@@ -33,7 +33,6 @@ from cluster_visualization import (
 from clustering_types import HierarchicalModel
 from embedding_data import load_embeddings_from_json
 from fcm_hierarchy import (
-    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     DEFAULT_FORCED_NOISE_RATIO,
     DEFAULT_MAX_MEMBERSHIP_GAP,
     DOCUMENT_TYPE_BOUNDARY,
@@ -50,6 +49,15 @@ from fcm_hierarchy import (
 )
 from hierarchical_assignments import (
     build_hierarchical_assignments as _assignments_from_labels,
+)
+from pca_dimension_search import (
+    DEFAULT_K_VALUES,
+    DEFAULT_MAX_COMPONENTS,
+    DEFAULT_MINIMUM_PRESERVATION_GAIN,
+)
+from pca_dimension_selection import (
+    DEFAULT_COMPONENT_STEP,
+    DEFAULT_MIN_COMPONENTS,
 )
 
 
@@ -679,10 +687,15 @@ def _cluster_config(
     min_xb_relative_improvement: float,
     xb_worsening_patience: int,
     min_split_silhouette: float,
-    pca_components: int,
+    pca_components: int | None,
+    pca_max_components: int,
+    pca_min_components: int,
+    pca_component_step: int,
+    pca_k_values: tuple[int, ...],
+    pca_minimum_preservation_gain: float,
     seed: int,
     noise_threshold: float,
-    visual_pca_components: int,
+    visual_pca_components: int | None,
     visual_cluster_target_weight: float,
     visual_n_neighbors: int,
     visual_min_dist: float,
@@ -715,11 +728,34 @@ def _cluster_config(
         "min_xb_relative_improvement": float(min_xb_relative_improvement),
         "xb_worsening_patience": int(xb_worsening_patience),
         "min_split_silhouette": float(min_split_silhouette),
-        "pca_components": int(pca_components),
+        "pca_components": (
+            None if pca_components is None else int(pca_components)
+        ),
+        "pca_components_requested": (
+            "auto" if pca_components is None else int(pca_components)
+        ),
+        "pca_components_auto": pca_components is None,
+        "pca_max_components": int(pca_max_components),
+        "pca_min_components": int(pca_min_components),
+        "pca_component_step": int(pca_component_step),
+        "pca_k_values": [int(value) for value in pca_k_values],
+        "pca_minimum_preservation_gain": float(
+            pca_minimum_preservation_gain
+        ),
         "seed": int(seed),
         "m": 2.0,
         "noise_threshold": _validate_noise_threshold(noise_threshold),
-        "visual_pca_components": int(visual_pca_components),
+        "visual_pca_components": (
+            None
+            if visual_pca_components is None
+            else int(visual_pca_components)
+        ),
+        "visual_pca_components_requested": (
+            "auto"
+            if visual_pca_components is None
+            else int(visual_pca_components)
+        ),
+        "visual_pca_components_auto": visual_pca_components is None,
         "visual_cluster_target_weight": float(visual_cluster_target_weight),
         "visual_n_neighbors": int(visual_n_neighbors),
         "visual_min_dist": float(visual_min_dist),
@@ -766,6 +802,12 @@ def _assignment_parameters(
 
 
 def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    auto_select = bool(
+        config.get(
+            "pca_components_auto",
+            config.get("pca_components") is None,
+        )
+    )
     return {
         "max_depth": int(config["max_depth"]),
         "min_node_size": int(config["min_node_size"]),
@@ -779,7 +821,28 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "xb_worsening_patience": int(config.get("xb_worsening_patience", 2)),
         "min_split_silhouette": float(config["min_split_silhouette"]),
-        "pca_components": int(config["pca_components"]),
+        "pca_components": (
+            None if auto_select else int(config["pca_components"])
+        ),
+        "pca_max_components": int(
+            config.get("pca_max_components", DEFAULT_MAX_COMPONENTS)
+        ),
+        "pca_min_components": int(
+            config.get("pca_min_components", DEFAULT_MIN_COMPONENTS)
+        ),
+        "pca_component_step": int(
+            config.get("pca_component_step", DEFAULT_COMPONENT_STEP)
+        ),
+        "pca_k_values": tuple(
+            int(value)
+            for value in config.get("pca_k_values", DEFAULT_K_VALUES)
+        ),
+        "pca_minimum_preservation_gain": float(
+            config.get(
+                "pca_minimum_preservation_gain",
+                DEFAULT_MINIMUM_PRESERVATION_GAIN,
+            )
+        ),
         "seed": int(config["seed"]),
         "min_membership": float(config["min_membership"]),
         "max_membership_gap": float(
@@ -792,9 +855,19 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def _visualization_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    auto_select = bool(
+        config.get(
+            "visual_pca_components_auto",
+            config.get("visual_pca_components") is None,
+        )
+    )
     return {
         "seed": int(config["seed"]),
-        "pca_components": int(config["visual_pca_components"]),
+        "pca_components": (
+            None
+            if auto_select
+            else int(config["visual_pca_components"])
+        ),
         "n_neighbors": int(config["visual_n_neighbors"]),
         "min_dist": float(config["visual_min_dist"]),
         "metric": str(config["visual_metric"]),
@@ -858,6 +931,10 @@ def _fit_hierarchy(
     )
     if result.model is None:
         raise RuntimeError("Hierarchical clustering did not return a reusable model")
+    config["pca_components_selected"] = int(result.model.pca.n_components_)
+    result_config = result.tree.get("config", {})
+    if result_config.get("pca_selection") is not None:
+        config["pca_selection"] = result_config["pca_selection"]
     return result.model, result.tree, result.assignments
 
 
@@ -892,10 +969,15 @@ def fit_incremental_state(
     min_xb_relative_improvement: float = 0.05,
     xb_worsening_patience: int = 2,
     min_split_silhouette: float = 0.05,
-    pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    pca_components: int | None = None,
+    pca_max_components: int = DEFAULT_MAX_COMPONENTS,
+    pca_min_components: int = DEFAULT_MIN_COMPONENTS,
+    pca_component_step: int = DEFAULT_COMPONENT_STEP,
+    pca_k_values: tuple[int, ...] = DEFAULT_K_VALUES,
+    pca_minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
     noise_threshold: float = DEFAULT_NOISE_THRESHOLD,
-    visual_pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    visual_pca_components: int | None = None,
     visual_cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
     visual_n_neighbors: int = 15,
     visual_min_dist: float = 0.02,
@@ -934,6 +1016,11 @@ def fit_incremental_state(
         xb_worsening_patience=xb_worsening_patience,
         min_split_silhouette=min_split_silhouette,
         pca_components=pca_components,
+        pca_max_components=pca_max_components,
+        pca_min_components=pca_min_components,
+        pca_component_step=pca_component_step,
+        pca_k_values=pca_k_values,
+        pca_minimum_preservation_gain=pca_minimum_preservation_gain,
         seed=seed,
         noise_threshold=noise_threshold,
         visual_pca_components=visual_pca_components,
@@ -957,6 +1044,11 @@ def fit_incremental_state(
         assignments,
         config,
     )
+    config["visual_pca_components_selected"] = int(
+        getattr(visual_pca, "n_components_", DEFAULT_VISUAL_PCA_COMPONENTS)
+    )
+    if config.get("visual_pca_components_auto", False):
+        config["visual_pca_components"] = config["visual_pca_components_selected"]
     center_contributions = _center_contributions_for_batch(
         values,
         frame,
@@ -1814,17 +1906,20 @@ def write_outputs(
         )
     if plot_output is not None:
         configured_target_weight = state.config.get("visual_cluster_target_weight")
+        configured_pca_components = state.config.get(
+            "visual_pca_components",
+            DEFAULT_VISUAL_PCA_COMPONENTS,
+        )
         make_fixed_coordinate_plot(
             state.coordinates,
             state.assignments,
             plot_output,
             title=title,
             color_by=color_by,
-            pca_components=int(
-                state.config.get(
-                    "visual_pca_components",
-                    DEFAULT_VISUAL_PCA_COMPONENTS,
-                )
+            pca_components=(
+                None
+                if configured_pca_components is None
+                else int(configured_pca_components)
             ),
             cluster_target_weight=(
                 None
@@ -1909,8 +2004,42 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--pca-components",
         type=int,
-        default=DEFAULT_CLUSTERING_PCA_COMPONENTS,
-        help="PCA dimensions used for clustering (default: 256).",
+        default=None,
+        help=(
+            "PCA dimensions used for clustering; omit to auto-select using "
+            "normalized k-NN preservation."
+        ),
+    )
+    parser.add_argument(
+        "--pca-max-components",
+        type=int,
+        default=DEFAULT_MAX_COMPONENTS,
+        help="Maximum PCA width considered by the automatic clustering selector.",
+    )
+    parser.add_argument(
+        "--pca-min-components",
+        type=int,
+        default=DEFAULT_MIN_COMPONENTS,
+        help="Minimum PCA width considered by the automatic clustering selector.",
+    )
+    parser.add_argument(
+        "--pca-component-step",
+        type=int,
+        default=DEFAULT_COMPONENT_STEP,
+        help="PCA width increment used by the automatic clustering selector.",
+    )
+    parser.add_argument(
+        "--pca-k",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_K_VALUES),
+        help="Neighbor counts used by the automatic clustering selector.",
+    )
+    parser.add_argument(
+        "--pca-minimum-preservation-gain",
+        type=float,
+        default=DEFAULT_MINIMUM_PRESERVATION_GAIN,
+        help="Minimum k-NN preservation gain before the selector stops.",
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
@@ -1922,8 +2051,11 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--visual-pca-components",
         type=int,
-        default=DEFAULT_VISUAL_PCA_COMPONENTS,
-        help="PCA dimensions before the 2D UMAP visualization (default: 64).",
+        default=None,
+        help=(
+            "PCA dimensions before the 2D UMAP visualization; omit to "
+            "auto-select using UMAP k-NN preservation."
+        ),
     )
     parser.add_argument(
         "--visual-cluster-target-weight",
@@ -1986,6 +2118,11 @@ def _run_fit(args: argparse.Namespace) -> None:
         xb_worsening_patience=args.xb_worsening_patience,
         min_split_silhouette=args.min_split_silhouette,
         pca_components=args.pca_components,
+        pca_max_components=args.pca_max_components,
+        pca_min_components=args.pca_min_components,
+        pca_component_step=args.pca_component_step,
+        pca_k_values=tuple(args.pca_k),
+        pca_minimum_preservation_gain=args.pca_minimum_preservation_gain,
         seed=args.seed,
         noise_threshold=args.noise_threshold,
         visual_pca_components=args.visual_pca_components,

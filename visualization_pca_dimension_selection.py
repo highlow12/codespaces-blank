@@ -25,7 +25,10 @@ from pca_dimension_search import (
     evaluate_pca_prefixes,
     prepare_pca_prefix_search,
 )
-from pca_projection import transform_normalized_pca_projection
+from pca_projection import (
+    transform_normalized_pca_projection,
+    validate_embedding_matrix,
+)
 
 
 UmapFactory = Callable[..., Any]
@@ -176,6 +179,62 @@ def select_visualization_pca_dimension(
         k_values=search.k_values,
         minimum_preservation_gain=minimum_preservation_gain,
         umap_configuration=umap_configuration,
+    )
+
+
+def select_visualization_pca_dimension_for_data(
+    X: np.ndarray,
+    *,
+    max_components: int = DEFAULT_MAX_COMPONENTS,
+    min_components: int = DEFAULT_VISUALIZATION_MIN_COMPONENTS,
+    component_step: int = DEFAULT_VISUALIZATION_COMPONENT_STEP,
+    k_values: Sequence[int] = DEFAULT_K_VALUES,
+    minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
+    n_neighbors: int = 15,
+    min_dist: float = 0.02,
+    metric: str = "cosine",
+    spread: float = 0.85,
+    densmap: bool = False,
+    cluster_target: np.ndarray | None = None,
+    cluster_target_metric: str | None = None,
+    cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
+    seed: int = 42,
+    umap_factory: UmapFactory = _make_umap_reducer,
+) -> VisualizationPcaDimensionSelection:
+    """Run the visualization selector with bounds safe for small datasets."""
+
+    matrix = validate_embedding_matrix(X)
+    if matrix.shape[0] < 3:
+        raise ValueError("visualization PCA+UMAP requires at least 3 samples")
+
+    available = min(matrix.shape[0], matrix.shape[1])
+    effective_max_components = min(max_components, available)
+    effective_min_components = min(min_components, effective_max_components)
+    effective_k_values = tuple(
+        int(k) for k in k_values if 1 <= int(k) < matrix.shape[0]
+    )
+    if not effective_k_values:
+        effective_k_values = (
+            max(1, min(matrix.shape[0] - 1, matrix.shape[0] // 2)),
+        )
+
+    return select_visualization_pca_dimension(
+        matrix,
+        max_components=effective_max_components,
+        min_components=effective_min_components,
+        component_step=component_step,
+        k_values=effective_k_values,
+        minimum_preservation_gain=minimum_preservation_gain,
+        n_neighbors=min(n_neighbors, matrix.shape[0] - 1),
+        min_dist=min_dist,
+        metric=metric,
+        spread=spread,
+        densmap=densmap,
+        cluster_target=cluster_target,
+        cluster_target_metric=cluster_target_metric,
+        cluster_target_weight=cluster_target_weight,
+        seed=seed,
+        umap_factory=umap_factory,
     )
 
 

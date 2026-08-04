@@ -12,14 +12,15 @@ from sklearn.metrics import silhouette_score
 from clustering_types import PipelineResult
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    fit_clustering_pca,
     fuzzy_silhouette_proxy,
-    pca_normalized_features,
     spherical_fcm,
     xie_beni_index,
 )
 
 
 PIPELINE_NAMES = (
+    "2_auto_pca_fcm",
     "2_pca256_fcm",
 )
 
@@ -79,17 +80,27 @@ def run_pipeline_2(
     X: np.ndarray,
     y: np.ndarray | None,
     n_clusters: int,
+    *,
+    pca_components: int | None = None,
+    pipeline_name: str = "2_auto_pca_fcm",
 ) -> PipelineResult:
     start = time.perf_counter()
-    Xn = pca_normalized_features(
+    Xn, _pca, pca_selection = fit_clustering_pca(
         X,
-        n_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+        n_components=pca_components,
         seed=42,
     )
     result = spherical_fcm(Xn, n_clusters=n_clusters, seed=42)
     elapsed = time.perf_counter() - start
     metrics = {
-        "pipeline": "2_pca256_fcm",
+        "pipeline": pipeline_name,
+        "pca_components_requested": (
+            "auto" if pca_components is None else int(pca_components)
+        ),
+        "pca_components": int(Xn.shape[1]),
+        "pca_selection": (
+            None if pca_selection is None else pca_selection.to_dict()
+        ),
         "runtime_sec": elapsed,
         **evaluate_clustering(y, result.labels, Xn),
         "xie_beni": xie_beni_index(Xn, result),
@@ -109,8 +120,22 @@ def run_pipeline_by_name(
     y: np.ndarray | None,
     n_clusters: int,
 ) -> PipelineResult:
+    if pipeline_name == "2_auto_pca_fcm":
+        return run_pipeline_2(
+            X,
+            y,
+            n_clusters,
+            pca_components=None,
+            pipeline_name=pipeline_name,
+        )
     if pipeline_name == "2_pca256_fcm":
-        return run_pipeline_2(X, y, n_clusters)
+        return run_pipeline_2(
+            X,
+            y,
+            n_clusters,
+            pca_components=DEFAULT_CLUSTERING_PCA_COMPONENTS,
+            pipeline_name=pipeline_name,
+        )
     raise ValueError(f"Unknown pipeline: {pipeline_name}")
 
 

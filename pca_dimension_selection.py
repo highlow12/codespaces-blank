@@ -26,7 +26,10 @@ from pca_dimension_search import (
     prepare_pca_prefix_search,
     validate_dimension_selection_inputs,
 )
-from pca_projection import transform_normalized_pca_projection
+from pca_projection import (
+    transform_normalized_pca_projection,
+    validate_embedding_matrix,
+)
 
 
 DEFAULT_MIN_COMPONENTS = 32
@@ -61,6 +64,53 @@ class PcaDimensionSelection:
             },
             "candidates": [candidate.to_dict() for candidate in self.candidates],
         }
+
+
+def select_pca_dimension_for_data(
+    X: np.ndarray,
+    *,
+    max_components: int = DEFAULT_MAX_COMPONENTS,
+    min_components: int = DEFAULT_MIN_COMPONENTS,
+    component_step: int = DEFAULT_COMPONENT_STEP,
+    k_values: Sequence[int] = DEFAULT_K_VALUES,
+    minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
+    seed: int = 42,
+) -> PcaDimensionSelection | None:
+    """Select a clustering PCA width with safe bounds for small datasets.
+
+    The command-line selector keeps strict user-supplied bounds. High-level
+    pipelines use this helper so the same algorithm also works when a small
+    test or incremental batch has fewer rows than the default candidate width.
+    A single-row input has no neighborhood to score, so it returns ``None``
+    and the caller uses one PCA component.
+    """
+
+    matrix = validate_embedding_matrix(X)
+    if matrix.shape[0] < 2:
+        return None
+
+    available = min(matrix.shape[0], matrix.shape[1])
+    effective_max_components = min(max_components, available)
+    effective_min_components = min(min_components, effective_max_components)
+    effective_k_values = tuple(
+        int(k) for k in k_values if 1 <= int(k) < matrix.shape[0]
+    )
+    if not effective_k_values:
+        effective_k_values = (
+            max(1, min(matrix.shape[0] - 1, matrix.shape[0] // 2)),
+        )
+
+    return select_pca_dimension(
+        matrix,
+        max_components=effective_max_components,
+        min_components=effective_min_components,
+        component_step=component_step,
+        k_values=effective_k_values,
+        minimum_preservation_gain=minimum_preservation_gain,
+        seed=seed,
+    )
+
+
 def select_pca_dimension(
     X: np.ndarray,
     *,

@@ -18,6 +18,7 @@ from sklearn.decomposition import PCA
 
 from embedding_data import load_embeddings_from_json
 from pca_projection import (
+    PcaPrefixTransformer,
     fit_normalized_pca_projection,
     transform_normalized_pca_projection,
 )
@@ -43,7 +44,7 @@ def project_embeddings(
     embeddings: np.ndarray,
     *,
     seed: int,
-    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    pca_components: int | None = None,
     n_neighbors: int,
     min_dist: float,
     metric: str,
@@ -73,7 +74,7 @@ def fit_projection_model(
     embeddings: np.ndarray,
     *,
     seed: int,
-    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    pca_components: int | None = None,
     n_neighbors: int,
     min_dist: float,
     metric: str,
@@ -82,8 +83,34 @@ def fit_projection_model(
     cluster_target: np.ndarray | None = None,
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
-) -> tuple[PCA, Any, np.ndarray]:
+) -> tuple[PCA | PcaPrefixTransformer, Any, np.ndarray]:
     """Fit PCA+UMAP once and return the model for future point transforms."""
+
+    if pca_components is None:
+        from visualization_pca_dimension_selection import (
+            select_visualization_pca_dimension_for_data,
+        )
+
+        selection = select_visualization_pca_dimension_for_data(
+            embeddings,
+            n_neighbors=n_neighbors,
+            min_dist=min_dist,
+            metric=metric,
+            spread=spread,
+            densmap=densmap,
+            cluster_target=cluster_target,
+            cluster_target_metric=cluster_target_metric,
+            cluster_target_weight=cluster_target_weight,
+            seed=seed,
+        )
+        return (
+            PcaPrefixTransformer(
+                selection.pca,
+                selection.selected_dimension,
+            ),
+            selection.umap,
+            selection.selected_coordinates,
+        )
 
     fitted = fit_normalized_pca_projection(
         embeddings,
@@ -201,5 +228,3 @@ def transform_projection(
     if not np.all(np.isfinite(reduced)):
         raise ValueError("UMAP transform returned non-finite coordinates")
     return reduced
-
-
