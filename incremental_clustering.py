@@ -44,9 +44,12 @@ from fcm_hierarchy import (
     fcm_memberships_from_centers,
     fcm_noise_scores,
     forced_noise_mask,
-    path_membership_column,
+    merge_forced_noise,
     run_hierarchical_pca_fcm,
     transform_pca_normalized_features,
+)
+from hierarchical_assignments import (
+    build_hierarchical_assignments as _assignments_from_labels,
 )
 
 
@@ -108,71 +111,6 @@ def _validate_noise_threshold(value: float) -> float:
 
 def _path_for_cluster(parent_path: str, cluster_id: int) -> str:
     return f"{parent_path}/{cluster_id}" if parent_path else str(cluster_id)
-
-
-def _assignments_from_labels(
-    metadata: pd.DataFrame,
-    labels_by_level: np.ndarray,
-    is_noise: np.ndarray,
-    is_natural_noise: np.ndarray,
-    is_forced_noise: np.ndarray,
-    document_types: np.ndarray,
-    noise_scores: np.ndarray,
-    boundary_level: np.ndarray,
-    noise_level: np.ndarray,
-    soft_memberships_by_level: list[np.ndarray] | None = None,
-    conditional_memberships: dict[str, np.ndarray] | None = None,
-) -> pd.DataFrame:
-    assignments = metadata.copy()
-    max_depth = labels_by_level.shape[1]
-    for level in range(max_depth):
-        assignments[f"level_{level + 1}_cluster"] = labels_by_level[:, level]
-        if soft_memberships_by_level is not None:
-            level_memberships = soft_memberships_by_level[level]
-            for cluster_id in range(level_memberships.shape[1]):
-                assignments[
-                    f"level_{level + 1}_membership_{cluster_id}"
-                ] = level_memberships[:, cluster_id]
-    if conditional_memberships is not None:
-        for path, path_membership in conditional_memberships.items():
-            assignments[path_membership_column(path)] = path_membership
-
-    assigned_depth = np.sum(labels_by_level >= 0, axis=1)
-    leaf_level = np.where(assigned_depth > 0, assigned_depth, -1).astype(int)
-    leaf_cluster = np.full(len(metadata), -1, dtype=int)
-    has_leaf = assigned_depth > 0
-    row_indices = np.arange(len(metadata))
-    leaf_cluster[has_leaf] = labels_by_level[
-        row_indices[has_leaf], assigned_depth[has_leaf] - 1
-    ]
-    leaf_cluster[is_noise] = -1
-    assignments["cluster"] = leaf_cluster
-
-    cluster_paths: list[str] = []
-    for row in range(len(metadata)):
-        path_parts = [
-            str(int(label))
-            for label in labels_by_level[row]
-            if label >= 0
-        ]
-        if is_noise[row]:
-            cluster_paths.append(
-                "/".join(path_parts + ["noise"]) if path_parts else "noise"
-            )
-        else:
-            cluster_paths.append("/".join(path_parts) if path_parts else "root")
-
-    assignments["cluster_path"] = cluster_paths
-    assignments["is_noise"] = is_noise.astype(bool)
-    assignments["is_natural_noise"] = is_natural_noise.astype(bool)
-    assignments["is_forced_noise"] = is_forced_noise.astype(bool)
-    assignments["is_boundary"] = document_types == DOCUMENT_TYPE_BOUNDARY
-    assignments["document_type"] = document_types
-    assignments["noise_score"] = noise_scores
-    assignments["boundary_level"] = boundary_level.astype(int)
-    assignments["noise_level"] = noise_level.astype(int)
-    assignments["leaf_level"] = leaf_level
-    return assignments
 
 
 def assign_to_hierarchy(
@@ -302,15 +240,20 @@ def assign_to_hierarchy(
             active = next_active
 
     is_natural_noise = is_noise.copy()
-    is_forced_noise = forced_noise_mask(
+    (
+        is_noise,
+        is_forced_noise,
+        _forced_only,
+        document_types,
+        noise_level,
+    ) = merge_forced_noise(
+        is_natural_noise,
         noise_scores,
         frame["id"].to_numpy(),
+        document_types,
+        noise_level,
         forced_noise_ratio=forced_noise_ratio,
     )
-    is_noise |= is_forced_noise
-    forced_only = is_forced_noise & ~is_natural_noise
-    document_types[is_forced_noise] = DOCUMENT_TYPE_NOISE
-    noise_level[forced_only] = 0
 
     assignments = _assignments_from_labels(
         frame,
@@ -666,6 +609,112 @@ def _cluster_config(
     }
 
 
+def _fuzzy_parameters(config: dict[str, Any]) -> dict[str, float]:
+    return {
+        "min_membership": float(config["min_membership"]),
+        "m": float(config["m"]),
+    }
+
+
+def _assignment_parameters(
+    config: dict[str, Any],
+    *,
+    forced_noise_ratio: float | None = None,
+) -> dict[str, float]:
+    return {
+        **_fuzzy_parameters(config),
+        "max_membership_gap": float(
+            config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
+        "forced_noise_ratio": (
+            float(config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO))
+            if forced_noise_ratio is None
+            else float(forced_noise_ratio)
+        ),
+    }
+
+
+def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "max_depth": int(config["max_depth"]),
+        "min_node_size": int(config["min_node_size"]),
+        "min_child_size": int(config["min_child_size"]),
+        "min_clusters": int(config["min_clusters"]),
+        "max_clusters": int(config["max_clusters"]),
+        "distance_z": float(config["distance_z"]),
+        "selection_method": str(config["selection_method"]),
+        "min_xb_relative_improvement": float(
+            config.get("min_xb_relative_improvement", 0.05)
+        ),
+        "xb_worsening_patience": int(config.get("xb_worsening_patience", 2)),
+        "min_split_silhouette": float(config["min_split_silhouette"]),
+        "pca_components": int(config["pca_components"]),
+        "seed": int(config["seed"]),
+        "min_membership": float(config["min_membership"]),
+        "max_membership_gap": float(
+            config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
+        "forced_noise_ratio": float(
+            config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
+        ),
+    }
+
+
+def _visualization_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "seed": int(config["seed"]),
+        "pca_components": int(config["visual_pca_components"]),
+        "n_neighbors": int(config["visual_n_neighbors"]),
+        "min_dist": float(config["visual_min_dist"]),
+        "metric": str(config["visual_metric"]),
+        "spread": float(config["visual_spread"]),
+        "densmap": bool(config["visual_densmap"]),
+        "cluster_target_weight": float(config["visual_cluster_target_weight"]),
+    }
+
+
+def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
+    initialized = dict(config)
+    defaults = {
+        "center_updates_before_membership_refresh": (
+            DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
+        ),
+        "max_xb_relative_degradation": DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
+        "center_updates_since_membership_refresh": 0,
+        "membership_refreshes_since_recluster": 0,
+        "total_center_updates": 0,
+        "total_membership_refreshes": 0,
+        "total_reclusters": 0,
+    }
+    for key, value in defaults.items():
+        initialized.setdefault(key, value)
+    return initialized
+
+
+def _hierarchy_xb(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    config: dict[str, Any],
+) -> float:
+    return hierarchy_xie_beni_index(
+        embeddings,
+        hierarchy_model,
+        **_fuzzy_parameters(config),
+    )
+
+
+def _center_statistics(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    config: dict[str, Any],
+) -> dict[str, dict[str, np.ndarray]]:
+    return _build_center_statistics(
+        embeddings,
+        hierarchy_model,
+        **_fuzzy_parameters(config),
+    )
+
+
 def _fit_hierarchy(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
@@ -674,27 +723,7 @@ def _fit_hierarchy(
     result = run_hierarchical_pca_fcm(
         embeddings,
         metadata,
-        max_depth=int(config["max_depth"]),
-        min_node_size=int(config["min_node_size"]),
-        min_child_size=int(config["min_child_size"]),
-        min_clusters=int(config["min_clusters"]),
-        max_clusters=int(config["max_clusters"]),
-        min_membership=float(config["min_membership"]),
-        max_membership_gap=float(
-            config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
-        ),
-        forced_noise_ratio=float(
-            config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
-        ),
-        distance_z=float(config["distance_z"]),
-        selection_method=str(config["selection_method"]),
-        min_xb_relative_improvement=float(
-            config.get("min_xb_relative_improvement", 0.05)
-        ),
-        xb_worsening_patience=int(config.get("xb_worsening_patience", 2)),
-        min_split_silhouette=float(config["min_split_silhouette"]),
-        pca_components=int(config["pca_components"]),
-        seed=int(config["seed"]),
+        **_hierarchy_fit_parameters(config),
     )
     if result.model is None:
         raise RuntimeError("Hierarchical clustering did not return a reusable model")
@@ -709,16 +738,9 @@ def _fit_visualization(
     cluster_target, cluster_target_metric, _ = build_cluster_supervision(assignments)
     return fit_projection_model(
         embeddings,
-        seed=int(config["seed"]),
-        pca_components=int(config["visual_pca_components"]),
-        n_neighbors=int(config["visual_n_neighbors"]),
-        min_dist=float(config["visual_min_dist"]),
-        metric=str(config["visual_metric"]),
-        spread=float(config["visual_spread"]),
-        densmap=bool(config["visual_densmap"]),
         cluster_target=cluster_target,
         cluster_target_metric=cluster_target_metric,
-        cluster_target_weight=float(config["visual_cluster_target_weight"]),
+        **_visualization_fit_parameters(config),
     )
 
 
@@ -796,12 +818,7 @@ def fit_incremental_state(
         max_xb_relative_degradation=max_xb_relative_degradation,
     )
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
-    baseline_xie_beni = hierarchy_xie_beni_index(
-        values,
-        hierarchy_model,
-        min_membership=min_membership,
-        m=float(config["m"]),
-    )
+    baseline_xie_beni = _hierarchy_xb(values, hierarchy_model, config)
     config["baseline_xie_beni"] = baseline_xie_beni
     config["current_xie_beni"] = baseline_xie_beni
     visual_pca, visual_reducer, coordinates = _fit_visualization(
@@ -819,12 +836,7 @@ def fit_incremental_state(
         config=config,
         visual_pca=visual_pca,
         visual_reducer=visual_reducer,
-        center_statistics=_build_center_statistics(
-            values,
-            hierarchy_model,
-            min_membership=min_membership,
-            m=float(config["m"]),
-        ),
+        center_statistics=_center_statistics(values, hierarchy_model, config),
     )
 
 
@@ -1097,44 +1109,25 @@ def update_incremental_state(
         if noise_threshold is None
         else noise_threshold
     )
-    config = dict(state.config)
-    config.setdefault(
-        "center_updates_before_membership_refresh",
-        DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH,
-    )
-    config.setdefault(
-        "max_xb_relative_degradation",
-        DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
-    )
-    config.setdefault("center_updates_since_membership_refresh", 0)
-    config.setdefault("membership_refreshes_since_recluster", 0)
-    config.setdefault("total_center_updates", 0)
-    config.setdefault("total_membership_refreshes", 0)
-    config.setdefault("total_reclusters", 0)
+    config = _initialize_update_config(state.config)
     baseline_xie_beni = float(config.get("baseline_xie_beni", np.nan))
     if not np.isfinite(baseline_xie_beni):
-        baseline_xie_beni = hierarchy_xie_beni_index(
+        baseline_xie_beni = _hierarchy_xb(
             state.embeddings,
             state.hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
         config["baseline_xie_beni"] = baseline_xie_beni
     config.setdefault("current_xie_beni", baseline_xie_beni)
 
     forced_noise_ratio = float(
-        state.config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
+        config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
     )
     new_assignments, natural_noise_ratio = assign_to_hierarchy(
         values,
         frame,
         state.hierarchy_model,
-        min_membership=float(state.config["min_membership"]),
-        max_membership_gap=float(
-            state.config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
-        ),
-        forced_noise_ratio=0.0,
-        m=float(state.config["m"]),
+        **_assignment_parameters(config, forced_noise_ratio=0.0),
     )
     emergency_recluster = natural_noise_ratio > threshold
     new_coordinates = transform_projection(
@@ -1154,19 +1147,17 @@ def update_incremental_state(
 
     center_statistics = getattr(state, "center_statistics", None) or {}
     if not center_statistics:
-        center_statistics = _build_center_statistics(
+        center_statistics = _center_statistics(
             state.embeddings,
             state.hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
     hierarchy_model, center_statistics, updated_node_count = (
         _update_hierarchy_centers(
             state.hierarchy_model,
             center_statistics,
             values,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            **_fuzzy_parameters(config),
         )
     )
     config["center_updates_since_membership_refresh"] = (
@@ -1196,37 +1187,32 @@ def update_incremental_state(
         hierarchy_model = _refresh_distance_thresholds(
             combined_embeddings,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
             distance_z=float(config["distance_z"]),
-            m=float(config["m"]),
+            **_fuzzy_parameters(config),
         )
         refreshed_assignments, _ = assign_to_hierarchy(
             combined_embeddings,
             combined_metadata,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            max_membership_gap=float(
-                config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+            **_assignment_parameters(
+                config,
+                forced_noise_ratio=forced_noise_ratio,
             ),
-            forced_noise_ratio=forced_noise_ratio,
-            m=float(config["m"]),
         )
         refreshed_tree = _rebuild_tree_counts(
             state.tree,
             refreshed_assignments,
             int(config["update_count"]),
         )
-        center_statistics = _build_center_statistics(
+        center_statistics = _center_statistics(
             combined_embeddings,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
-        current_xie_beni = hierarchy_xie_beni_index(
+        current_xie_beni = _hierarchy_xb(
             combined_embeddings,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
         config["current_xie_beni"] = current_xie_beni
         if np.isfinite(baseline_xie_beni) and np.isfinite(current_xie_beni):
@@ -1242,28 +1228,26 @@ def update_incremental_state(
     should_recluster = emergency_recluster or xb_degradation_recluster
 
     visualization_refitted = False
+    visual_pca = state.visual_pca
+    visual_reducer = state.visual_reducer
     if should_recluster:
         hierarchy_model, tree, assignments = _fit_hierarchy(
             combined_embeddings,
             combined_metadata,
             config,
         )
-        visual_pca = state.visual_pca
-        visual_reducer = state.visual_reducer
-        center_statistics = _build_center_statistics(
+        center_statistics = _center_statistics(
             combined_embeddings,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
         config["center_updates_since_membership_refresh"] = 0
         config["membership_refreshes_since_recluster"] = 0
         config["total_reclusters"] = int(config["total_reclusters"]) + 1
-        baseline_xie_beni = hierarchy_xie_beni_index(
+        baseline_xie_beni = _hierarchy_xb(
             combined_embeddings,
             hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
+            config,
         )
         current_xie_beni = baseline_xie_beni
         config["baseline_xie_beni"] = baseline_xie_beni
@@ -1274,8 +1258,6 @@ def update_incremental_state(
             raise RuntimeError("Membership refresh results are unavailable")
         assignments = refreshed_assignments
         tree = refreshed_tree
-        visual_pca = state.visual_pca
-        visual_reducer = state.visual_reducer
         reclustered = False
     else:
         assignments = _append_assignments(state.assignments, new_assignments)
@@ -1290,8 +1272,6 @@ def update_incremental_state(
             assignments,
             int(config["update_count"]),
         )
-        visual_pca = state.visual_pca
-        visual_reducer = state.visual_reducer
         reclustered = False
 
     effective_new_assignments = assignments.iloc[-len(values):].copy()

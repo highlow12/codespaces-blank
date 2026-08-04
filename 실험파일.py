@@ -14,7 +14,6 @@ from clustering_pipelines import (
     choose_best_pipeline,
     pipeline_to_filename,
     run_selected_pipelines,
-    save_soft_assignments,
 )
 from clustering_types import HierarchicalResult
 from embedding_data import load_embeddings_from_json, make_synthetic_embeddings
@@ -259,7 +258,7 @@ def main() -> None:
                 args.output_dir
                 / f"soft_assignments_{pipeline_to_filename(pipeline_name)}.csv"
             )
-            save_soft_assignments(metadata, run.labels, run.memberships, soft_path)
+            assignments.to_csv(soft_path, index=False)
             soft_assignment_paths.append(soft_path)
 
     best_run_name = next(

@@ -4,14 +4,19 @@ import argparse
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Generic, Sequence, TypeVar
 
 import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.neighbors import NearestNeighbors
-from sklearn.preprocessing import normalize
 
 from embedding_data import load_embeddings_from_json
+from pca_projection import (
+    FittedPcaProjection,
+    fit_normalized_pca_projection,
+    transform_normalized_pca_projection,
+    validate_embedding_matrix,
+)
 
 
 DEFAULT_MAX_COMPONENTS = 512
@@ -19,6 +24,10 @@ DEFAULT_MIN_COMPONENTS = 32
 DEFAULT_COMPONENT_STEP = 32
 DEFAULT_K_VALUES = (15, 30)
 DEFAULT_MINIMUM_PRESERVATION_GAIN = 0.05
+ALL_GAINS_REASON = "all_gains_meet_minimum_use_maximum_dimension"
+PLATEAU_REASON = "first_below_minimum_gain_use_previous_dimension"
+
+CandidatePayload = TypeVar("CandidatePayload")
 
 
 @dataclass(frozen=True)
@@ -73,6 +82,33 @@ class PcaDimensionSelection:
         }
 
 
+@dataclass(frozen=True)
+class PcaPrefixSearch:
+    projection: FittedPcaProjection
+    candidate_dimensions: tuple[int, ...]
+    k_values: tuple[int, ...]
+    cumulative_variance: np.ndarray
+    reference_neighbors: dict[int, np.ndarray]
+
+    @property
+    def fitted_dimension(self) -> int:
+        return int(self.projection.pca.n_components_)
+
+
+@dataclass(frozen=True)
+class PcaPrefixEvaluation(Generic[CandidatePayload]):
+    candidate: PcaDimensionCandidate
+    payload: CandidatePayload
+
+
+@dataclass(frozen=True)
+class PcaPrefixSearchResult(Generic[CandidatePayload]):
+    selected_dimension: int
+    selection_reason: str
+    evaluations: tuple[PcaPrefixEvaluation[CandidatePayload], ...]
+    selected_payload: CandidatePayload
+
+
 def validate_dimension_selection_inputs(
     X: np.ndarray,
     *,
@@ -82,11 +118,7 @@ def validate_dimension_selection_inputs(
     k_values: Sequence[int],
     minimum_preservation_gain: float,
 ) -> tuple[np.ndarray, tuple[int, ...], int, tuple[int, ...]]:
-    X = np.asarray(X, dtype=np.float64)
-    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
-        raise ValueError("X must be a non-empty 2D array")
-    if not np.all(np.isfinite(X)):
-        raise ValueError("X must contain only finite values")
+    X = validate_embedding_matrix(X)
     if max_components < 1:
         raise ValueError("max_components must be at least 1")
     if min_components < 1:
@@ -156,6 +188,133 @@ def mean_neighbor_preservation(
     return float(preserved / (reference_neighbors.shape[0] * k))
 
 
+def prepare_pca_prefix_search(
+    X: np.ndarray,
+    *,
+    max_components: int,
+    min_components: int,
+    component_step: int,
+    k_values: Sequence[int],
+    minimum_preservation_gain: float,
+    seed: int,
+) -> PcaPrefixSearch:
+    """Fit the shared maximum-width PCA and reference neighborhoods once."""
+
+    (
+        X,
+        normalized_k_values,
+        fitted_dimension,
+        candidate_dimensions,
+    ) = validate_dimension_selection_inputs(
+        X,
+        max_components=max_components,
+        min_components=min_components,
+        component_step=component_step,
+        k_values=k_values,
+        minimum_preservation_gain=minimum_preservation_gain,
+    )
+    projection = fit_normalized_pca_projection(
+        X,
+        n_components=fitted_dimension,
+        seed=seed,
+        svd_solver="full",
+    )
+    return PcaPrefixSearch(
+        projection=projection,
+        candidate_dimensions=candidate_dimensions,
+        k_values=normalized_k_values,
+        cumulative_variance=np.cumsum(projection.pca.explained_variance_ratio_),
+        reference_neighbors={
+            k: neighbor_indices(projection.normalized_input, k)
+            for k in normalized_k_values
+        },
+    )
+
+
+def evaluate_pca_prefixes(
+    search: PcaPrefixSearch,
+    candidate_factory: Callable[
+        [int, np.ndarray],
+        tuple[np.ndarray, CandidatePayload],
+    ],
+    *,
+    minimum_preservation_gain: float,
+    neighbor_metric: str,
+    stop_at_plateau: bool,
+) -> PcaPrefixSearchResult[CandidatePayload]:
+    """Score PCA prefixes and select the last dimension before a plateau."""
+
+    evaluations: list[PcaPrefixEvaluation[CandidatePayload]] = []
+    selected_evaluation: PcaPrefixEvaluation[CandidatePayload] | None = None
+    previous_evaluation: PcaPrefixEvaluation[CandidatePayload] | None = None
+
+    for dimension in search.candidate_dimensions:
+        pca_features = search.projection.normalized_prefix(dimension)
+        score_features, payload = candidate_factory(dimension, pca_features)
+        score_features = validate_embedding_matrix(
+            score_features,
+            name="candidate_features",
+        )
+        if score_features.shape[0] != search.projection.normalized_input.shape[0]:
+            raise ValueError("candidate_features must contain one row per input")
+
+        preservation_by_k = {
+            k: mean_neighbor_preservation(
+                search.reference_neighbors[k],
+                neighbor_indices(score_features, k, metric=neighbor_metric),
+            )
+            for k in search.k_values
+        }
+        mean_preservation = float(np.mean(list(preservation_by_k.values())))
+        explained_variance = float(search.cumulative_variance[dimension - 1])
+        previous_candidate = (
+            None if previous_evaluation is None else previous_evaluation.candidate
+        )
+        candidate = PcaDimensionCandidate(
+            dimension=dimension,
+            cumulative_explained_variance=explained_variance,
+            knn_preservation_by_k=preservation_by_k,
+            mean_knn_preservation=mean_preservation,
+            explained_variance_gain=(
+                None
+                if previous_candidate is None
+                else explained_variance
+                - previous_candidate.cumulative_explained_variance
+            ),
+            knn_preservation_gain=(
+                None
+                if previous_candidate is None
+                else mean_preservation - previous_candidate.mean_knn_preservation
+            ),
+        )
+        evaluation = PcaPrefixEvaluation(candidate=candidate, payload=payload)
+        evaluations.append(evaluation)
+        if (
+            selected_evaluation is None
+            and previous_evaluation is not None
+            and candidate.knn_preservation_gain is not None
+            and candidate.knn_preservation_gain < minimum_preservation_gain
+        ):
+            selected_evaluation = previous_evaluation
+            if stop_at_plateau:
+                break
+        previous_evaluation = evaluation
+
+    if not evaluations:
+        raise RuntimeError("No PCA candidate was evaluated")
+    if selected_evaluation is None:
+        selected_evaluation = evaluations[-1]
+        selection_reason = ALL_GAINS_REASON
+    else:
+        selection_reason = PLATEAU_REASON
+    return PcaPrefixSearchResult(
+        selected_dimension=selected_evaluation.candidate.dimension,
+        selection_reason=selection_reason,
+        evaluations=tuple(evaluations),
+        selected_payload=selected_evaluation.payload,
+    )
+
+
 def select_pca_dimension(
     X: np.ndarray,
     *,
@@ -177,106 +336,33 @@ def select_pca_dimension(
     evaluated dimension is selected.
     """
 
-    (
-        X,
-        normalized_k_values,
-        fitted_dimension,
-        candidate_dimensions,
-    ) = validate_dimension_selection_inputs(
+    search = prepare_pca_prefix_search(
         X,
         max_components=max_components,
         min_components=min_components,
         component_step=component_step,
         k_values=k_values,
         minimum_preservation_gain=minimum_preservation_gain,
+        seed=seed,
     )
-
-    normalized_input = normalize(X, norm="l2")
-    pca = PCA(
-        n_components=fitted_dimension,
-        svd_solver="full",
-        random_state=seed,
-    ).fit(normalized_input)
-    maximum_projection = pca.transform(normalized_input)
-    cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
-
-    reference_neighbors = {
-        k: neighbor_indices(normalized_input, k) for k in normalized_k_values
-    }
-    candidates: list[PcaDimensionCandidate] = []
-    previous_variance: float | None = None
-    previous_preservation: float | None = None
-    previous_dimension: int | None = None
-    selected_dimension: int | None = None
-
-    for dimension in candidate_dimensions:
-        candidate_features = normalize(
-            maximum_projection[:, :dimension],
-            norm="l2",
-        )
-        preservation_by_k = {
-            k: mean_neighbor_preservation(
-                reference_neighbors[k],
-                neighbor_indices(candidate_features, k),
-            )
-            for k in normalized_k_values
-        }
-        mean_preservation = float(np.mean(list(preservation_by_k.values())))
-        explained_variance = float(cumulative_variance[dimension - 1])
-        variance_gain = (
-            None
-            if previous_variance is None
-            else explained_variance - previous_variance
-        )
-        preservation_gain = (
-            None
-            if previous_preservation is None
-            else mean_preservation - previous_preservation
-        )
-        candidates.append(
-            PcaDimensionCandidate(
-                dimension=dimension,
-                cumulative_explained_variance=explained_variance,
-                knn_preservation_by_k=preservation_by_k,
-                mean_knn_preservation=mean_preservation,
-                explained_variance_gain=variance_gain,
-                knn_preservation_gain=preservation_gain,
-            )
-        )
-        if (
-            selected_dimension is None
-            and preservation_gain is not None
-            and preservation_gain < minimum_preservation_gain
-        ):
-            if previous_dimension is None:
-                raise RuntimeError("Previous PCA dimension is unavailable")
-            selected_dimension = previous_dimension
-
-        previous_variance = explained_variance
-        previous_preservation = mean_preservation
-        previous_dimension = dimension
-
-    if selected_dimension is None:
-        selected_dimension = candidate_dimensions[-1]
-        selection_reason = "all_gains_meet_minimum_use_maximum_dimension"
-    else:
-        selection_reason = "first_below_minimum_gain_use_previous_dimension"
-
-    selected_features = normalize(
-        maximum_projection[:, :selected_dimension],
-        norm="l2",
+    result = evaluate_pca_prefixes(
+        search,
+        lambda _dimension, features: (features, features),
+        minimum_preservation_gain=minimum_preservation_gain,
+        neighbor_metric="cosine",
+        stop_at_plateau=False,
     )
     return PcaDimensionSelection(
-        selected_dimension=selected_dimension,
-        selection_reason=selection_reason,
-        fitted_dimension=fitted_dimension,
-        candidates=tuple(candidates),
-        pca=pca,
-        selected_features=selected_features,
-        normalized_input=normalized_input,
+        selected_dimension=result.selected_dimension,
+        selection_reason=result.selection_reason,
+        fitted_dimension=search.fitted_dimension,
+        candidates=tuple(evaluation.candidate for evaluation in result.evaluations),
+        pca=search.projection.pca,
+        selected_features=result.selected_payload,
+        normalized_input=search.projection.normalized_input,
         min_components=min_components,
         component_step=component_step,
-        k_values=normalized_k_values,
+        k_values=search.k_values,
         minimum_preservation_gain=minimum_preservation_gain,
     )
 
@@ -287,15 +373,11 @@ def transform_with_selected_dimension(
 ) -> np.ndarray:
     """Apply the fitted maximum-width PCA and selected prefix to new rows."""
 
-    X = np.asarray(X, dtype=np.float64)
-    if X.ndim != 2 or X.shape[0] == 0:
-        raise ValueError("X must be a non-empty 2D array")
-    if X.shape[1] != selection.pca.n_features_in_:
-        raise ValueError("X has a different embedding dimension from the fitted PCA")
-    if not np.all(np.isfinite(X)):
-        raise ValueError("X must contain only finite values")
-    projected = selection.pca.transform(normalize(X, norm="l2"))
-    return normalize(projected[:, : selection.selected_dimension], norm="l2")
+    return transform_normalized_pca_projection(
+        X,
+        selection.pca,
+        dimension=selection.selected_dimension,
+    )
 
 
 def _print_selection(selection: PcaDimensionSelection) -> None:

@@ -8,7 +8,6 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import normalize
 
 from cluster_visualization import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -23,10 +22,10 @@ from pca_dimension_selection import (
     DEFAULT_MAX_COMPONENTS,
     DEFAULT_MINIMUM_PRESERVATION_GAIN,
     PcaDimensionCandidate,
-    mean_neighbor_preservation,
-    neighbor_indices,
-    validate_dimension_selection_inputs,
+    evaluate_pca_prefixes,
+    prepare_pca_prefix_search,
 )
+from pca_projection import transform_normalized_pca_projection
 
 
 UmapFactory = Callable[..., Any]
@@ -89,27 +88,24 @@ def select_visualization_pca_dimension(
 ) -> VisualizationPcaDimensionSelection:
     """Select the PCA prefix used before UMAP-2 visualization.
 
-    PCA is fitted once at the maximum supported width. Each 32-dimensional
+    PCA is fitted once at the maximum supported width. Each configured
     prefix is normalized and passed through an identically configured UMAP-2.
     The score is k-NN preservation between the normalized original embeddings
     and the two-dimensional UMAP coordinates. When the score gain first falls
     below the configured minimum, the previous PCA dimension is selected.
     """
 
-    (
-        X,
-        normalized_k_values,
-        fitted_dimension,
-        candidate_dimensions,
-    ) = validate_dimension_selection_inputs(
+    search = prepare_pca_prefix_search(
         X,
         max_components=max_components,
         min_components=min_components,
         component_step=component_step,
         k_values=k_values,
         minimum_preservation_gain=minimum_preservation_gain,
+        seed=seed,
     )
-    if n_neighbors < 2 or n_neighbors >= X.shape[0]:
+    sample_count = search.projection.normalized_input.shape[0]
+    if n_neighbors < 2 or n_neighbors >= sample_count:
         raise ValueError("n_neighbors must be between 2 and n_samples - 1")
     if min_dist < 0.0:
         raise ValueError("min_dist must be non-negative")
@@ -120,20 +116,8 @@ def select_visualization_pca_dimension(
         cluster_target,
         cluster_target_metric,
         cluster_target_weight,
-        n_samples=X.shape[0],
+        n_samples=sample_count,
     )
-    normalized_input = normalize(X, norm="l2")
-    pca = PCA(
-        n_components=fitted_dimension,
-        svd_solver="full",
-        random_state=seed,
-    ).fit(normalized_input)
-    maximum_projection = pca.transform(normalized_input)
-    cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
-    reference_neighbors = {
-        k: neighbor_indices(normalized_input, k, metric="cosine")
-        for k in normalized_k_values
-    }
 
     umap_configuration = {
         "n_components": 2,
@@ -146,18 +130,11 @@ def select_visualization_pca_dimension(
         "target_metric": target_metric,
         "target_weight": target_weight,
     }
-    candidates: list[PcaDimensionCandidate] = []
-    previous_dimension: int | None = None
-    previous_variance: float | None = None
-    previous_preservation: float | None = None
-    previous_umap: Any | None = None
-    previous_coordinates: np.ndarray | None = None
-    selected_dimension: int | None = None
-    selected_umap: Any | None = None
-    selected_coordinates: np.ndarray | None = None
 
-    for dimension in candidate_dimensions:
-        pca_features = normalize(maximum_projection[:, :dimension], norm="l2")
+    def project_candidate(
+        _dimension: int,
+        pca_features: np.ndarray,
+    ) -> tuple[np.ndarray, tuple[Any, np.ndarray]]:
         reducer = umap_factory(
             n_components=2,
             n_neighbors=n_neighbors,
@@ -173,80 +150,30 @@ def select_visualization_pca_dimension(
             reducer.fit_transform(pca_features, y=target),
             dtype=np.float64,
         )
-        if coordinates.shape != (X.shape[0], 2):
+        if coordinates.shape != (sample_count, 2):
             raise ValueError("UMAP must return one two-dimensional row per sample")
-        preservation_by_k = {
-            k: mean_neighbor_preservation(
-                reference_neighbors[k],
-                neighbor_indices(coordinates, k, metric="euclidean"),
-            )
-            for k in normalized_k_values
-        }
-        mean_preservation = float(np.mean(list(preservation_by_k.values())))
-        explained_variance = float(cumulative_variance[dimension - 1])
-        variance_gain = (
-            None
-            if previous_variance is None
-            else explained_variance - previous_variance
-        )
-        preservation_gain = (
-            None
-            if previous_preservation is None
-            else mean_preservation - previous_preservation
-        )
-        candidates.append(
-            PcaDimensionCandidate(
-                dimension=dimension,
-                cumulative_explained_variance=explained_variance,
-                knn_preservation_by_k=preservation_by_k,
-                mean_knn_preservation=mean_preservation,
-                explained_variance_gain=variance_gain,
-                knn_preservation_gain=preservation_gain,
-            )
-        )
-        if (
-            selected_dimension is None
-            and preservation_gain is not None
-            and preservation_gain < minimum_preservation_gain
-        ):
-            if (
-                previous_dimension is None
-                or previous_umap is None
-                or previous_coordinates is None
-            ):
-                raise RuntimeError("Previous visualization candidate is unavailable")
-            selected_dimension = previous_dimension
-            selected_umap = previous_umap
-            selected_coordinates = previous_coordinates
-            break
+        return coordinates, (reducer, coordinates)
 
-        previous_dimension = dimension
-        previous_variance = explained_variance
-        previous_preservation = mean_preservation
-        previous_umap = reducer
-        previous_coordinates = coordinates
-
-    if selected_dimension is None:
-        selected_dimension = candidate_dimensions[-1]
-        selected_umap = previous_umap
-        selected_coordinates = previous_coordinates
-        selection_reason = "all_gains_meet_minimum_use_maximum_dimension"
-    else:
-        selection_reason = "first_below_minimum_gain_use_previous_dimension"
-    if selected_umap is None or selected_coordinates is None:
-        raise RuntimeError("No visualization candidate was evaluated")
+    result = evaluate_pca_prefixes(
+        search,
+        project_candidate,
+        minimum_preservation_gain=minimum_preservation_gain,
+        neighbor_metric="euclidean",
+        stop_at_plateau=True,
+    )
+    selected_umap, selected_coordinates = result.selected_payload
 
     return VisualizationPcaDimensionSelection(
-        selected_dimension=selected_dimension,
-        selection_reason=selection_reason,
-        fitted_dimension=fitted_dimension,
-        candidates=tuple(candidates),
-        pca=pca,
+        selected_dimension=result.selected_dimension,
+        selection_reason=result.selection_reason,
+        fitted_dimension=search.fitted_dimension,
+        candidates=tuple(evaluation.candidate for evaluation in result.evaluations),
+        pca=search.projection.pca,
         umap=selected_umap,
         selected_coordinates=selected_coordinates,
         min_components=min_components,
         component_step=component_step,
-        k_values=normalized_k_values,
+        k_values=search.k_values,
         minimum_preservation_gain=minimum_preservation_gain,
         umap_configuration=umap_configuration,
     )
@@ -258,17 +185,10 @@ def transform_with_selected_visualization(
 ) -> np.ndarray:
     """Transform new embeddings with the selected PCA prefix and UMAP."""
 
-    X = np.asarray(X, dtype=np.float64)
-    if X.ndim != 2 or X.shape[0] == 0:
-        raise ValueError("X must be a non-empty 2D array")
-    if X.shape[1] != selection.pca.n_features_in_:
-        raise ValueError("X has a different embedding dimension from the fitted PCA")
-    if not np.all(np.isfinite(X)):
-        raise ValueError("X must contain only finite values")
-    projected = selection.pca.transform(normalize(X, norm="l2"))
-    features = normalize(
-        projected[:, : selection.selected_dimension],
-        norm="l2",
+    features = transform_normalized_pca_projection(
+        X,
+        selection.pca,
+        dimension=selection.selected_dimension,
     )
     return np.asarray(selection.umap.transform(features), dtype=np.float64)
 

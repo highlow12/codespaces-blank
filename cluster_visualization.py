@@ -24,9 +24,12 @@ import numpy as np
 import pandas as pd
 from matplotlib.patches import Patch
 from sklearn.decomposition import PCA
-from sklearn.preprocessing import normalize
 
 from embedding_data import load_embeddings_from_json
+from pca_projection import (
+    fit_normalized_pca_projection,
+    transform_normalized_pca_projection,
+)
 
 
 _LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\d+)_cluster$")
@@ -68,33 +71,20 @@ def project_embeddings(
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> np.ndarray:
-    if pca_components < 1:
-        raise ValueError("pca_components must be at least 1")
-    normalized = normalize(embeddings)
-    component_count = min(pca_components, normalized.shape[0], normalized.shape[1])
-    pca_features = PCA(
-        n_components=component_count,
-        random_state=seed,
-    ).fit_transform(normalized)
-    pca_features = normalize(pca_features)
-    target, target_metric, target_weight = _validate_cluster_target(
-        cluster_target,
-        cluster_target_metric,
-        cluster_target_weight,
-        n_samples=embeddings.shape[0],
-    )
-    reducer = _make_umap_reducer(
-        n_components=2,
+    _, _, coordinates = fit_projection_model(
+        embeddings,
+        seed=seed,
+        pca_components=pca_components,
         n_neighbors=n_neighbors,
         min_dist=min_dist,
         metric=metric,
         spread=spread,
         densmap=densmap,
-        random_state=seed,
-        target_metric=target_metric,
-        target_weight=target_weight,
+        cluster_target=cluster_target,
+        cluster_target_metric=cluster_target_metric,
+        cluster_target_weight=cluster_target_weight,
     )
-    return reducer.fit_transform(pca_features, y=target)
+    return coordinates
 
 
 def fit_projection_model(
@@ -113,19 +103,17 @@ def fit_projection_model(
 ) -> tuple[PCA, Any, np.ndarray]:
     """Fit PCA+UMAP once and return the model for future point transforms."""
 
-    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
-        raise ValueError("embeddings must be a non-empty 2D array")
-    if pca_components < 1:
-        raise ValueError("pca_components must be at least 1")
-    normalized = normalize(embeddings)
-    component_count = min(pca_components, normalized.shape[0], normalized.shape[1])
-    pca = PCA(n_components=component_count, random_state=seed).fit(normalized)
-    pca_features = normalize(pca.transform(normalized))
+    fitted = fit_normalized_pca_projection(
+        embeddings,
+        n_components=pca_components,
+        seed=seed,
+        name="embeddings",
+    )
     target, target_metric, target_weight = _validate_cluster_target(
         cluster_target,
         cluster_target_metric,
         cluster_target_weight,
-        n_samples=embeddings.shape[0],
+        n_samples=fitted.normalized_input.shape[0],
     )
     reducer = _make_umap_reducer(
         n_components=2,
@@ -138,8 +126,8 @@ def fit_projection_model(
         target_metric=target_metric,
         target_weight=target_weight,
     )
-    reduced = reducer.fit_transform(pca_features, y=target)
-    return pca, reducer, reduced
+    reduced = reducer.fit_transform(fitted.normalized_prefix(), y=target)
+    return fitted.pca, reducer, reduced
 
 
 def _validate_cluster_target(
@@ -220,10 +208,11 @@ def transform_projection(
 ) -> np.ndarray:
     """Project a new batch using a previously fitted PCA+UMAP model."""
 
-    if embeddings.ndim != 2 or embeddings.shape[0] == 0:
-        raise ValueError("embeddings must be a non-empty 2D array")
-    normalized = normalize(embeddings)
-    pca_features = normalize(pca.transform(normalized))
+    pca_features = transform_normalized_pca_projection(
+        embeddings,
+        pca,
+        name="embeddings",
+    )
     reduced = np.asarray(reducer.transform(pca_features), dtype=np.float64)
     if reduced.ndim != 2 or reduced.shape[1] != 2:
         raise ValueError("UMAP transform must return two-dimensional coordinates")
@@ -700,7 +689,6 @@ def categorical_color_map(values: np.ndarray) -> dict[str, Any]:
 def _plot_groups(
     axis: Any,
     reduced: np.ndarray,
-    metadata: pd.DataFrame,
     values: np.ndarray,
     color_map: dict[str, Any],
     *,
@@ -748,6 +736,53 @@ def _resolve_color_values(
     return metadata[column].astype(str).to_numpy(), color_by, hierarchical
 
 
+def _prepare_plot_style(
+    metadata: pd.DataFrame,
+    color_by: str,
+) -> tuple[pd.DataFrame, np.ndarray, str, bool, dict[str, Any]]:
+    prepared = prepare_visual_assignments(metadata)
+    values, color_mode, hierarchical = _resolve_color_values(prepared, color_by)
+    color_map = (
+        hierarchical_color_map(values)
+        if hierarchical
+        else categorical_color_map(values)
+    )
+    return prepared, values, color_mode, hierarchical, color_map
+
+
+def _save_cluster_scatter(
+    coordinates: np.ndarray,
+    values: np.ndarray,
+    color_map: dict[str, Any],
+    output_path: Path,
+    *,
+    title: str,
+) -> None:
+    fig, axis = plt.subplots(figsize=(12, 9))
+    handles = _plot_groups(
+        axis,
+        coordinates,
+        values,
+        color_map,
+        point_size=18,
+        alpha=0.85,
+        include_labels=True,
+    )
+    axis.set_title(title)
+    axis.set_xlabel("UMAP-1")
+    axis.set_ylabel("UMAP-2")
+    axis.legend(
+        handles=handles,
+        loc="best",
+        frameon=True,
+        title="cluster label (count)",
+    )
+    fig.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(output_path, dpi=220)
+    plt.close(fig)
+
+
 def make_cluster_plot(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
@@ -764,7 +799,10 @@ def make_cluster_plot(
     densmap: bool,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
-    metadata = prepare_visual_assignments(metadata)
+    metadata, values, color_mode, hierarchical, color_map = _prepare_plot_style(
+        metadata,
+        color_by,
+    )
     cluster_target, cluster_target_metric, target_description = (
         build_cluster_supervision(metadata)
     )
@@ -781,45 +819,21 @@ def make_cluster_plot(
         cluster_target_metric=cluster_target_metric,
         cluster_target_weight=cluster_target_weight,
     )
-    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
-    color_map = (
-        hierarchical_color_map(values)
-        if hierarchical
-        else categorical_color_map(values)
-    )
-
-    fig, axis = plt.subplots(figsize=(12, 9))
-    handles = _plot_groups(
-        axis,
-        reduced,
-        metadata,
-        values,
-        color_map,
-        point_size=18,
-        alpha=0.85,
-        include_labels=True,
-    )
     target_suffix = (
         f" | weak target: {target_description}, w={cluster_target_weight:.2f}"
         if cluster_target is not None and cluster_target_weight > 0.0
         else ""
     )
-    axis.set_title(
-        f"{title} [PCA-{pca_components} -> UMAP-2 | {color_mode}"
-        f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+    _save_cluster_scatter(
+        reduced,
+        values,
+        color_map,
+        output_path,
+        title=(
+            f"{title} [PCA-{pca_components} -> UMAP-2 | {color_mode}"
+            f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+        ),
     )
-    axis.set_xlabel("UMAP-1")
-    axis.set_ylabel("UMAP-2")
-    axis.legend(
-        handles=handles,
-        loc="best",
-        frameon=True,
-        title="cluster label (count)",
-    )
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=220)
-    plt.close(fig)
 
 
 def make_fixed_coordinate_plot(
@@ -839,46 +853,25 @@ def make_fixed_coordinate_plot(
     if len(metadata) != coordinates.shape[0]:
         raise ValueError("metadata and coordinates must have the same row count")
 
-    metadata = prepare_visual_assignments(metadata)
-    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
-    color_map = (
-        hierarchical_color_map(values)
-        if hierarchical
-        else categorical_color_map(values)
-    )
-
-    fig, axis = plt.subplots(figsize=(12, 9))
-    handles = _plot_groups(
-        axis,
-        coordinates,
+    _, values, color_mode, hierarchical, color_map = _prepare_plot_style(
         metadata,
-        values,
-        color_map,
-        point_size=18,
-        alpha=0.85,
-        include_labels=True,
+        color_by,
     )
     target_suffix = (
         f" | weak cluster target, w={cluster_target_weight:.2f}"
         if cluster_target_weight is not None and cluster_target_weight > 0.0
         else ""
     )
-    axis.set_title(
-        f"{title} [fixed PCA-{pca_components} -> UMAP-2 | {color_mode}"
-        f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+    _save_cluster_scatter(
+        coordinates,
+        values,
+        color_map,
+        output_path,
+        title=(
+            f"{title} [fixed PCA-{pca_components} -> UMAP-2 | {color_mode}"
+            f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+        ),
     )
-    axis.set_xlabel("UMAP-1")
-    axis.set_ylabel("UMAP-2")
-    axis.legend(
-        handles=handles,
-        loc="best",
-        frameon=True,
-        title="cluster label (count)",
-    )
-    fig.tight_layout()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(output_path, dpi=220)
-    plt.close(fig)
 
 
 def make_comparison_plot(
@@ -892,15 +885,12 @@ def make_comparison_plot(
     color_by: str,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
-    metadata = prepare_visual_assignments(metadata)
+    metadata, values, color_mode, hierarchical, color_map = _prepare_plot_style(
+        metadata,
+        color_by,
+    )
     cluster_target, cluster_target_metric, target_description = (
         build_cluster_supervision(metadata)
-    )
-    values, color_mode, hierarchical = _resolve_color_values(metadata, color_by)
-    color_map = (
-        hierarchical_color_map(values)
-        if hierarchical
-        else categorical_color_map(values)
     )
     presets = compact_umap_presets()
     rows = int(np.ceil(len(presets) / 2))
@@ -924,7 +914,6 @@ def make_comparison_plot(
         panel_handles = _plot_groups(
             axis,
             reduced,
-            metadata,
             values,
             color_map,
             point_size=12,

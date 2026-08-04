@@ -17,14 +17,25 @@ from clustering_types import (
     HierarchicalResult,
     HierarchyNodeModel,
 )
+from hierarchical_assignments import (
+    DOCUMENT_TYPE_BOUNDARY,
+    DOCUMENT_TYPE_CORE,
+    DOCUMENT_TYPE_NOISE,
+    build_hierarchical_assignments,
+    path_membership_column,
+)
+from pca_projection import (
+    fit_normalized_pca_projection,
+    transform_normalized_pca_projection,
+)
 
 
 DEFAULT_CLUSTERING_PCA_COMPONENTS = 256
 DEFAULT_MAX_MEMBERSHIP_GAP = 0.10
 DEFAULT_FORCED_NOISE_RATIO = 0.01
-DOCUMENT_TYPE_CORE = "core"
-DOCUMENT_TYPE_BOUNDARY = "boundary"
-DOCUMENT_TYPE_NOISE = "noise"
+FCM_SELECTION_METHODS = frozenset(
+    {"silhouette", "knee", "xie_beni", "multi_metric"}
+)
 
 
 def spherical_fcm(
@@ -92,11 +103,19 @@ def spherical_fcm(
     )
 
 
+def _fcm_metric_inputs(
+    X: np.ndarray,
+    result: FCMResult,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    normalized = normalize(X, norm="l2")
+    memberships = _validated_memberships(result)
+    centers = np.asarray(result.centers, dtype=np.float64)
+    distances = euclidean_distances(normalized, centers)
+    return memberships, centers, distances
+
+
 def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
-    X = normalize(X, norm="l2")
-    memberships = result.memberships
-    centers = result.centers
-    distances = euclidean_distances(X, centers)
+    memberships, centers, distances = _fcm_metric_inputs(X, result)
     numerator = np.sum((memberships**2) * (distances**2))
     center_distances = euclidean_distances(centers, centers)
     np.fill_diagonal(center_distances, np.inf)
@@ -104,12 +123,17 @@ def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
     return float(numerator / max(denominator, 1e-12))
 
 
-def partition_coefficient(result: FCMResult) -> float:
-    """Return the FCM partition coefficient (higher is crisper)."""
-
+def _validated_memberships(result: FCMResult) -> np.ndarray:
     memberships = np.asarray(result.memberships, dtype=np.float64)
     if memberships.ndim != 2 or memberships.shape[0] == 0:
         raise ValueError("memberships must be a non-empty 2D array")
+    return memberships
+
+
+def partition_coefficient(result: FCMResult) -> float:
+    """Return the FCM partition coefficient (higher is crisper)."""
+
+    memberships = _validated_memberships(result)
     return float(np.mean(np.sum(memberships**2, axis=1)))
 
 
@@ -127,9 +151,7 @@ def modified_partition_coefficient(result: FCMResult) -> float:
 def partition_entropy(result: FCMResult) -> float:
     """Return fuzzy partition entropy (lower is crisper)."""
 
-    memberships = np.asarray(result.memberships, dtype=np.float64)
-    if memberships.ndim != 2 or memberships.shape[0] == 0:
-        raise ValueError("memberships must be a non-empty 2D array")
+    memberships = _validated_memberships(result)
     safe_memberships = np.maximum(memberships, 1e-12)
     return float(-np.mean(np.sum(memberships * np.log(safe_memberships), axis=1)))
 
@@ -149,10 +171,7 @@ def fuzzy_silhouette_proxy(
     *,
     m: float = 2.0,
 ) -> float:
-    X = normalize(X, norm="l2")
-    memberships = result.memberships
-    centers = result.centers
-    distances = euclidean_distances(X, centers)
+    memberships, _centers, distances = _fcm_metric_inputs(X, result)
     weights = memberships**m
     a = np.sum(weights * distances, axis=1) / np.sum(weights, axis=1)
     b = np.partition(distances, 1, axis=1)[:, 1]
@@ -184,28 +203,18 @@ def fit_pca_normalized_features(
 ) -> tuple[np.ndarray, PCA]:
     """Fit the PCA representation and return its transformer for later batches."""
 
-    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
-        raise ValueError("X must be a non-empty 2D array")
-    if n_components < 1:
-        raise ValueError("n_components must be at least 1")
-
-    component_count = min(n_components, X.shape[0], X.shape[1])
-    normalized_input = normalize(X, norm="l2")
-    pca = PCA(n_components=component_count, random_state=seed).fit(
-        normalized_input
+    fitted = fit_normalized_pca_projection(
+        X,
+        n_components=n_components,
+        seed=seed,
     )
-    projected = pca.transform(normalized_input)
-    return normalize(projected, norm="l2"), pca
+    return fitted.normalized_prefix(), fitted.pca
 
 
 def transform_pca_normalized_features(X: np.ndarray, pca: PCA) -> np.ndarray:
     """Transform a future batch with a previously fitted PCA representation."""
 
-    if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
-        raise ValueError("X must be a non-empty 2D array")
-    normalized_input = normalize(X, norm="l2")
-    projected = pca.transform(normalized_input)
-    return normalize(projected, norm="l2")
+    return transform_normalized_pca_projection(X, pca)
 
 
 def fcm_memberships_from_centers(
@@ -231,15 +240,6 @@ def fcm_memberships_from_centers(
     ratios = (distances[:, :, None] / distances[:, None, :]) ** exponent
     memberships = 1.0 / ratios.sum(axis=2)
     return memberships, distances
-
-
-def path_membership_column(path: str) -> str:
-    """Return a stable assignment-column name for a hierarchy path."""
-
-    if not path:
-        raise ValueError("path membership columns require a non-root path")
-    parts = path.split("/")
-    return f"level_{len(parts)}_path_membership_{'_'.join(parts)}"
 
 
 def conditional_memberships_from_projected(
@@ -432,6 +432,38 @@ def forced_noise_mask(
     order = np.lexsort((row_indices, ids.astype(str), -scores))
     selected[order[:selected_count]] = True
     return selected
+
+
+def merge_forced_noise(
+    natural_noise: np.ndarray,
+    noise_scores: np.ndarray,
+    document_ids: np.ndarray,
+    document_types: np.ndarray,
+    noise_level: np.ndarray,
+    *,
+    forced_noise_ratio: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Merge the global forced-noise quota into natural classifications."""
+
+    forced_noise = forced_noise_mask(
+        noise_scores,
+        document_ids,
+        forced_noise_ratio=forced_noise_ratio,
+    )
+    natural_noise = np.asarray(natural_noise, dtype=bool)
+    combined_noise = natural_noise | forced_noise
+    forced_only = forced_noise & ~natural_noise
+    updated_types = np.asarray(document_types, dtype=object).copy()
+    updated_types[forced_noise] = DOCUMENT_TYPE_NOISE
+    updated_noise_level = np.asarray(noise_level, dtype=int).copy()
+    updated_noise_level[forced_only] = 0
+    return (
+        combined_noise,
+        forced_noise,
+        forced_only,
+        updated_types,
+        updated_noise_level,
+    )
 
 
 def fcm_document_types(
@@ -670,6 +702,38 @@ def _choose_knee_candidate(candidates: list[FCMKCandidate]) -> FCMKCandidate:
     return candidates[int(best_indices[0])]
 
 
+def _validate_fcm_selection_parameters(
+    *,
+    min_clusters: int,
+    max_clusters: int,
+    min_child_size: int,
+    min_membership: float,
+    max_membership_gap: float,
+    selection_method: str,
+    min_xb_relative_improvement: float,
+    xb_worsening_patience: int,
+) -> None:
+    if not 0.0 <= min_membership <= 1.0:
+        raise ValueError("min_membership must be between 0 and 1")
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
+    if min_clusters < 2:
+        raise ValueError("min_clusters must be at least 2")
+    if max_clusters < min_clusters:
+        raise ValueError("max_clusters must be at least min_clusters")
+    if min_child_size < 2:
+        raise ValueError("min_child_size must be at least 2")
+    if selection_method not in FCM_SELECTION_METHODS:
+        raise ValueError(
+            "selection_method must be 'silhouette', 'knee', 'xie_beni', "
+            "or 'multi_metric'"
+        )
+    if not 0.0 <= min_xb_relative_improvement <= 1.0:
+        raise ValueError("min_xb_relative_improvement must be between 0 and 1")
+    if xb_worsening_patience < 0:
+        raise ValueError("xb_worsening_patience must be non-negative")
+
+
 def select_fcm_cluster_count(
     X: np.ndarray,
     *,
@@ -695,30 +759,16 @@ def select_fcm_cluster_count(
     are retained for reporting.
     """
 
-    if not 0.0 <= min_membership <= 1.0:
-        raise ValueError("min_membership must be between 0 and 1")
-    if not 0.0 <= max_membership_gap <= 1.0:
-        raise ValueError("max_membership_gap must be between 0 and 1")
-    if min_clusters < 2:
-        raise ValueError("min_clusters must be at least 2")
-    if max_clusters < min_clusters:
-        raise ValueError("max_clusters must be at least min_clusters")
-    if min_child_size < 2:
-        raise ValueError("min_child_size must be at least 2")
-    if selection_method not in {
-        "silhouette",
-        "knee",
-        "xie_beni",
-        "multi_metric",
-    }:
-        raise ValueError(
-            "selection_method must be 'silhouette', 'knee', 'xie_beni', "
-            "or 'multi_metric'"
-        )
-    if not 0.0 <= min_xb_relative_improvement <= 1.0:
-        raise ValueError("min_xb_relative_improvement must be between 0 and 1")
-    if xb_worsening_patience < 0:
-        raise ValueError("xb_worsening_patience must be non-negative")
+    _validate_fcm_selection_parameters(
+        min_clusters=min_clusters,
+        max_clusters=max_clusters,
+        min_child_size=min_child_size,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+        selection_method=selection_method,
+        min_xb_relative_improvement=min_xb_relative_improvement,
+        xb_worsening_patience=xb_worsening_patience,
+    )
 
     Xn = normalize(X, norm="l2")
     node_size = Xn.shape[0]
@@ -981,32 +1031,18 @@ def run_hierarchical_pca_fcm(
         raise ValueError("max_depth must be at least 1")
     if min_node_size < min_child_size:
         raise ValueError("min_node_size must be at least min_child_size")
-    if min_child_size < 2:
-        raise ValueError("min_child_size must be at least 2")
-    if min_clusters < 2:
-        raise ValueError("min_clusters must be at least 2")
-    if max_clusters < min_clusters:
-        raise ValueError("max_clusters must be at least min_clusters")
-    if not 0.0 <= min_membership <= 1.0:
-        raise ValueError("min_membership must be between 0 and 1")
-    if not 0.0 <= max_membership_gap <= 1.0:
-        raise ValueError("max_membership_gap must be between 0 and 1")
+    _validate_fcm_selection_parameters(
+        min_clusters=min_clusters,
+        max_clusters=max_clusters,
+        min_child_size=min_child_size,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+        selection_method=selection_method,
+        min_xb_relative_improvement=min_xb_relative_improvement,
+        xb_worsening_patience=xb_worsening_patience,
+    )
     if not 0.0 <= forced_noise_ratio <= 1.0:
         raise ValueError("forced_noise_ratio must be between 0 and 1")
-    if selection_method not in {
-        "silhouette",
-        "knee",
-        "xie_beni",
-        "multi_metric",
-    }:
-        raise ValueError(
-            "selection_method must be 'silhouette', 'knee', 'xie_beni', "
-            "or 'multi_metric'"
-        )
-    if not 0.0 <= min_xb_relative_improvement <= 1.0:
-        raise ValueError("min_xb_relative_improvement must be between 0 and 1")
-    if xb_worsening_patience < 0:
-        raise ValueError("xb_worsening_patience must be non-negative")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
         raise ValueError("min_split_silhouette must be between -1 and 1")
 
@@ -1273,26 +1309,22 @@ def run_hierarchical_pca_fcm(
         if "id" in metadata.columns
         else np.arange(X.shape[0])
     )
-    is_forced_noise = forced_noise_mask(
+    (
+        is_noise,
+        is_forced_noise,
+        forced_only,
+        document_types,
+        noise_level,
+    ) = merge_forced_noise(
+        is_natural_noise,
         noise_scores,
         document_ids,
+        document_types,
+        noise_level,
         forced_noise_ratio=forced_noise_ratio,
     )
-    is_noise |= is_forced_noise
-    forced_only = is_forced_noise & ~is_natural_noise
-    document_types[is_forced_noise] = DOCUMENT_TYPE_NOISE
-    noise_level[forced_only] = 0
 
     assigned_depth = np.sum(labels_by_level >= 0, axis=1)
-    leaf_level = np.where(assigned_depth > 0, assigned_depth, -1).astype(int)
-    leaf_cluster = np.full(X.shape[0], -1, dtype=int)
-    has_leaf = assigned_depth > 0
-    row_indices = np.arange(X.shape[0])
-    leaf_cluster[has_leaf] = labels_by_level[
-        row_indices[has_leaf], assigned_depth[has_leaf] - 1
-    ]
-    leaf_cluster[is_noise] = -1
-
     model = HierarchicalModel(
         pca=pca,
         nodes=node_models,
@@ -1300,39 +1332,19 @@ def run_hierarchical_pca_fcm(
         fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
     )
     conditional_memberships = conditional_memberships_from_projected(Xp, model)
-
-    assignments = metadata.copy()
-    for level in range(max_depth):
-        assignments[f"level_{level + 1}_cluster"] = labels_by_level[:, level]
-        for cluster_id in range(max_clusters):
-            assignments[f"level_{level + 1}_membership_{cluster_id}"] = (
-                soft_memberships_by_level[level][:, cluster_id]
-            )
-    assignments["cluster"] = leaf_cluster
-    for path, path_membership in conditional_memberships.items():
-        assignments[path_membership_column(path)] = path_membership
-
-    cluster_paths: list[str] = []
-    for row in range(X.shape[0]):
-        path_parts = [
-            str(int(label)) for label in labels_by_level[row] if label >= 0
-        ]
-        if is_noise[row]:
-            cluster_paths.append(
-                "/".join(path_parts + ["noise"]) if path_parts else "noise"
-            )
-        else:
-            cluster_paths.append("/".join(path_parts) if path_parts else "root")
-    assignments["cluster_path"] = cluster_paths
-    assignments["is_noise"] = is_noise
-    assignments["is_natural_noise"] = is_natural_noise
-    assignments["is_forced_noise"] = is_forced_noise
-    assignments["is_boundary"] = document_types == DOCUMENT_TYPE_BOUNDARY
-    assignments["document_type"] = document_types
-    assignments["noise_score"] = noise_scores
-    assignments["boundary_level"] = boundary_level
-    assignments["noise_level"] = noise_level
-    assignments["leaf_level"] = leaf_level
+    assignments = build_hierarchical_assignments(
+        metadata,
+        labels_by_level,
+        is_noise,
+        is_natural_noise,
+        is_forced_noise,
+        document_types,
+        noise_scores,
+        boundary_level,
+        noise_level,
+        soft_memberships_by_level,
+        conditional_memberships,
+    )
 
     def collect_nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
         nodes = [node]
