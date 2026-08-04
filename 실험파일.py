@@ -18,10 +18,18 @@ from clustering_pipelines import (
 from clustering_types import HierarchicalResult
 from embedding_data import load_embeddings_from_json, make_synthetic_embeddings
 from fcm_hierarchy import (
-    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     DEFAULT_FORCED_NOISE_RATIO,
     DEFAULT_MAX_MEMBERSHIP_GAP,
     run_hierarchical_pca_fcm,
+)
+from pca_dimension_search import (
+    DEFAULT_K_VALUES,
+    DEFAULT_MAX_COMPONENTS,
+    DEFAULT_MINIMUM_PRESERVATION_GAIN,
+)
+from pca_dimension_selection import (
+    DEFAULT_COMPONENT_STEP,
+    DEFAULT_MIN_COMPONENTS,
 )
 
 
@@ -92,25 +100,54 @@ def main() -> None:
     parser.add_argument(
         "--hierarchical-pca-components",
         type=int,
-        default=DEFAULT_CLUSTERING_PCA_COMPONENTS,
-        help="PCA dimensions used for hierarchical clustering (default: 256).",
+        default=None,
+        help=(
+            "PCA dimensions used for hierarchical clustering; omit to "
+            "auto-select using normalized k-NN preservation."
+        ),
+    )
+    parser.add_argument(
+        "--hierarchical-pca-max-components",
+        type=int,
+        default=DEFAULT_MAX_COMPONENTS,
+    )
+    parser.add_argument(
+        "--hierarchical-pca-min-components",
+        type=int,
+        default=DEFAULT_MIN_COMPONENTS,
+    )
+    parser.add_argument(
+        "--hierarchical-pca-component-step",
+        type=int,
+        default=DEFAULT_COMPONENT_STEP,
+    )
+    parser.add_argument(
+        "--hierarchical-pca-k",
+        type=int,
+        nargs="+",
+        default=list(DEFAULT_K_VALUES),
+    )
+    parser.add_argument(
+        "--hierarchical-pca-minimum-preservation-gain",
+        type=float,
+        default=DEFAULT_MINIMUM_PRESERVATION_GAIN,
     )
     parser.add_argument(
         "--hierarchical-assignments-output",
         type=Path,
-        default=Path("hierarchical_pca256_fcm_assignments.csv"),
+        default=Path("hierarchical_auto_pca_fcm_assignments.csv"),
     )
     parser.add_argument(
         "--hierarchical-tree-output",
         type=Path,
-        default=Path("hierarchical_pca256_fcm_tree.json"),
+        default=Path("hierarchical_auto_pca_fcm_tree.json"),
     )
     parser.add_argument(
         "--pipeline",
         nargs="+",
         choices=PIPELINE_NAMES,
-        default=["2_pca256_fcm"],
-        help="Clustering pipeline to run (currently PCA-256 + spherical FCM).",
+        default=["2_auto_pca_fcm"],
+        help="Clustering pipeline to run (default: automatic PCA + spherical FCM).",
     )
     args = parser.parse_args()
 
@@ -150,6 +187,8 @@ def main() -> None:
     frame = pd.DataFrame(results)
     benchmark_columns = [
         "pipeline",
+        "pca_components_requested",
+        "pca_components",
         "umap_preset",
         "umap_n_neighbors",
         "umap_min_dist",
@@ -221,6 +260,13 @@ def main() -> None:
             ),
             min_split_silhouette=args.hierarchical_min_silhouette,
             pca_components=args.hierarchical_pca_components,
+            pca_max_components=args.hierarchical_pca_max_components,
+            pca_min_components=args.hierarchical_pca_min_components,
+            pca_component_step=args.hierarchical_pca_component_step,
+            pca_k_values=tuple(args.hierarchical_pca_k),
+            pca_minimum_preservation_gain=(
+                args.hierarchical_pca_minimum_preservation_gain
+            ),
             seed=args.seed,
         )
         hierarchical_assignments_path = (

@@ -6,6 +6,7 @@ from unittest.mock import patch
 import numpy as np
 
 from clustering_types import FCMResult
+from clustering_pipelines import run_pipeline_by_name
 from fcm_hierarchy import (
     modified_partition_coefficient,
     normalized_partition_entropy,
@@ -183,6 +184,46 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
 
         self.assertIsNotNone(result.model)
         self.assertEqual(len(result.assignments), len(self.features))
+
+    def test_default_hierarchical_path_records_automatic_pca_selection(self) -> None:
+        result = run_hierarchical_pca_fcm(
+            self.features,
+            max_depth=1,
+            min_node_size=8,
+            min_child_size=4,
+            min_clusters=2,
+            max_clusters=2,
+            min_membership=0.0,
+            max_membership_gap=0.0,
+            forced_noise_ratio=0.0,
+            selection_method="multi_metric",
+            min_split_silhouette=-1.0,
+            seed=42,
+        )
+
+        self.assertIsNotNone(result.model)
+        self.assertEqual(result.summary["pca_components"], 3)
+        self.assertEqual(
+            result.tree["config"]["pca_components_requested"],
+            "auto",
+        )
+        self.assertEqual(
+            result.tree["config"]["pca_components_selected"],
+            3,
+        )
+        self.assertIsNotNone(result.tree["config"]["pca_selection"])
+
+    def test_default_flat_pipeline_uses_automatic_pca_selection(self) -> None:
+        result = run_pipeline_by_name(
+            "2_auto_pca_fcm",
+            self.features,
+            np.arange(len(self.features)) % 3,
+            3,
+        )
+
+        self.assertEqual(result.metrics["pca_components_requested"], "auto")
+        self.assertEqual(result.metrics["pca_components"], 3)
+        self.assertIsNotNone(result.metrics["pca_selection"])
 
 
 if __name__ == "__main__":

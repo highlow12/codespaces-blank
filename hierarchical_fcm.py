@@ -11,10 +11,9 @@ from sklearn.metrics.pairwise import euclidean_distances
 
 from clustering_types import HierarchicalModel, HierarchicalResult, HierarchyNodeModel
 from fcm_core import (
-    DEFAULT_CLUSTERING_PCA_COMPONENTS,
     conditional_memberships_from_projected,
     fcm_memberships_from_centers,
-    fit_pca_normalized_features,
+    fit_clustering_pca,
 )
 from fcm_document_classification import (
     DEFAULT_FORCED_NOISE_RATIO,
@@ -28,6 +27,15 @@ from fcm_validity import (
     _filter_fcm_labels,
     _validate_fcm_selection_parameters,
     select_fcm_cluster_count,
+)
+from pca_dimension_search import (
+    DEFAULT_K_VALUES,
+    DEFAULT_MAX_COMPONENTS,
+    DEFAULT_MINIMUM_PRESERVATION_GAIN,
+)
+from pca_dimension_selection import (
+    DEFAULT_COMPONENT_STEP,
+    DEFAULT_MIN_COMPONENTS,
 )
 from hierarchical_assignments import (
     DOCUMENT_TYPE_BOUNDARY,
@@ -56,7 +64,12 @@ def run_hierarchical_pca_fcm(
     min_xb_relative_improvement: float = 0.05,
     xb_worsening_patience: int = 2,
     min_split_silhouette: float = 0.05,
-    pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    pca_components: int | None = None,
+    pca_max_components: int = DEFAULT_MAX_COMPONENTS,
+    pca_min_components: int = DEFAULT_MIN_COMPONENTS,
+    pca_component_step: int = DEFAULT_COMPONENT_STEP,
+    pca_k_values: tuple[int, ...] = DEFAULT_K_VALUES,
+    pca_minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
 ) -> HierarchicalResult:
     """Recursively split a dataset with spherical PCA+FCM."""
@@ -90,9 +103,14 @@ def run_hierarchical_pca_fcm(
     else:
         metadata = metadata.copy()
 
-    Xp, pca = fit_pca_normalized_features(
+    Xp, pca, pca_selection = fit_clustering_pca(
         X,
         n_components=pca_components,
+        max_components=pca_max_components,
+        min_components=pca_min_components,
+        component_step=pca_component_step,
+        k_values=pca_k_values,
+        minimum_preservation_gain=pca_minimum_preservation_gain,
         seed=seed,
     )
     labels_by_level = np.full((X.shape[0], max_depth), -1, dtype=int)
@@ -441,7 +459,13 @@ def run_hierarchical_pca_fcm(
         "max_membership_gap": float(max_membership_gap),
         "forced_noise_ratio": float(forced_noise_ratio),
         "distance_z": float(distance_z),
-        "pca_components_requested": int(pca_components),
+        "pca_components_requested": (
+            "auto" if pca_components is None else int(pca_components)
+        ),
+        "pca_components_selected": int(Xp.shape[1]),
+        "pca_selection": (
+            None if pca_selection is None else pca_selection.to_dict()
+        ),
         "seed": int(seed),
     }
     tree = {"config": config, "summary": summary, "root": root}

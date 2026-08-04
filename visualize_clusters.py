@@ -5,7 +5,6 @@ from pathlib import Path
 
 from cluster_visualization import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
-    DEFAULT_VISUAL_PCA_COMPONENTS,
     load_assignments,
     load_embeddings,
     make_cluster_plot,
@@ -29,8 +28,11 @@ def main() -> None:
     parser.add_argument(
         "--pca-components",
         type=int,
-        default=DEFAULT_VISUAL_PCA_COMPONENTS,
-        help="Reduce normalized embeddings to this dimension before UMAP (default: 64).",
+        default=None,
+        help=(
+            "PCA dimensions before UMAP; omit to auto-select using UMAP "
+            "k-NN preservation."
+        ),
     )
     parser.add_argument(
         "--cluster-target-weight",

@@ -24,7 +24,6 @@ from matplotlib.patches import Patch
 
 from umap_projection import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
-    DEFAULT_VISUAL_PCA_COMPONENTS,
     project_embeddings,
 )
 from visual_assignments import build_cluster_supervision, prepare_visual_assignments
@@ -253,6 +252,10 @@ def _save_cluster_scatter(
     plt.close(fig)
 
 
+def _pca_title_dimension(pca_components: int | None) -> str:
+    return "auto" if pca_components is None else str(pca_components)
+
+
 def make_cluster_plot(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
@@ -260,7 +263,7 @@ def make_cluster_plot(
     *,
     title: str,
     seed: int,
-    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    pca_components: int | None = None,
     color_by: str,
     n_neighbors: int,
     min_dist: float,
@@ -300,7 +303,7 @@ def make_cluster_plot(
         color_map,
         output_path,
         title=(
-            f"{title} [PCA-{pca_components} -> UMAP-2 | {color_mode}"
+            f"{title} [PCA-{_pca_title_dimension(pca_components)} -> UMAP-2 | {color_mode}"
             f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
         ),
     )
@@ -313,7 +316,7 @@ def make_fixed_coordinate_plot(
     *,
     title: str,
     color_by: str,
-    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    pca_components: int | None = None,
     cluster_target_weight: float | None = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
     """Render stored coordinates without refitting or moving existing points."""
@@ -338,7 +341,7 @@ def make_fixed_coordinate_plot(
         color_map,
         output_path,
         title=(
-            f"{title} [fixed PCA-{pca_components} -> UMAP-2 | {color_mode}"
+            f"{title} [fixed PCA-{_pca_title_dimension(pca_components)} -> UMAP-2 | {color_mode}"
             f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
         ),
     )
@@ -351,7 +354,7 @@ def make_comparison_plot(
     *,
     title: str,
     seed: int,
-    pca_components: int = DEFAULT_VISUAL_PCA_COMPONENTS,
+    pca_components: int | None = None,
     color_by: str,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> None:
@@ -409,7 +412,7 @@ def make_comparison_plot(
         else ""
     )
     fig.suptitle(
-        f"{title} [PCA-{pca_components} -> UMAP-2 comparison | {color_mode}"
+        f"{title} [PCA-{_pca_title_dimension(pca_components)} -> UMAP-2 comparison | {color_mode}"
         f"{' | hierarchical' if hierarchical else ''}{target_suffix}]",
         y=0.995,
     )
@@ -425,4 +428,3 @@ def make_comparison_plot(
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=220)
     plt.close(fig)
-

@@ -29,8 +29,9 @@ def main() -> None:
     args = parser.parse_args()
 
     state = load_state(args.state)
-    visual_pca_components = int(
-        state.config.get("visual_pca_components", DEFAULT_VISUAL_PCA_COMPONENTS)
+    visual_pca_components = state.config.get(
+        "visual_pca_components",
+        DEFAULT_VISUAL_PCA_COMPONENTS,
     )
     configured_target_weight = state.config.get("visual_cluster_target_weight")
     cluster_target_weight = (
@@ -44,7 +45,11 @@ def main() -> None:
         args.output,
         title=args.title,
         color_by=args.color_by,
-        pca_components=visual_pca_components,
+        pca_components=(
+            None
+            if visual_pca_components is None
+            else int(visual_pca_components)
+        ),
         cluster_target_weight=cluster_target_weight,
     )
     print(f"Saved fixed-coordinate visualization to: {args.output}")

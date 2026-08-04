@@ -26,6 +26,32 @@ class FittedPcaProjection:
         return normalize(projected, norm="l2")
 
 
+@dataclass(frozen=True)
+class PcaPrefixTransformer:
+    """Expose a selected PCA prefix as a reusable sklearn-like transformer."""
+
+    base_pca: PCA
+    dimension: int
+
+    def __post_init__(self) -> None:
+        fitted_width = int(self.base_pca.n_components_)
+        if not 1 <= self.dimension <= fitted_width:
+            raise ValueError(
+                "dimension must be between 1 and the fitted PCA width"
+            )
+
+    @property
+    def n_features_in_(self) -> int:
+        return int(self.base_pca.n_features_in_)
+
+    @property
+    def n_components_(self) -> int:
+        return int(self.dimension)
+
+    def transform(self, values: np.ndarray) -> np.ndarray:
+        return np.asarray(self.base_pca.transform(values))[:, : self.dimension]
+
+
 def validate_embedding_matrix(
     values: np.ndarray,
     *,

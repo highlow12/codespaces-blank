@@ -8,7 +8,19 @@ from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.preprocessing import normalize
 
 from clustering_types import FCMResult, HierarchicalModel
+from pca_dimension_search import (
+    DEFAULT_K_VALUES,
+    DEFAULT_MAX_COMPONENTS,
+    DEFAULT_MINIMUM_PRESERVATION_GAIN,
+)
+from pca_dimension_selection import (
+    DEFAULT_COMPONENT_STEP,
+    DEFAULT_MIN_COMPONENTS,
+    PcaDimensionSelection,
+    select_pca_dimension_for_data,
+)
 from pca_projection import (
+    PcaPrefixTransformer,
     fit_normalized_pca_projection,
     transform_normalized_pca_projection,
 )
@@ -87,17 +99,65 @@ def spherical_fcm(
 def pca_normalized_features(
     X: np.ndarray,
     *,
-    n_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    n_components: int | None = None,
     seed: int = 42,
 ) -> np.ndarray:
-    """Create the same normalized PCA representation used by PCA+FCM."""
+    """Create the normalized PCA representation used by the default FCM path."""
 
-    projected, _ = fit_pca_normalized_features(
+    projected, _, _ = fit_clustering_pca(
         X,
         n_components=n_components,
         seed=seed,
     )
     return projected
+
+
+def fit_clustering_pca(
+    X: np.ndarray,
+    *,
+    n_components: int | None = None,
+    max_components: int = DEFAULT_MAX_COMPONENTS,
+    min_components: int = DEFAULT_MIN_COMPONENTS,
+    component_step: int = DEFAULT_COMPONENT_STEP,
+    k_values: tuple[int, ...] = DEFAULT_K_VALUES,
+    minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
+    seed: int = 42,
+) -> tuple[np.ndarray, PCA | PcaPrefixTransformer, PcaDimensionSelection | None]:
+    """Fit clustering PCA, selecting its width automatically by default."""
+
+    selection = None
+    if n_components is None:
+        selection = select_pca_dimension_for_data(
+            X,
+            max_components=max_components,
+            min_components=min_components,
+            component_step=component_step,
+            k_values=k_values,
+            minimum_preservation_gain=minimum_preservation_gain,
+            seed=seed,
+        )
+        if selection is None:
+            projected, pca = fit_pca_normalized_features(
+                X,
+                n_components=1,
+                seed=seed,
+            )
+            return projected, pca, None
+        return (
+            selection.selected_features,
+            PcaPrefixTransformer(
+                selection.pca,
+                selection.selected_dimension,
+            ),
+            selection,
+        )
+
+    projected, pca = fit_pca_normalized_features(
+        X,
+        n_components=n_components,
+        seed=seed,
+    )
+    return projected, pca, selection
 
 
 def fit_pca_normalized_features(
