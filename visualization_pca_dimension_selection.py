@@ -17,7 +17,7 @@ from cluster_visualization import (
     load_assignments,
 )
 from embedding_data import load_embeddings_from_json
-from pca_dimension_selection import (
+from pca_dimension_search import (
     DEFAULT_K_VALUES,
     DEFAULT_MAX_COMPONENTS,
     DEFAULT_MINIMUM_PRESERVATION_GAIN,
