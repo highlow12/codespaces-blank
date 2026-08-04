@@ -20,6 +20,7 @@ from clustering_types import (
 
 
 DEFAULT_CLUSTERING_PCA_COMPONENTS = 256
+DEFAULT_MAX_MEMBERSHIP_GAP = 0.10
 
 
 def spherical_fcm(
@@ -247,17 +248,49 @@ def conditional_memberships_from_projected(
     return probabilities
 
 
+def fcm_membership_noise_mask(
+    memberships: np.ndarray,
+    *,
+    min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+) -> np.ndarray:
+    """Identify low-confidence points that also lie near a fuzzy boundary.
+
+    A point is marked only when its largest membership is below
+    ``min_membership`` and the gap between its largest and second-largest
+    memberships is below ``max_membership_gap``.
+    """
+
+    values = np.asarray(memberships, dtype=np.float64)
+    if values.ndim != 2:
+        raise ValueError("memberships must be a 2D array")
+    if not np.all(np.isfinite(values)):
+        raise ValueError("memberships must contain only finite values")
+    if not 0.0 <= min_membership <= 1.0:
+        raise ValueError("min_membership must be between 0 and 1")
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
+    if values.shape[1] < 2:
+        return np.zeros(values.shape[0], dtype=bool)
+
+    top_two = np.partition(values, -2, axis=1)[:, -2:]
+    largest = top_two.max(axis=1)
+    second_largest = top_two.min(axis=1)
+    return (largest < min_membership) & (
+        largest - second_largest < max_membership_gap
+    )
+
+
 def fcm_noise_mask(
     X: np.ndarray,
     result: FCMResult,
     *,
     min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
 ) -> np.ndarray:
     """Identify ambiguous or outlying points in a spherical FCM result."""
 
-    if not 0.0 <= min_membership <= 1.0:
-        raise ValueError("min_membership must be between 0 and 1")
     if distance_z < 0.0:
         raise ValueError("distance_z must be non-negative")
 
@@ -268,7 +301,11 @@ def fcm_noise_mask(
     row_indices = np.arange(Xn.shape[0])
     assigned_distances = distances[row_indices, labels]
 
-    noise = memberships.max(axis=1) < min_membership
+    noise = fcm_membership_noise_mask(
+        memberships,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+    )
     for cluster_id in range(result.memberships.shape[1]):
         cluster_mask = labels == cluster_id
         cluster_distances = assigned_distances[cluster_mask]
@@ -305,6 +342,7 @@ def _filter_fcm_labels(
     *,
     min_child_size: int,
     min_membership: float,
+    max_membership_gap: float,
     distance_z: float,
 ) -> tuple[np.ndarray, list[int]]:
     """Apply noise rules and remap surviving FCM labels to contiguous IDs."""
@@ -315,6 +353,7 @@ def _filter_fcm_labels(
             X,
             result,
             min_membership=min_membership,
+            max_membership_gap=max_membership_gap,
             distance_z=distance_z,
         )
     ] = -1
@@ -387,12 +426,17 @@ def select_fcm_cluster_count(
     max_clusters: int = 8,
     min_child_size: int = 20,
     min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     seed: int = 42,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
     """Evaluate a node's variable k and return the best FCM split."""
 
+    if not 0.0 <= min_membership <= 1.0:
+        raise ValueError("min_membership must be between 0 and 1")
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
     if min_clusters < 2:
         raise ValueError("min_clusters must be at least 2")
     if max_clusters < min_clusters:
@@ -420,6 +464,7 @@ def select_fcm_cluster_count(
             result,
             min_child_size=min_child_size,
             min_membership=min_membership,
+            max_membership_gap=max_membership_gap,
             distance_z=distance_z,
         )
         non_noise = labels != -1
@@ -489,6 +534,7 @@ def run_hierarchical_pca_fcm(
     min_clusters: int = 2,
     max_clusters: int = 8,
     min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     min_split_silhouette: float = 0.05,
@@ -512,6 +558,10 @@ def run_hierarchical_pca_fcm(
         raise ValueError("min_clusters must be at least 2")
     if max_clusters < min_clusters:
         raise ValueError("max_clusters must be at least min_clusters")
+    if not 0.0 <= min_membership <= 1.0:
+        raise ValueError("min_membership must be between 0 and 1")
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
     if selection_method not in {"silhouette", "knee"}:
         raise ValueError("selection_method must be 'silhouette' or 'knee'")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
@@ -596,6 +646,7 @@ def run_hierarchical_pca_fcm(
             max_clusters=max_clusters,
             min_child_size=min_child_size,
             min_membership=min_membership,
+            max_membership_gap=max_membership_gap,
             distance_z=distance_z,
             selection_method=selection_method,
             seed=seed + depth * 100_003 + indices.size,
@@ -779,6 +830,7 @@ def run_hierarchical_pca_fcm(
         "selection_method": selection_method,
         "min_split_silhouette": float(min_split_silhouette),
         "min_membership": float(min_membership),
+        "max_membership_gap": float(max_membership_gap),
         "distance_z": float(distance_z),
         "pca_components_requested": int(pca_components),
         "seed": int(seed),

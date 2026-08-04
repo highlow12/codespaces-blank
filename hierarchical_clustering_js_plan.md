@@ -261,11 +261,16 @@ type FcmResult = {
 
 ### 7.1 membership 기준
 
+최대 membership이 낮으면서 동시에 1위와 2위 membership 차이가 작은
+경계 문서를 노이즈로 판정한다.
+
 ```text
 max_j(U[i][j]) < minMembership
+AND
+largestMembership - secondLargestMembership < maxMembershipGap
 ```
 
-이면 노이즈다.
+두 조건 중 하나만 만족하는 문서는 membership 기준 노이즈가 아니다.
 
 ### 7.2 클러스터별 거리 이상치 기준
 

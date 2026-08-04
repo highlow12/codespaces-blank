@@ -35,7 +35,9 @@ from clustering_types import HierarchicalModel
 from embedding_data import load_embeddings_from_json
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    DEFAULT_MAX_MEMBERSHIP_GAP,
     conditional_memberships_from_projected,
+    fcm_membership_noise_mask,
     fcm_memberships_from_centers,
     path_membership_column,
     run_hierarchical_pca_fcm,
@@ -158,6 +160,7 @@ def assign_to_hierarchy(
     hierarchy_model: HierarchicalModel,
     *,
     min_membership: float,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     m: float = 2.0,
 ) -> tuple[pd.DataFrame, float]:
     """Assign a batch to fixed hierarchy centers and return its noise ratio."""
@@ -166,7 +169,8 @@ def assign_to_hierarchy(
     frame = _validate_metadata(metadata, len(values))
     if not 0.0 <= min_membership <= 1.0:
         raise ValueError("min_membership must be between 0 and 1")
-
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
     projected = transform_pca_normalized_features(values, hierarchy_model.pca)
     conditional_memberships = conditional_memberships_from_projected(
         projected,
@@ -219,8 +223,10 @@ def assign_to_hierarchy(
                 row_indices = np.arange(len(indices))
                 assigned_distances = distances[row_indices, local_labels]
                 thresholds = node_model.distance_thresholds[local_labels]
-                local_noise = (
-                    memberships.max(axis=1) < min_membership
+                local_noise = fcm_membership_noise_mask(
+                    memberships,
+                    min_membership=min_membership,
+                    max_membership_gap=max_membership_gap,
                 ) | (assigned_distances > thresholds)
 
                 if np.any(local_noise):
@@ -264,6 +270,7 @@ def _cluster_config(
     min_clusters: int,
     max_clusters: int,
     min_membership: float,
+    max_membership_gap: float,
     distance_z: float,
     selection_method: str,
     min_split_silhouette: float,
@@ -285,6 +292,7 @@ def _cluster_config(
         "min_clusters": int(min_clusters),
         "max_clusters": int(max_clusters),
         "min_membership": float(min_membership),
+        "max_membership_gap": float(max_membership_gap),
         "distance_z": float(distance_z),
         "selection_method": selection_method,
         "min_split_silhouette": float(min_split_silhouette),
@@ -317,6 +325,9 @@ def _fit_hierarchy(
         min_clusters=int(config["min_clusters"]),
         max_clusters=int(config["max_clusters"]),
         min_membership=float(config["min_membership"]),
+        max_membership_gap=float(
+            config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
         distance_z=float(config["distance_z"]),
         selection_method=str(config["selection_method"]),
         min_split_silhouette=float(config["min_split_silhouette"]),
@@ -338,6 +349,7 @@ def fit_incremental_state(
     min_clusters: int = 2,
     max_clusters: int = 4,
     min_membership: float = 0.20,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     min_split_silhouette: float = 0.05,
@@ -371,6 +383,7 @@ def fit_incremental_state(
         min_clusters=min_clusters,
         max_clusters=max_clusters,
         min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
         distance_z=distance_z,
         selection_method=selection_method,
         min_split_silhouette=min_split_silhouette,
@@ -528,6 +541,9 @@ def update_incremental_state(
         frame,
         state.hierarchy_model,
         min_membership=float(state.config["min_membership"]),
+        max_membership_gap=float(
+            state.config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
         m=float(state.config["m"]),
     )
     should_recluster = new_noise_ratio > threshold
@@ -741,6 +757,15 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-clusters", type=int, default=2)
     parser.add_argument("--max-clusters", type=int, default=4)
     parser.add_argument("--min-membership", type=float, default=0.20)
+    parser.add_argument(
+        "--max-membership-gap",
+        type=float,
+        default=DEFAULT_MAX_MEMBERSHIP_GAP,
+        help=(
+            "Mark low-membership points as noise only when the top-two "
+            "membership gap is below this value (default: 0.10)."
+        ),
+    )
     parser.add_argument("--distance-z", type=float, default=3.5)
     parser.add_argument(
         "--selection-method",
@@ -808,6 +833,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         min_clusters=args.min_clusters,
         max_clusters=args.max_clusters,
         min_membership=args.min_membership,
+        max_membership_gap=args.max_membership_gap,
         distance_z=args.distance_z,
         selection_method=args.selection_method,
         min_split_silhouette=args.min_split_silhouette,
