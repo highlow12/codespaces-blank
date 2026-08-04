@@ -57,9 +57,20 @@ python incremental_clustering.py fit \
   --max-xb-relative-degradation 0.05
 ```
 
-state에는 center의 fuzzy sufficient statistics와 다음 실행까지 남은 카운터가
-저장된다. 기존 version 1 state는 첫 update에서 기존 전체 임베딩으로 통계를
-복원한다.
+state에는 center의 fuzzy sufficient statistics, 문서별 기여도, 다음 실행까지
+남은 카운터가 저장된다. 기존 version 1·2 state는 첫 update에서 현재 모델
+기준으로 문서별 기여도를 복원한다.
+
+## 변경된 노트 교체
+
+update 입력에 state에 이미 존재하는 `id`가 포함되면 새 문서로 중복 추가하지
+않고 해당 ID의 기존 임베딩·메타데이터·assignment·고정 좌표를 교체한다. 기존
+임베딩의 `membership ** m` 기여도는 center 통계에서 제거한 뒤 새 임베딩의
+기여도로 대체하므로 center가 같은 노트를 두 번 반영하지 않는다. 입력에 기존
+ID와 새 ID가 섞여 있어도 같은 규칙이 각각 적용된다.
+
+실제로 새 문서를 추가하는 경우에만 `--id-offset`으로 생성 인덱스 ID가 기존
+ID와 겹치지 않도록 한다.
 
 기본 긴급 재클러스터링 기준은 신규 배치 노이즈 비율 5% 초과다.
 `--noise-threshold 0.01`처럼 업데이트 명령에서 바꿀 수 있다.

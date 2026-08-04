@@ -74,6 +74,9 @@ class IncrementalClusterState:
     center_statistics: dict[str, dict[str, np.ndarray]] = field(
         default_factory=dict
     )
+    center_contributions: dict[Any, dict[str, dict[str, np.ndarray]]] = field(
+        default_factory=dict
+    )
 
 
 def _validate_embeddings(embeddings: np.ndarray) -> np.ndarray:
@@ -324,6 +327,134 @@ def _center_statistics_for_batch(
                     )
         active = next_active
     return statistics
+
+
+def _center_contributions_for_batch(
+    embeddings: np.ndarray,
+    metadata: pd.DataFrame,
+    hierarchy_model: HierarchicalModel,
+    *,
+    min_membership: float,
+    m: float,
+) -> dict[Any, dict[str, dict[str, np.ndarray]]]:
+    """Collect each document's fuzzy contribution to every reached node.
+
+    The aggregate center statistics are sufficient for adding documents, but
+    they are not sufficient for replacing one. Keeping the per-document
+    contributions lets an update subtract the old embedding before adding its
+    replacement without disturbing unrelated documents.
+    """
+
+    values = _validate_embeddings(embeddings)
+    frame = _validate_metadata(metadata, len(values))
+    identifiers = frame["id"].tolist()
+    contributions: dict[Any, dict[str, dict[str, np.ndarray]]] = {
+        identifier: {} for identifier in identifiers
+    }
+    projected = transform_pca_normalized_features(values, hierarchy_model.pca)
+    if hierarchy_model.fallback_single_cluster:
+        return contributions
+
+    active: dict[str, np.ndarray] = {"": np.arange(len(values), dtype=int)}
+    for _depth in range(hierarchy_model.max_depth):
+        next_active: dict[str, np.ndarray] = {}
+        for parent_path, indices in active.items():
+            node_model = hierarchy_model.nodes.get(parent_path)
+            if node_model is None or indices.size == 0:
+                continue
+
+            memberships, distances = fcm_memberships_from_centers(
+                projected[indices],
+                node_model.centers,
+                m=m,
+            )
+            weights = memberships**m
+            for local_index, global_index in enumerate(indices):
+                identifier = identifiers[int(global_index)]
+                contributions[identifier][parent_path] = {
+                    "weighted_sum": np.outer(
+                        weights[local_index],
+                        projected[global_index],
+                    ),
+                    "weight": weights[local_index].copy(),
+                }
+
+            local_labels = memberships.argmax(axis=1)
+            row_indices = np.arange(len(indices))
+            assigned_distances = distances[row_indices, local_labels]
+            local_noise = (
+                memberships.max(axis=1) < min_membership
+            ) | (
+                assigned_distances
+                > node_model.distance_thresholds[local_labels]
+            )
+            valid_indices = indices[~local_noise]
+            valid_labels = local_labels[~local_noise]
+            for cluster_id in range(node_model.centers.shape[0]):
+                child_indices = valid_indices[valid_labels == cluster_id]
+                if child_indices.size:
+                    next_active[_path_for_cluster(parent_path, cluster_id)] = (
+                        child_indices
+                    )
+        active = next_active
+    return contributions
+
+
+def _aggregate_center_contributions(
+    contributions: dict[Any, dict[str, dict[str, np.ndarray]]],
+) -> dict[str, dict[str, np.ndarray]]:
+    """Sum per-document contributions into the persisted center statistics."""
+
+    statistics: dict[str, dict[str, np.ndarray]] = {}
+    for document_contributions in contributions.values():
+        for path, values in document_contributions.items():
+            if path not in statistics:
+                statistics[path] = {
+                    "weighted_sum": np.zeros_like(values["weighted_sum"]),
+                    "weight": np.zeros_like(values["weight"]),
+                }
+            statistics[path]["weighted_sum"] += values["weighted_sum"]
+            statistics[path]["weight"] += values["weight"]
+    return statistics
+
+
+def _update_hierarchy_centers_from_statistics(
+    hierarchy_model: HierarchicalModel,
+    center_statistics: dict[str, dict[str, np.ndarray]],
+) -> tuple[HierarchicalModel, int]:
+    """Recompute centers from a complete set of cumulative statistics."""
+
+    updated_model = copy.deepcopy(hierarchy_model)
+    updated_node_count = 0
+    for path, values in center_statistics.items():
+        node_model = updated_model.nodes.get(path)
+        if node_model is None:
+            continue
+        weighted_sum = values["weighted_sum"]
+        weight = values["weight"]
+        if (
+            weighted_sum.shape
+            != (node_model.centers.shape[0], node_model.centers.shape[1])
+            or weight.shape != (node_model.centers.shape[0],)
+        ):
+            raise ValueError(
+                f"Center statistics do not match hierarchy node: {path}"
+            )
+        raw_centers = np.divide(
+            weighted_sum,
+            weight[:, None],
+            out=node_model.centers.copy(),
+            where=weight[:, None] > 1e-12,
+        )
+        center_norms = np.linalg.norm(raw_centers, axis=1, keepdims=True)
+        node_model.centers = np.divide(
+            raw_centers,
+            center_norms,
+            out=node_model.centers.copy(),
+            where=center_norms > 1e-12,
+        )
+        updated_node_count += 1
+    return updated_model, updated_node_count
 
 
 def _build_center_statistics(
@@ -826,6 +957,12 @@ def fit_incremental_state(
         assignments,
         config,
     )
+    center_contributions = _center_contributions_for_batch(
+        values,
+        frame,
+        hierarchy_model,
+        **_fuzzy_parameters(config),
+    )
     return IncrementalClusterState(
         embeddings=values.copy(),
         metadata=frame,
@@ -836,7 +973,8 @@ def fit_incremental_state(
         config=config,
         visual_pca=visual_pca,
         visual_reducer=visual_reducer,
-        center_statistics=_center_statistics(values, hierarchy_model, config),
+        center_statistics=_aggregate_center_contributions(center_contributions),
+        center_contributions=center_contributions,
     )
 
 
@@ -849,6 +987,164 @@ def _append_assignments(
         [first.reindex(columns=columns), second.reindex(columns=columns)],
         ignore_index=True,
     )
+
+
+def _merge_state_rows_by_id(
+    existing_embeddings: np.ndarray,
+    existing_metadata: pd.DataFrame,
+    existing_coordinates: np.ndarray,
+    incoming_embeddings: np.ndarray,
+    incoming_metadata: pd.DataFrame,
+    incoming_coordinates: np.ndarray,
+) -> tuple[
+    np.ndarray,
+    pd.DataFrame,
+    np.ndarray,
+    list[Any],
+    list[Any],
+]:
+    """Replace existing rows by ID and append IDs not seen in the state."""
+
+    existing_frame = _validate_metadata(
+        existing_metadata,
+        len(existing_embeddings),
+    )
+    incoming_frame = _validate_metadata(
+        incoming_metadata,
+        len(incoming_embeddings),
+    )
+    if existing_coordinates.shape != (len(existing_embeddings), 2):
+        raise ValueError("State coordinates must have shape (samples, 2)")
+    if incoming_coordinates.shape != (len(incoming_embeddings), 2):
+        raise ValueError("Incoming coordinates must have shape (samples, 2)")
+
+    existing_ids = existing_frame["id"].tolist()
+    incoming_ids = incoming_frame["id"].tolist()
+    existing_positions = {
+        identifier: index for index, identifier in enumerate(existing_ids)
+    }
+    incoming_positions = {
+        identifier: index for index, identifier in enumerate(incoming_ids)
+    }
+    replaced_ids = [
+        identifier
+        for identifier in incoming_ids
+        if identifier in existing_positions
+    ]
+    appended_ids = [
+        identifier
+        for identifier in incoming_ids
+        if identifier not in existing_positions
+    ]
+
+    merged_embeddings = np.asarray(existing_embeddings, dtype=np.float64).copy()
+    merged_coordinates = np.asarray(existing_coordinates, dtype=np.float64).copy()
+    for identifier in replaced_ids:
+        existing_index = existing_positions[identifier]
+        incoming_index = incoming_positions[identifier]
+        merged_embeddings[existing_index] = incoming_embeddings[incoming_index]
+        merged_coordinates[existing_index] = incoming_coordinates[incoming_index]
+
+    if appended_ids:
+        appended_indices = [
+            incoming_positions[identifier] for identifier in appended_ids
+        ]
+        merged_embeddings = np.vstack(
+            [merged_embeddings, incoming_embeddings[appended_indices]]
+        )
+        merged_coordinates = np.vstack(
+            [merged_coordinates, incoming_coordinates[appended_indices]]
+        )
+
+    columns = list(dict.fromkeys([*existing_frame.columns, *incoming_frame.columns]))
+    existing_aligned = existing_frame.reindex(columns=columns).astype(object)
+    incoming_aligned = incoming_frame.reindex(columns=columns).astype(object)
+    merged_metadata = existing_aligned.copy()
+    for identifier in replaced_ids:
+        existing_index = existing_positions[identifier]
+        incoming_index = incoming_positions[identifier]
+        merged_metadata.iloc[existing_index, :] = incoming_aligned.iloc[
+            incoming_index
+        ].to_numpy()
+    if appended_ids:
+        appended_indices = [
+            incoming_positions[identifier] for identifier in appended_ids
+        ]
+        merged_metadata = pd.concat(
+            [merged_metadata, incoming_aligned.iloc[appended_indices]],
+            ignore_index=True,
+        )
+    return (
+        merged_embeddings,
+        merged_metadata.reset_index(drop=True),
+        merged_coordinates,
+        replaced_ids,
+        appended_ids,
+    )
+
+
+def _merge_assignments_by_id(
+    existing: pd.DataFrame,
+    incoming: pd.DataFrame,
+) -> pd.DataFrame:
+    """Replace assignments by ID and append assignments for new documents."""
+
+    if "id" not in existing.columns or "id" not in incoming.columns:
+        raise ValueError("Assignments must contain an 'id' column")
+    existing_ids = existing["id"].tolist()
+    incoming_ids = incoming["id"].tolist()
+    existing_positions = {
+        identifier: index for index, identifier in enumerate(existing_ids)
+    }
+    incoming_positions = {
+        identifier: index for index, identifier in enumerate(incoming_ids)
+    }
+    columns = list(dict.fromkeys([*existing.columns, *incoming.columns]))
+    existing_aligned = (
+        existing.reindex(columns=columns).astype(object).reset_index(drop=True)
+    )
+    incoming_aligned = (
+        incoming.reindex(columns=columns).astype(object).reset_index(drop=True)
+    )
+    merged = existing_aligned.copy()
+    replaced_ids = [
+        identifier
+        for identifier in incoming_ids
+        if identifier in existing_positions
+    ]
+    for identifier in replaced_ids:
+        merged.iloc[existing_positions[identifier], :] = incoming_aligned.iloc[
+            incoming_positions[identifier]
+        ].to_numpy()
+    appended_ids = [
+        identifier
+        for identifier in incoming_ids
+        if identifier not in existing_positions
+    ]
+    if appended_ids:
+        appended_indices = [incoming_positions[identifier] for identifier in appended_ids]
+        merged = pd.concat(
+            [merged, incoming_aligned.iloc[appended_indices]],
+            ignore_index=True,
+        )
+    return merged.reset_index(drop=True)
+
+
+def _select_assignments_by_ids(
+    assignments: pd.DataFrame,
+    identifiers: list[Any],
+) -> pd.DataFrame:
+    """Return assignments in the same order as an incoming batch."""
+
+    positions = {
+        identifier: index
+        for index, identifier in enumerate(assignments["id"].tolist())
+    }
+    try:
+        selected = [positions[identifier] for identifier in identifiers]
+    except KeyError as error:
+        raise ValueError("Assignments do not contain every incoming ID") from error
+    return assignments.iloc[selected].reset_index(drop=True)
 
 
 def _apply_global_forced_noise(
@@ -1073,6 +1369,7 @@ def _rebuild_tree_counts(
     def reset(node: dict[str, Any]) -> None:
         node["size"] = 0
         node["noise_count"] = 0
+        node["boundary_count"] = 0
         for child in node["children"]:
             reset(child)
 
@@ -1100,9 +1397,13 @@ def update_incremental_state(
         raise ValueError("new embeddings have a different dimensionality")
 
     existing_ids = set(state.metadata["id"].tolist())
-    new_ids = set(frame["id"].tolist())
-    if existing_ids.intersection(new_ids):
-        raise ValueError("new batch contains IDs already present in the state")
+    incoming_ids = frame["id"].tolist()
+    replaced_ids = [
+        identifier for identifier in incoming_ids if identifier in existing_ids
+    ]
+    appended_ids = [
+        identifier for identifier in incoming_ids if identifier not in existing_ids
+    ]
 
     threshold = _validate_noise_threshold(
         state.config["noise_threshold"]
@@ -1136,29 +1437,49 @@ def update_incremental_state(
         reducer=state.visual_reducer,
     )
 
-    combined_embeddings = np.vstack([state.embeddings, values])
-    combined_metadata = pd.concat(
-        [state.metadata, frame],
-        ignore_index=True,
+    (
+        combined_embeddings,
+        combined_metadata,
+        combined_coordinates,
+        _merged_replaced_ids,
+        _merged_appended_ids,
+    ) = _merge_state_rows_by_id(
+        state.embeddings,
+        state.metadata,
+        state.coordinates,
+        values,
+        frame,
+        new_coordinates,
     )
-    combined_coordinates = np.vstack([state.coordinates, new_coordinates])
+    if (
+        _merged_replaced_ids != replaced_ids
+        or _merged_appended_ids != appended_ids
+    ):
+        raise RuntimeError("State row merge did not preserve incoming ID order")
     config["noise_threshold"] = threshold
     config["update_count"] = int(config.get("update_count", 0)) + 1
 
-    center_statistics = getattr(state, "center_statistics", None) or {}
-    if not center_statistics:
-        center_statistics = _center_statistics(
+    center_contributions = getattr(state, "center_contributions", None)
+    if not center_contributions:
+        center_contributions = _center_contributions_for_batch(
             state.embeddings,
+            state.metadata,
             state.hierarchy_model,
-            config,
-        )
-    hierarchy_model, center_statistics, updated_node_count = (
-        _update_hierarchy_centers(
-            state.hierarchy_model,
-            center_statistics,
-            values,
             **_fuzzy_parameters(config),
         )
+    else:
+        center_contributions = copy.deepcopy(center_contributions)
+    incoming_contributions = _center_contributions_for_batch(
+        values,
+        frame,
+        state.hierarchy_model,
+        **_fuzzy_parameters(config),
+    )
+    center_contributions.update(incoming_contributions)
+    center_statistics = _aggregate_center_contributions(center_contributions)
+    hierarchy_model, updated_node_count = _update_hierarchy_centers_from_statistics(
+        state.hierarchy_model,
+        center_statistics,
     )
     config["center_updates_since_membership_refresh"] = (
         int(config["center_updates_since_membership_refresh"]) + 1
@@ -1204,11 +1525,13 @@ def update_incremental_state(
             refreshed_assignments,
             int(config["update_count"]),
         )
-        center_statistics = _center_statistics(
+        center_contributions = _center_contributions_for_batch(
             combined_embeddings,
+            combined_metadata,
             hierarchy_model,
-            config,
+            **_fuzzy_parameters(config),
         )
+        center_statistics = _aggregate_center_contributions(center_contributions)
         current_xie_beni = _hierarchy_xb(
             combined_embeddings,
             hierarchy_model,
@@ -1236,11 +1559,13 @@ def update_incremental_state(
             combined_metadata,
             config,
         )
-        center_statistics = _center_statistics(
+        center_contributions = _center_contributions_for_batch(
             combined_embeddings,
+            combined_metadata,
             hierarchy_model,
-            config,
+            **_fuzzy_parameters(config),
         )
+        center_statistics = _aggregate_center_contributions(center_contributions)
         config["center_updates_since_membership_refresh"] = 0
         config["membership_refreshes_since_recluster"] = 0
         config["total_reclusters"] = int(config["total_reclusters"]) + 1
@@ -1260,21 +1585,34 @@ def update_incremental_state(
         tree = refreshed_tree
         reclustered = False
     else:
-        assignments = _append_assignments(state.assignments, new_assignments)
+        assignments = _merge_assignments_by_id(state.assignments, new_assignments)
         assignments = _apply_global_forced_noise(
             assignments,
             forced_noise_ratio=forced_noise_ratio,
         )
-        effective_new_assignments = assignments.iloc[-len(values):].copy()
-        tree = _refresh_tree_after_append(
-            state.tree,
-            effective_new_assignments,
+        effective_new_assignments = _select_assignments_by_ids(
             assignments,
-            int(config["update_count"]),
+            incoming_ids,
         )
+        if replaced_ids:
+            tree = _rebuild_tree_counts(
+                state.tree,
+                assignments,
+                int(config["update_count"]),
+            )
+        else:
+            tree = _refresh_tree_after_append(
+                state.tree,
+                effective_new_assignments,
+                assignments,
+                int(config["update_count"]),
+            )
         reclustered = False
 
-    effective_new_assignments = assignments.iloc[-len(values):].copy()
+    effective_new_assignments = _select_assignments_by_ids(
+        assignments,
+        incoming_ids,
+    )
     new_noise_ratio = float(effective_new_assignments["is_noise"].mean())
     config["last_update_noise_ratio"] = float(new_noise_ratio)
     config["last_update_natural_noise_ratio"] = float(natural_noise_ratio)
@@ -1321,9 +1659,12 @@ def update_incremental_state(
         visual_pca=visual_pca,
         visual_reducer=visual_reducer,
         center_statistics=center_statistics,
+        center_contributions=center_contributions,
     )
     summary = {
         "new_samples": int(len(values)),
+        "replaced_samples": int(len(replaced_ids)),
+        "appended_samples": int(len(appended_ids)),
         "new_noise_count": int(round(new_noise_ratio * len(values))),
         "new_natural_noise_count": int(
             effective_new_assignments["is_natural_noise"].sum()
@@ -1375,7 +1716,7 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
     payload = {
-        "version": 2,
+        "version": 3,
         "embeddings": state.embeddings,
         "metadata": state.metadata,
         "assignments": state.assignments,
@@ -1386,6 +1727,7 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
         "visual_pca": state.visual_pca,
         "visual_reducer": state.visual_reducer,
         "center_statistics": state.center_statistics,
+        "center_contributions": getattr(state, "center_contributions", {}),
     }
     with temporary_path.open("wb") as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1408,7 +1750,7 @@ def load_state(path: Path) -> IncrementalClusterState:
 
     if isinstance(payload, IncrementalClusterState):
         state = payload
-    elif isinstance(payload, dict) and payload.get("version") in {1, 2}:
+    elif isinstance(payload, dict) and payload.get("version") in {1, 2, 3}:
         required_fields = (
             "embeddings",
             "metadata",
@@ -1424,11 +1766,14 @@ def load_state(path: Path) -> IncrementalClusterState:
             raise ValueError(f"Invalid incremental state: {path}")
         fields = {key: payload[key] for key in required_fields}
         fields["center_statistics"] = payload.get("center_statistics", {})
+        fields["center_contributions"] = payload.get("center_contributions", {})
         state = IncrementalClusterState(**fields)
     else:
         raise ValueError(f"Invalid incremental state: {path}")
     if not hasattr(state, "center_statistics"):
         state.center_statistics = {}
+    if not hasattr(state, "center_contributions"):
+        state.center_contributions = {}
     if state.config.get("recluster_trigger_policy") != "xb_and_noise_v2":
         state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
         state.config.setdefault(
