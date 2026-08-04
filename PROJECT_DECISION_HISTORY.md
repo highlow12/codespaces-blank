@@ -135,7 +135,7 @@
 
 각 노드에서는 다음 조건을 확인한다.
 
-- silhouette 또는 knee 방식으로 후보 `k` 선택
+- `K=2`부터 XB index를 평가하고 상대 개선율이 둔화되면 후보 탐색 중단
 - 최소 node 크기와 최소 child 크기
 - 최소 분할 silhouette
 - membership 임계값

@@ -31,6 +31,7 @@ class FCMKCandidate:
     labels: np.ndarray
     silhouette: float
     xie_beni: float
+    xb_relative_improvement: float | None
     objective: float
     noise_count: int
     cluster_sizes: list[int]

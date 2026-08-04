@@ -34,6 +34,30 @@ python incremental_clustering.py update \
 
 기본 재클러스터링 기준은 신규 배치 노이즈 비율 30% 초과다. `--noise-threshold 0.01`처럼 업데이트 명령에서 바꿀 수 있다.
 
+## FCM 클러스터 개수 자동 선택
+
+각 계층 노드의 FCM은 기본적으로 `K=2`부터 시작해 XB(Xie-Beni) index를
+계산한다. XB는 작을수록 좋으며, 다음 상대 개선율이 처음으로 설정값보다
+작아지면 탐색을 중단하고 그 직전까지의 후보 중 XB가 가장 작은 `K`를
+선택한다.
+
+```text
+relative_improvement(K) = (XB(K-1) - XB(K)) / abs(XB(K-1))
+```
+
+기본 최소 상대 개선율은 5%다. 다음처럼 변경할 수 있다.
+
+```bash
+python incremental_clustering.py fit \
+  ... \
+  --selection-method xie_beni \
+  --min-xb-relative-improvement 0.03
+```
+
+임계값까지 개선율이 둔화되지 않으면 `--max-clusters`까지 평가한 후보 중
+XB 최솟값을 선택한다. 각 후보의 `xie_beni`와
+`xb_relative_improvement`는 tree JSON의 `candidate_metrics`에 저장된다.
+
 ## ID 규칙
 
 문서와 클러스터·좌표를 다시 연결하려면 ID가 필요하다. 입력 레코드에서 다음 순서로 ID를 선택한다.

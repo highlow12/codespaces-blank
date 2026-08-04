@@ -266,6 +266,7 @@ def _cluster_config(
     min_membership: float,
     distance_z: float,
     selection_method: str,
+    min_xb_relative_improvement: float,
     min_split_silhouette: float,
     pca_components: int,
     seed: int,
@@ -287,6 +288,7 @@ def _cluster_config(
         "min_membership": float(min_membership),
         "distance_z": float(distance_z),
         "selection_method": selection_method,
+        "min_xb_relative_improvement": float(min_xb_relative_improvement),
         "min_split_silhouette": float(min_split_silhouette),
         "pca_components": int(pca_components),
         "seed": int(seed),
@@ -319,6 +321,9 @@ def _fit_hierarchy(
         min_membership=float(config["min_membership"]),
         distance_z=float(config["distance_z"]),
         selection_method=str(config["selection_method"]),
+        min_xb_relative_improvement=float(
+            config.get("min_xb_relative_improvement", 0.05)
+        ),
         min_split_silhouette=float(config["min_split_silhouette"]),
         pca_components=int(config["pca_components"]),
         seed=int(config["seed"]),
@@ -339,7 +344,8 @@ def fit_incremental_state(
     max_clusters: int = 4,
     min_membership: float = 0.20,
     distance_z: float = 3.5,
-    selection_method: str = "silhouette",
+    selection_method: str = "xie_beni",
+    min_xb_relative_improvement: float = 0.05,
     min_split_silhouette: float = 0.05,
     pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
@@ -373,6 +379,7 @@ def fit_incremental_state(
         min_membership=min_membership,
         distance_z=distance_z,
         selection_method=selection_method,
+        min_xb_relative_improvement=min_xb_relative_improvement,
         min_split_silhouette=min_split_silhouette,
         pca_components=pca_components,
         seed=seed,
@@ -744,8 +751,17 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--distance-z", type=float, default=3.5)
     parser.add_argument(
         "--selection-method",
-        choices=["silhouette", "knee"],
-        default="silhouette",
+        choices=["silhouette", "knee", "xie_beni"],
+        default="xie_beni",
+    )
+    parser.add_argument(
+        "--min-xb-relative-improvement",
+        type=float,
+        default=0.05,
+        help=(
+            "Stop increasing k when the XB relative improvement falls below "
+            "this value (default: 0.05)."
+        ),
     )
     parser.add_argument("--min-split-silhouette", type=float, default=0.05)
     parser.add_argument(
@@ -810,6 +826,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         min_membership=args.min_membership,
         distance_z=args.distance_z,
         selection_method=args.selection_method,
+        min_xb_relative_improvement=args.min_xb_relative_improvement,
         min_split_silhouette=args.min_split_silhouette,
         pca_components=args.pca_components,
         seed=args.seed,

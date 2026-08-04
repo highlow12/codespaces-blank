@@ -53,9 +53,18 @@ def main() -> None:
     parser.add_argument("--hierarchical-max-clusters", type=int, default=8)
     parser.add_argument(
         "--hierarchical-k-selection",
-        choices=["silhouette", "knee"],
-        default="silhouette",
+        choices=["silhouette", "knee", "xie_beni"],
+        default="xie_beni",
         help="How to choose k independently at each hierarchy node.",
+    )
+    parser.add_argument(
+        "--hierarchical-min-xb-relative-improvement",
+        type=float,
+        default=0.05,
+        help=(
+            "Stop increasing k when the XB relative improvement falls below "
+            "this value (default: 0.05)."
+        ),
     )
     parser.add_argument("--hierarchical-min-membership", type=float, default=0.40)
     parser.add_argument("--hierarchical-distance-z", type=float, default=3.5)
@@ -182,6 +191,9 @@ def main() -> None:
             min_membership=args.hierarchical_min_membership,
             distance_z=args.hierarchical_distance_z,
             selection_method=args.hierarchical_k_selection,
+            min_xb_relative_improvement=(
+                args.hierarchical_min_xb_relative_improvement
+            ),
             min_split_silhouette=args.hierarchical_min_silhouette,
             pca_components=args.hierarchical_pca_components,
             seed=args.seed,

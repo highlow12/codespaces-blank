@@ -341,6 +341,11 @@ def _candidate_to_record(candidate: FCMKCandidate) -> dict[str, Any]:
         "k": int(candidate.n_clusters),
         "silhouette": finite_or_none(candidate.silhouette),
         "xie_beni": finite_or_none(candidate.xie_beni),
+        "xb_relative_improvement": (
+            finite_or_none(candidate.xb_relative_improvement)
+            if candidate.xb_relative_improvement is not None
+            else None
+        ),
         "objective": finite_or_none(candidate.objective),
         "valid_clusters": int(len(candidate.cluster_sizes)),
         "noise_count": int(candidate.noise_count),
@@ -388,10 +393,19 @@ def select_fcm_cluster_count(
     min_child_size: int = 20,
     min_membership: float = 0.40,
     distance_z: float = 3.5,
-    selection_method: str = "silhouette",
+    selection_method: str = "xie_beni",
+    min_xb_relative_improvement: float = 0.05,
     seed: int = 42,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
-    """Evaluate a node's variable k and return the best FCM split."""
+    """Evaluate increasing k values and return the best FCM split.
+
+    With ``selection_method="xie_beni"``, candidates are evaluated from the
+    configured minimum k upward. Evaluation stops when the relative XB
+    improvement over the preceding k falls below the configured threshold.
+    The lowest-XB valid candidate before that low-gain candidate is selected.
+    If the threshold is never crossed, the lowest-XB candidate in the entire
+    evaluated range is selected.
+    """
 
     if min_clusters < 2:
         raise ValueError("min_clusters must be at least 2")
@@ -399,8 +413,12 @@ def select_fcm_cluster_count(
         raise ValueError("max_clusters must be at least min_clusters")
     if min_child_size < 2:
         raise ValueError("min_child_size must be at least 2")
-    if selection_method not in {"silhouette", "knee"}:
-        raise ValueError("selection_method must be 'silhouette' or 'knee'")
+    if selection_method not in {"silhouette", "knee", "xie_beni"}:
+        raise ValueError(
+            "selection_method must be 'silhouette', 'knee', or 'xie_beni'"
+        )
+    if not 0.0 <= min_xb_relative_improvement <= 1.0:
+        raise ValueError("min_xb_relative_improvement must be between 0 and 1")
 
     Xn = normalize(X, norm="l2")
     node_size = Xn.shape[0]
@@ -409,6 +427,7 @@ def select_fcm_cluster_count(
         return None, [], "too_few_samples_for_two_valid_children"
 
     candidates: list[FCMKCandidate] = []
+    xb_stop_candidate: FCMKCandidate | None = None
     for candidate_k in range(min_clusters, maximum_k + 1):
         result = spherical_fcm(
             Xn,
@@ -437,29 +456,83 @@ def select_fcm_cluster_count(
             except Exception:
                 silhouette = float("nan")
 
-        candidates.append(
-            FCMKCandidate(
-                n_clusters=candidate_k,
-                result=result,
-                labels=labels,
-                silhouette=silhouette,
-                xie_beni=xie_beni_index(Xn, result),
-                objective=spherical_fcm_objective(Xn, result),
-                noise_count=int(np.sum(~non_noise)),
-                cluster_sizes=cluster_sizes,
+        xie_beni = xie_beni_index(Xn, result)
+        xb_relative_improvement: float | None = None
+        if (
+            candidates
+            and np.isfinite(candidates[-1].xie_beni)
+            and np.isfinite(xie_beni)
+        ):
+            previous_xb = candidates[-1].xie_beni
+            xb_relative_improvement = float(
+                (previous_xb - xie_beni) / max(abs(previous_xb), 1e-12)
             )
+
+        candidate = FCMKCandidate(
+            n_clusters=candidate_k,
+            result=result,
+            labels=labels,
+            silhouette=silhouette,
+            xie_beni=xie_beni,
+            xb_relative_improvement=xb_relative_improvement,
+            objective=spherical_fcm_objective(Xn, result),
+            noise_count=int(np.sum(~non_noise)),
+            cluster_sizes=cluster_sizes,
         )
+        candidates.append(candidate)
+
+        previous_candidate = candidates[-2] if len(candidates) >= 2 else None
+        current_is_valid = (
+            len(candidate.cluster_sizes) >= 2
+            and np.isfinite(candidate.silhouette)
+            and np.isfinite(candidate.xie_beni)
+        )
+        previous_is_valid = (
+            previous_candidate is not None
+            and len(previous_candidate.cluster_sizes) >= 2
+            and np.isfinite(previous_candidate.silhouette)
+            and np.isfinite(previous_candidate.xie_beni)
+        )
+        if (
+            selection_method == "xie_beni"
+            and current_is_valid
+            and previous_is_valid
+            and xb_relative_improvement is not None
+            and xb_relative_improvement < min_xb_relative_improvement
+        ):
+            eligible = [
+                evaluated
+                for evaluated in candidates[:-1]
+                if len(evaluated.cluster_sizes) >= 2
+                and np.isfinite(evaluated.silhouette)
+                and np.isfinite(evaluated.xie_beni)
+            ]
+            xb_stop_candidate = min(
+                eligible,
+                key=lambda evaluated: (evaluated.xie_beni, evaluated.n_clusters),
+            )
+            break
 
     valid_candidates = [
         candidate
         for candidate in candidates
-        if len(candidate.cluster_sizes) >= 2 and np.isfinite(candidate.silhouette)
+        if len(candidate.cluster_sizes) >= 2
+        and np.isfinite(candidate.silhouette)
+        and (
+            selection_method != "xie_beni"
+            or np.isfinite(candidate.xie_beni)
+        )
     ]
     if not valid_candidates:
+        invalid_reason = (
+            "no_valid_xie_beni_split"
+            if selection_method == "xie_beni"
+            else "no_valid_silhouette_split"
+        )
         return (
             None,
             [_candidate_to_record(candidate) for candidate in candidates],
-            "no_valid_silhouette_split",
+            invalid_reason,
         )
 
     if selection_method == "silhouette":
@@ -473,10 +546,29 @@ def select_fcm_cluster_count(
                 -candidate.n_clusters,
             ),
         )
-    else:
+    elif selection_method == "knee":
         best = _choose_knee_candidate(valid_candidates)
+    elif xb_stop_candidate is not None:
+        best = xb_stop_candidate
+    else:
+        best = min(
+            valid_candidates,
+            key=lambda candidate: (candidate.xie_beni, candidate.n_clusters),
+        )
 
-    return best, [_candidate_to_record(candidate) for candidate in candidates], "selected"
+    if selection_method == "xie_beni":
+        selection_reason = (
+            "selected_xb_relative_improvement"
+            if xb_stop_candidate is not None
+            else "selected_xb_minimum"
+        )
+    else:
+        selection_reason = "selected"
+    return (
+        best,
+        [_candidate_to_record(candidate) for candidate in candidates],
+        selection_reason,
+    )
 
 
 def run_hierarchical_pca_fcm(
@@ -490,7 +582,8 @@ def run_hierarchical_pca_fcm(
     max_clusters: int = 8,
     min_membership: float = 0.40,
     distance_z: float = 3.5,
-    selection_method: str = "silhouette",
+    selection_method: str = "xie_beni",
+    min_xb_relative_improvement: float = 0.05,
     min_split_silhouette: float = 0.05,
     pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
@@ -512,8 +605,12 @@ def run_hierarchical_pca_fcm(
         raise ValueError("min_clusters must be at least 2")
     if max_clusters < min_clusters:
         raise ValueError("max_clusters must be at least min_clusters")
-    if selection_method not in {"silhouette", "knee"}:
-        raise ValueError("selection_method must be 'silhouette' or 'knee'")
+    if selection_method not in {"silhouette", "knee", "xie_beni"}:
+        raise ValueError(
+            "selection_method must be 'silhouette', 'knee', or 'xie_beni'"
+        )
+    if not 0.0 <= min_xb_relative_improvement <= 1.0:
+        raise ValueError("min_xb_relative_improvement must be between 0 and 1")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
         raise ValueError("min_split_silhouette must be between -1 and 1")
 
@@ -552,7 +649,9 @@ def run_hierarchical_pca_fcm(
             "size": int(size),
             "selected_k": None,
             "selected_silhouette": None,
+            "selected_xie_beni": None,
             "selected_valid_clusters": 0,
+            "selection_reason": None,
             "noise_count": 0,
             "candidate_metrics": [],
             "stop_reason": None,
@@ -598,9 +697,11 @@ def run_hierarchical_pca_fcm(
             min_membership=min_membership,
             distance_z=distance_z,
             selection_method=selection_method,
+            min_xb_relative_improvement=min_xb_relative_improvement,
             seed=seed + depth * 100_003 + indices.size,
         )
         node["candidate_metrics"] = candidate_metrics
+        node["selection_reason"] = reason
         if best is None:
             node["stop_reason"] = reason
             if depth == 0:
@@ -615,6 +716,7 @@ def run_hierarchical_pca_fcm(
 
         node["selected_k"] = int(best.n_clusters)
         node["selected_silhouette"] = float(best.silhouette)
+        node["selected_xie_beni"] = float(best.xie_beni)
         node["selected_valid_clusters"] = int(len(best.cluster_sizes))
         node["noise_count"] = int(best.noise_count)
 
@@ -777,6 +879,7 @@ def run_hierarchical_pca_fcm(
         "min_clusters": int(min_clusters),
         "max_clusters": int(max_clusters),
         "selection_method": selection_method,
+        "min_xb_relative_improvement": float(min_xb_relative_improvement),
         "min_split_silhouette": float(min_split_silhouette),
         "min_membership": float(min_membership),
         "distance_z": float(distance_z),
