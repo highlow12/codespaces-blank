@@ -62,8 +62,17 @@ def main() -> None:
         type=float,
         default=0.05,
         help=(
-            "Stop increasing k when the XB relative improvement falls below "
-            "this value (default: 0.05)."
+            "Legacy xie_beni method: stop when XB relative improvement falls "
+            "below this value (default: 0.05)."
+        ),
+    )
+    parser.add_argument(
+        "--hierarchical-xb-worsening-patience",
+        type=int,
+        default=2,
+        help=(
+            "After XB first worsens, evaluate this many additional k values "
+            "for multi-metric selection (default: 2)."
         ),
     )
     parser.add_argument("--hierarchical-min-membership", type=float, default=0.40)
@@ -193,6 +202,9 @@ def main() -> None:
             selection_method=args.hierarchical_k_selection,
             min_xb_relative_improvement=(
                 args.hierarchical_min_xb_relative_improvement
+            ),
+            xb_worsening_patience=(
+                args.hierarchical_xb_worsening_patience
             ),
             min_split_silhouette=args.hierarchical_min_silhouette,
             pca_components=args.hierarchical_pca_components,

@@ -407,44 +407,62 @@ def _candidate_to_record(candidate: FCMKCandidate) -> dict[str, Any]:
     }
 
 
-def _normalized_desirability(
+def _rank_desirability(
     values: np.ndarray,
     *,
     higher_is_better: bool,
 ) -> np.ndarray:
-    """Scale one metric to [0, 1], returning neutral scores for ties."""
+    """Convert metric ranks to [0, 1] desirability with averaged ties."""
 
-    spread = float(np.ptp(values))
-    if not np.all(np.isfinite(values)) or spread <= 1e-12:
-        return np.full(values.shape, 0.5, dtype=np.float64)
-    scores = (values - np.min(values)) / spread
-    return scores if higher_is_better else 1.0 - scores
+    if not np.all(np.isfinite(values)):
+        raise ValueError("rank desirability requires finite values")
+    if values.size == 1:
+        return np.ones(values.shape, dtype=np.float64)
+
+    sort_values = -values if higher_is_better else values
+    order = np.argsort(sort_values, kind="stable")
+    ordered_values = sort_values[order]
+    ranks = np.empty(values.shape, dtype=np.float64)
+    start = 0
+    while start < values.size:
+        end = start + 1
+        while end < values.size and np.isclose(
+            ordered_values[end],
+            ordered_values[start],
+            rtol=1e-12,
+            atol=1e-12,
+        ):
+            end += 1
+        average_rank = (start + 1 + end) / 2.0
+        ranks[order[start:end]] = average_rank
+        start = end
+    return 1.0 - (ranks - 1.0) / (values.size - 1.0)
 
 
 def _score_multi_metric_candidates(candidates: list[FCMKCandidate]) -> None:
-    """Set an equal-weight validity score across four complementary metrics."""
+    """Set an equal-weight validity score across three fuzzy metrics."""
 
     if not candidates:
         return
     metric_specs = (
-        ("xie_beni", False),
-        ("modified_partition_coefficient", True),
-        ("normalized_partition_entropy", False),
-        ("silhouette", True),
+        ("xie_beni", False, 0.50),
+        ("modified_partition_coefficient", True, 0.25),
+        ("normalized_partition_entropy", False, 0.25),
     )
-    desirabilities = []
-    for attribute, higher_is_better in metric_specs:
+    weighted_desirabilities = []
+    for attribute, higher_is_better, weight in metric_specs:
         values = np.asarray(
             [getattr(candidate, attribute) for candidate in candidates],
             dtype=np.float64,
         )
-        desirabilities.append(
-            _normalized_desirability(
+        weighted_desirabilities.append(
+            weight
+            * _rank_desirability(
                 values,
                 higher_is_better=higher_is_better,
             )
         )
-    scores = np.mean(np.vstack(desirabilities), axis=0)
+    scores = np.sum(np.vstack(weighted_desirabilities), axis=0)
     for candidate, score in zip(candidates, scores, strict=True):
         candidate.selection_score = float(score)
 
@@ -491,15 +509,18 @@ def select_fcm_cluster_count(
     distance_z: float = 3.5,
     selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
+    xb_worsening_patience: int = 2,
     seed: int = 42,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
     """Evaluate increasing k values and return the best FCM split.
 
     With ``selection_method="multi_metric"``, candidates are evaluated from
-    the configured minimum k upward until XB improvement falls below the
-    configured threshold. XB, modified partition coefficient, normalized
-    partition entropy, and silhouette are then normalized to [0, 1] and
-    averaged with equal weights. Raw PC and PE are retained for reporting.
+    the configured minimum k upward. After XB first worsens, two additional k
+    values are evaluated by default. XB, modified partition coefficient, and
+    normalized partition entropy are converted to rank desirabilities. They
+    are combined with weights 0.50, 0.25, and 0.25 respectively. Silhouette is
+    retained only for diagnostics and legacy selection methods. Raw PC and PE
+    are retained for reporting.
     """
 
     if min_clusters < 2:
@@ -520,6 +541,8 @@ def select_fcm_cluster_count(
         )
     if not 0.0 <= min_xb_relative_improvement <= 1.0:
         raise ValueError("min_xb_relative_improvement must be between 0 and 1")
+    if xb_worsening_patience < 0:
+        raise ValueError("xb_worsening_patience must be non-negative")
 
     Xn = normalize(X, norm="l2")
     node_size = Xn.shape[0]
@@ -529,6 +552,7 @@ def select_fcm_cluster_count(
 
     candidates: list[FCMKCandidate] = []
     xb_stop_candidate: FCMKCandidate | None = None
+    multi_metric_stop_k: int | None = None
     for candidate_k in range(min_clusters, maximum_k + 1):
         result = spherical_fcm(
             Xn,
@@ -600,14 +624,20 @@ def select_fcm_cluster_count(
         current_is_valid = (
             len(candidate.cluster_sizes) >= 2
             and min(candidate.cluster_sizes) >= min_child_size
-            and np.isfinite(candidate.silhouette)
+            and (
+                selection_method == "multi_metric"
+                or np.isfinite(candidate.silhouette)
+            )
             and np.isfinite(candidate.xie_beni)
         )
         previous_is_valid = (
             previous_candidate is not None
             and len(previous_candidate.cluster_sizes) >= 2
             and min(previous_candidate.cluster_sizes) >= min_child_size
-            and np.isfinite(previous_candidate.silhouette)
+            and (
+                selection_method == "multi_metric"
+                or np.isfinite(previous_candidate.silhouette)
+            )
             and np.isfinite(previous_candidate.xie_beni)
         )
         if (
@@ -615,20 +645,45 @@ def select_fcm_cluster_count(
             and current_is_valid
             and previous_is_valid
             and xb_relative_improvement is not None
-            and xb_relative_improvement < min_xb_relative_improvement
-        ):
-            eligible = [
-                evaluated
-                for evaluated in candidates[:-1]
-                if len(evaluated.cluster_sizes) >= 2
-                and min(evaluated.cluster_sizes) >= min_child_size
-                and np.isfinite(evaluated.silhouette)
-                and np.isfinite(evaluated.xie_beni)
-            ]
-            xb_stop_candidate = min(
-                eligible,
-                key=lambda evaluated: (evaluated.xie_beni, evaluated.n_clusters),
+            and (
+                (
+                    selection_method == "xie_beni"
+                    and xb_relative_improvement < min_xb_relative_improvement
+                )
+                or (
+                    selection_method == "multi_metric"
+                    and xb_relative_improvement < 0.0
+                )
             )
+        ):
+            if selection_method == "xie_beni":
+                eligible = [
+                    evaluated
+                    for evaluated in candidates[:-1]
+                    if len(evaluated.cluster_sizes) >= 2
+                    and min(evaluated.cluster_sizes) >= min_child_size
+                    and np.isfinite(evaluated.silhouette)
+                    and np.isfinite(evaluated.xie_beni)
+                ]
+                xb_stop_candidate = min(
+                    eligible,
+                    key=lambda evaluated: (
+                        evaluated.xie_beni,
+                        evaluated.n_clusters,
+                    ),
+                )
+                break
+            if multi_metric_stop_k is None:
+                multi_metric_stop_k = min(
+                    maximum_k,
+                    candidate_k + xb_worsening_patience,
+                )
+
+        if (
+            selection_method == "multi_metric"
+            and multi_metric_stop_k is not None
+            and candidate_k >= multi_metric_stop_k
+        ):
             break
 
     valid_candidates = [
@@ -636,7 +691,10 @@ def select_fcm_cluster_count(
         for candidate in candidates
         if len(candidate.cluster_sizes) >= 2
         and min(candidate.cluster_sizes) >= min_child_size
-        and np.isfinite(candidate.silhouette)
+        and (
+            selection_method == "multi_metric"
+            or np.isfinite(candidate.silhouette)
+        )
         and (
             selection_method not in {"xie_beni", "multi_metric"}
             or np.isfinite(candidate.xie_beni)
@@ -680,8 +738,9 @@ def select_fcm_cluster_count(
             valid_candidates,
             key=lambda candidate: (
                 candidate.selection_score,
-                candidate.silhouette,
                 -candidate.xie_beni,
+                candidate.modified_partition_coefficient,
+                -candidate.normalized_partition_entropy,
                 -candidate.n_clusters,
             ),
         )
@@ -695,8 +754,8 @@ def select_fcm_cluster_count(
 
     if selection_method == "multi_metric":
         selection_reason = (
-            "selected_multi_metric_xb_stop"
-            if xb_stop_candidate is not None
+            "selected_multi_metric_xb_worsening_patience"
+            if multi_metric_stop_k is not None
             else "selected_multi_metric_max_k"
         )
     elif selection_method == "xie_beni":
@@ -727,6 +786,7 @@ def run_hierarchical_pca_fcm(
     distance_z: float = 3.5,
     selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
+    xb_worsening_patience: int = 2,
     min_split_silhouette: float = 0.05,
     pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
     seed: int = 42,
@@ -760,6 +820,8 @@ def run_hierarchical_pca_fcm(
         )
     if not 0.0 <= min_xb_relative_improvement <= 1.0:
         raise ValueError("min_xb_relative_improvement must be between 0 and 1")
+    if xb_worsening_patience < 0:
+        raise ValueError("xb_worsening_patience must be non-negative")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
         raise ValueError("min_split_silhouette must be between -1 and 1")
 
@@ -850,6 +912,7 @@ def run_hierarchical_pca_fcm(
             distance_z=distance_z,
             selection_method=selection_method,
             min_xb_relative_improvement=min_xb_relative_improvement,
+            xb_worsening_patience=xb_worsening_patience,
             seed=seed + depth * 100_003 + indices.size,
         )
         node["candidate_metrics"] = candidate_metrics
@@ -859,7 +922,10 @@ def run_hierarchical_pca_fcm(
             if depth == 0:
                 make_root_fallback(reason)
             return
-        if best.silhouette < min_split_silhouette:
+        if (
+            selection_method != "multi_metric"
+            and best.silhouette < min_split_silhouette
+        ):
             node["stop_reason"] = "silhouette_below_threshold"
             node["selected_silhouette"] = float(best.silhouette)
             if depth == 0:
@@ -1041,12 +1107,13 @@ def run_hierarchical_pca_fcm(
         "max_clusters": int(max_clusters),
         "selection_method": selection_method,
         "min_xb_relative_improvement": float(min_xb_relative_improvement),
+        "xb_worsening_patience": int(xb_worsening_patience),
         "multi_metric_weights": {
-            "xie_beni": 0.25,
+            "xie_beni": 0.50,
             "modified_partition_coefficient": 0.25,
             "normalized_partition_entropy": 0.25,
-            "silhouette": 0.25,
         },
+        "multi_metric_normalization": "rank_average_ties",
         "multi_metric_assign_all_samples": True,
         "min_split_silhouette": float(min_split_silhouette),
         "min_membership": float(min_membership),

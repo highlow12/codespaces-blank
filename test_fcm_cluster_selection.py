@@ -48,11 +48,17 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         *,
         threshold: float = 0.05,
         selection_method: str = "xie_beni",
+        patience: int = 2,
+        silhouette_values: list[float] | None = None,
     ):
         with (
             patch("fcm_hierarchy.spherical_fcm", side_effect=self._fcm_result),
             patch("fcm_hierarchy._filter_fcm_labels", side_effect=self._filtered_labels),
-            patch("fcm_hierarchy.silhouette_score", return_value=0.5),
+            patch(
+                "fcm_hierarchy.silhouette_score",
+                side_effect=silhouette_values,
+                return_value=0.5,
+            ),
             patch("fcm_hierarchy.xie_beni_index", side_effect=xb_values),
             patch("fcm_hierarchy.spherical_fcm_objective", return_value=1.0),
         ):
@@ -63,6 +69,7 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
                 min_child_size=4,
                 selection_method=selection_method,
                 min_xb_relative_improvement=threshold,
+                xb_worsening_patience=patience,
             )
 
     def test_stops_at_first_small_relative_improvement(self) -> None:
@@ -110,20 +117,51 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertAlmostEqual(partition_entropy(result), np.log(2.0) / 2.0)
         self.assertAlmostEqual(normalized_partition_entropy(result), 0.50)
 
-    def test_multi_metric_scores_all_candidates_seen_at_xb_stop(self) -> None:
+    def test_multi_metric_checks_two_more_k_values_after_xb_worsens(self) -> None:
         best, metrics, reason = self._select(
-            [0.50, 0.30, 0.29, 0.10],
+            [0.50, 0.30, 0.31, 0.25, 0.20, 0.10],
             selection_method="multi_metric",
+            silhouette_values=[0.99, 0.50, 0.20, 0.00, -0.90],
         )
 
-        self.assertEqual(reason, "selected_multi_metric_xb_stop")
+        self.assertEqual(
+            reason,
+            "selected_multi_metric_xb_worsening_patience",
+        )
         self.assertIsNotNone(best)
-        self.assertEqual(best.n_clusters, 4)
-        self.assertEqual([metric["k"] for metric in metrics], [2, 3, 4])
+        self.assertEqual(best.n_clusters, 6)
+        self.assertEqual(
+            [metric["k"] for metric in metrics],
+            [2, 3, 4, 5, 6],
+        )
         for metric in metrics:
             self.assertIsNotNone(metric["partition_coefficient"])
             self.assertIsNotNone(metric["partition_entropy"])
             self.assertIsNotNone(metric["selection_score"])
+
+    def test_rejects_negative_xb_worsening_patience(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must be non-negative"):
+            select_fcm_cluster_count(
+                self.features,
+                min_child_size=4,
+                selection_method="multi_metric",
+                xb_worsening_patience=-1,
+            )
+
+    def test_rank_scoring_is_not_compressed_by_extreme_xb(self) -> None:
+        best, metrics, reason = self._select(
+            [0.237, 0.221, 1.11, 1.5e15, 1.75e14],
+            selection_method="multi_metric",
+        )
+
+        self.assertEqual(
+            reason,
+            "selected_multi_metric_xb_worsening_patience",
+        )
+        self.assertIsNotNone(best)
+        self.assertEqual(best.n_clusters, 3)
+        scores = {metric["k"]: metric["selection_score"] for metric in metrics}
+        self.assertGreater(scores[3], scores[2])
 
 
 if __name__ == "__main__":

@@ -41,31 +41,34 @@ python incremental_clustering.py update \
 - XB(Xie-Beni): 낮을수록 좋음
 - Partition Coefficient: 높을수록 좋음
 - Partition Entropy: 낮을수록 좋음
-- Silhouette coefficient: 높을수록 좋음
 
 기본 `multi_metric` 방식에서는 별도 noise를 만들지 않고 모든 샘플을 최대
 membership의 클러스터에 배정한 뒤 지표를 계산한다. 단, 최소 child 크기를
 충족하지 못한 후보는 선택 대상에서 제외한다.
 
-XB 상대 개선율이 처음으로 설정값보다 작아지면 탐색을 중단한다. 평가한
-후보 전체에 대해 XB, modified PC, normalized PE, silhouette을 각각
-`0~1`로 정규화하고 동일 가중치 평균인 `selection_score`가 가장 높은 `K`를
-선택한다. PC와 PE 원값도 결과에 함께 저장한다.
+XB가 직전 K보다 처음으로 악화되면 그 지점에서 K를 기본 두 번 더 늘려
+평가한 뒤 탐색을 중단한다. 평가한 후보 전체에 대해 XB, modified PC,
+normalized PE의 순위를 `0~1` 선호도 점수로 바꾼다. 동률은 평균 순위를
+사용하며 XB 50%, modified PC 25%, normalized PE 25%로 합산한
+`selection_score`가 가장 높은 `K`를 선택한다. 따라서 하나의 극단값이
+다른 후보 사이의 차이를 압축하지 않는다. PC와 PE 원값도 결과에 함께
+저장한다. Silhouette은 진단 출력에는 남지만 `multi_metric` 방식의 선택,
+탐색 중단, 계층 분할 중단에는 사용하지 않는다.
 
 ```text
 relative_improvement(K) = (XB(K-1) - XB(K)) / abs(XB(K-1))
 ```
 
-기본 최소 상대 개선율은 5%다. 다음처럼 변경할 수 있다.
+XB 악화 후 추가로 확인할 K 개수는 기본 2개다. 다음처럼 변경할 수 있다.
 
 ```bash
 python incremental_clustering.py fit \
   ... \
   --selection-method multi_metric \
-  --min-xb-relative-improvement 0.03
+  --xb-worsening-patience 3
 ```
 
-임계값까지 개선율이 둔화되지 않으면 `--max-clusters`까지 평가한다. 각
+XB가 악화되지 않으면 `--max-clusters`까지 평가한다. 각
 후보의 모든 지표와 `selection_score`는 tree JSON의 `candidate_metrics`에
 저장된다.
 
