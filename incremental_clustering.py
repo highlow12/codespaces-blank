@@ -35,8 +35,16 @@ from clustering_types import HierarchicalModel
 from embedding_data import load_embeddings_from_json
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    DEFAULT_FORCED_NOISE_RATIO,
+    DEFAULT_MAX_MEMBERSHIP_GAP,
+    DOCUMENT_TYPE_BOUNDARY,
+    DOCUMENT_TYPE_CORE,
+    DOCUMENT_TYPE_NOISE,
+    classify_fcm_documents,
     conditional_memberships_from_projected,
     fcm_memberships_from_centers,
+    fcm_noise_scores,
+    forced_noise_mask,
     path_membership_column,
     run_hierarchical_pca_fcm,
     transform_pca_normalized_features,
@@ -102,6 +110,11 @@ def _assignments_from_labels(
     metadata: pd.DataFrame,
     labels_by_level: np.ndarray,
     is_noise: np.ndarray,
+    is_natural_noise: np.ndarray,
+    is_forced_noise: np.ndarray,
+    document_types: np.ndarray,
+    noise_scores: np.ndarray,
+    boundary_level: np.ndarray,
     noise_level: np.ndarray,
     soft_memberships_by_level: list[np.ndarray] | None = None,
     conditional_memberships: dict[str, np.ndarray] | None = None,
@@ -147,6 +160,12 @@ def _assignments_from_labels(
 
     assignments["cluster_path"] = cluster_paths
     assignments["is_noise"] = is_noise.astype(bool)
+    assignments["is_natural_noise"] = is_natural_noise.astype(bool)
+    assignments["is_forced_noise"] = is_forced_noise.astype(bool)
+    assignments["is_boundary"] = document_types == DOCUMENT_TYPE_BOUNDARY
+    assignments["document_type"] = document_types
+    assignments["noise_score"] = noise_scores
+    assignments["boundary_level"] = boundary_level.astype(int)
     assignments["noise_level"] = noise_level.astype(int)
     assignments["leaf_level"] = leaf_level
     return assignments
@@ -158,6 +177,8 @@ def assign_to_hierarchy(
     hierarchy_model: HierarchicalModel,
     *,
     min_membership: float,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+    forced_noise_ratio: float = DEFAULT_FORCED_NOISE_RATIO,
     m: float = 2.0,
 ) -> tuple[pd.DataFrame, float]:
     """Assign a batch to fixed hierarchy centers and return its noise ratio."""
@@ -166,7 +187,10 @@ def assign_to_hierarchy(
     frame = _validate_metadata(metadata, len(values))
     if not 0.0 <= min_membership <= 1.0:
         raise ValueError("min_membership must be between 0 and 1")
-
+    if not 0.0 <= max_membership_gap <= 1.0:
+        raise ValueError("max_membership_gap must be between 0 and 1")
+    if not 0.0 <= forced_noise_ratio <= 1.0:
+        raise ValueError("forced_noise_ratio must be between 0 and 1")
     projected = transform_pca_normalized_features(values, hierarchy_model.pca)
     conditional_memberships = conditional_memberships_from_projected(
         projected,
@@ -179,6 +203,9 @@ def assign_to_hierarchy(
         dtype=int,
     )
     is_noise = np.zeros(len(values), dtype=bool)
+    document_types = np.full(len(values), DOCUMENT_TYPE_CORE, dtype=object)
+    noise_scores = np.zeros(len(values), dtype=np.float64)
+    boundary_level = np.full(len(values), -1, dtype=int)
     noise_level = np.full(len(values), -1, dtype=int)
     max_cluster_count = max(
         (
@@ -219,13 +246,38 @@ def assign_to_hierarchy(
                 row_indices = np.arange(len(indices))
                 assigned_distances = distances[row_indices, local_labels]
                 thresholds = node_model.distance_thresholds[local_labels]
-                local_noise = (
-                    memberships.max(axis=1) < min_membership
-                ) | (assigned_distances > thresholds)
+                local_document_types = classify_fcm_documents(
+                    memberships,
+                    assigned_distances,
+                    thresholds,
+                    min_membership=min_membership,
+                    max_membership_gap=max_membership_gap,
+                )
+                local_noise_scores = fcm_noise_scores(
+                    memberships,
+                    assigned_distances,
+                    local_labels,
+                )
+                noise_scores[indices] = np.maximum(
+                    noise_scores[indices],
+                    local_noise_scores,
+                )
+                local_noise = local_document_types == DOCUMENT_TYPE_NOISE
+                local_boundary = local_document_types == DOCUMENT_TYPE_BOUNDARY
+
+                if np.any(local_boundary):
+                    boundary_indices = indices[local_boundary]
+                    first_boundary = (
+                        document_types[boundary_indices] == DOCUMENT_TYPE_CORE
+                    )
+                    boundary_level[boundary_indices[first_boundary]] = depth + 1
+                    document_types[boundary_indices] = DOCUMENT_TYPE_BOUNDARY
 
                 if np.any(local_noise):
                     noise_indices = indices[local_noise]
                     is_noise[noise_indices] = True
+                    document_types[noise_indices] = DOCUMENT_TYPE_NOISE
+                    boundary_level[noise_indices] = -1
                     noise_level[noise_indices] = depth + 1
 
                 valid_indices = indices[~local_noise]
@@ -245,10 +297,26 @@ def assign_to_hierarchy(
                         )
             active = next_active
 
+    is_natural_noise = is_noise.copy()
+    is_forced_noise = forced_noise_mask(
+        noise_scores,
+        frame["id"].to_numpy(),
+        forced_noise_ratio=forced_noise_ratio,
+    )
+    is_noise |= is_forced_noise
+    forced_only = is_forced_noise & ~is_natural_noise
+    document_types[is_forced_noise] = DOCUMENT_TYPE_NOISE
+    noise_level[forced_only] = 0
+
     assignments = _assignments_from_labels(
         frame,
         labels_by_level,
         is_noise,
+        is_natural_noise,
+        is_forced_noise,
+        document_types,
+        noise_scores,
+        boundary_level,
         noise_level,
         soft_memberships_by_level,
         conditional_memberships,
@@ -264,6 +332,8 @@ def _cluster_config(
     min_clusters: int,
     max_clusters: int,
     min_membership: float,
+    max_membership_gap: float,
+    forced_noise_ratio: float,
     distance_z: float,
     selection_method: str,
     min_xb_relative_improvement: float,
@@ -287,6 +357,8 @@ def _cluster_config(
         "min_clusters": int(min_clusters),
         "max_clusters": int(max_clusters),
         "min_membership": float(min_membership),
+        "max_membership_gap": float(max_membership_gap),
+        "forced_noise_ratio": float(forced_noise_ratio),
         "distance_z": float(distance_z),
         "selection_method": selection_method,
         "min_xb_relative_improvement": float(min_xb_relative_improvement),
@@ -321,6 +393,12 @@ def _fit_hierarchy(
         min_clusters=int(config["min_clusters"]),
         max_clusters=int(config["max_clusters"]),
         min_membership=float(config["min_membership"]),
+        max_membership_gap=float(
+            config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
+        forced_noise_ratio=float(
+            config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
+        ),
         distance_z=float(config["distance_z"]),
         selection_method=str(config["selection_method"]),
         min_xb_relative_improvement=float(
@@ -346,6 +424,8 @@ def fit_incremental_state(
     min_clusters: int = 2,
     max_clusters: int = 4,
     min_membership: float = 0.20,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+    forced_noise_ratio: float = DEFAULT_FORCED_NOISE_RATIO,
     distance_z: float = 3.5,
     selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
@@ -381,6 +461,8 @@ def fit_incremental_state(
         min_clusters=min_clusters,
         max_clusters=max_clusters,
         min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+        forced_noise_ratio=forced_noise_ratio,
         distance_z=distance_z,
         selection_method=selection_method,
         min_xb_relative_improvement=min_xb_relative_improvement,
@@ -436,6 +518,99 @@ def _append_assignments(
     )
 
 
+def _apply_global_forced_noise(
+    assignments: pd.DataFrame,
+    *,
+    forced_noise_ratio: float,
+) -> pd.DataFrame:
+    """Re-rank all accumulated documents and apply one global noise quota."""
+
+    updated = assignments.copy()
+    stored_scores = updated.get(
+        "noise_score",
+        pd.Series(0.0, index=updated.index),
+    )
+    scores = pd.to_numeric(stored_scores, errors="coerce").fillna(0.0)
+    natural_noise = updated.get(
+        "is_natural_noise",
+        updated["is_noise"],
+    ).fillna(False).astype(bool)
+    stored_boundary_level = updated.get(
+        "boundary_level",
+        pd.Series(-1, index=updated.index),
+    )
+    boundary_level = pd.to_numeric(
+        stored_boundary_level,
+        errors="coerce",
+    ).fillna(-1).astype(int)
+    forced_noise = forced_noise_mask(
+        scores.to_numpy(),
+        updated["id"].to_numpy(),
+        forced_noise_ratio=forced_noise_ratio,
+    )
+    is_noise = natural_noise.to_numpy() | forced_noise
+    is_boundary = (
+        (boundary_level.to_numpy() >= 1)
+        & ~natural_noise.to_numpy()
+        & ~forced_noise
+    )
+    document_types = np.full(len(updated), DOCUMENT_TYPE_CORE, dtype=object)
+    document_types[is_boundary] = DOCUMENT_TYPE_BOUNDARY
+    document_types[is_noise] = DOCUMENT_TYPE_NOISE
+
+    updated["is_noise"] = is_noise
+    updated["is_natural_noise"] = natural_noise.to_numpy()
+    updated["is_forced_noise"] = forced_noise
+    updated["is_boundary"] = is_boundary
+    updated["document_type"] = document_types
+    updated["noise_score"] = scores.to_numpy()
+
+    stored_noise_level = updated.get(
+        "noise_level",
+        pd.Series(-1, index=updated.index),
+    )
+    noise_level = pd.to_numeric(
+        stored_noise_level,
+        errors="coerce",
+    ).fillna(-1).astype(int).to_numpy(copy=True)
+    noise_level[~natural_noise.to_numpy()] = np.where(
+        forced_noise[~natural_noise.to_numpy()],
+        0,
+        -1,
+    )
+    updated["noise_level"] = noise_level
+
+    level_columns = sorted(
+        [
+            column
+            for column in updated
+            if column.startswith("level_") and column.endswith("_cluster")
+        ],
+        key=lambda column: int(column.split("_")[1]),
+    )
+    labels = updated[level_columns].fillna(-1).to_numpy(dtype=int)
+    assigned_depth = np.sum(labels >= 0, axis=1)
+    leaf_cluster = np.full(len(updated), -1, dtype=int)
+    has_leaf = assigned_depth > 0
+    rows = np.arange(len(updated))
+    leaf_cluster[has_leaf] = labels[
+        rows[has_leaf],
+        assigned_depth[has_leaf] - 1,
+    ]
+    leaf_cluster[is_noise] = -1
+    updated["cluster"] = leaf_cluster
+
+    cluster_paths: list[str] = []
+    for row, row_labels in enumerate(labels):
+        parts = [str(int(label)) for label in row_labels if label >= 0]
+        if is_noise[row]:
+            cluster_paths.append("/".join(parts + ["noise"]) if parts else "noise")
+        else:
+            cluster_paths.append("/".join(parts) if parts else "root")
+    updated["cluster_path"] = cluster_paths
+    return updated
+
+
 def _refresh_tree_after_append(
     tree: dict[str, Any],
     new_assignments: pd.DataFrame,
@@ -478,16 +653,58 @@ def _refresh_tree_after_append(
             if node is not None:
                 node["size"] += 1
 
-        if bool(row["is_noise"]):
+        if bool(row["is_noise"]) and not bool(row.get("is_forced_noise", False)):
             noise_level = int(row["noise_level"])
             parent_path = "/".join(path_parts[: max(noise_level - 1, 0)])
             node = nodes_by_path.get(parent_path)
             if node is not None:
                 node["noise_count"] += 1
+        elif (
+            not bool(row.get("is_natural_noise", False))
+            and int(row.get("boundary_level", -1)) >= 1
+        ):
+            boundary_level = max(int(row.get("boundary_level", 1)), 1)
+            parent_path = "/".join(path_parts[: boundary_level - 1])
+            node = nodes_by_path.get(parent_path)
+            if node is not None:
+                node["boundary_count"] = int(node.get("boundary_count", 0)) + 1
 
     summary = copy.deepcopy(updated_tree["summary"])
     summary["samples"] = int(len(all_assignments))
     summary["noise_count"] = int(all_assignments["is_noise"].sum())
+    natural_noise = all_assignments.get(
+        "is_natural_noise",
+        all_assignments["is_noise"],
+    ).fillna(False).astype(bool)
+    forced_noise = all_assignments.get(
+        "is_forced_noise",
+        pd.Series(False, index=all_assignments.index),
+    ).fillna(False).astype(bool)
+    summary["natural_noise_count"] = int(natural_noise.sum())
+    summary["forced_noise_count"] = int(forced_noise.sum())
+    summary["forced_only_noise_count"] = int((forced_noise & ~natural_noise).sum())
+    if "document_type" in all_assignments:
+        stored_types = all_assignments["document_type"]
+        document_types = stored_types.where(
+            stored_types.notna(),
+            np.where(
+                all_assignments["is_noise"],
+                DOCUMENT_TYPE_NOISE,
+                DOCUMENT_TYPE_CORE,
+            ),
+        )
+    else:
+        document_types = pd.Series(
+            np.where(
+                all_assignments["is_noise"],
+                DOCUMENT_TYPE_NOISE,
+                DOCUMENT_TYPE_CORE,
+            )
+        )
+    summary["boundary_count"] = int(
+        (document_types == DOCUMENT_TYPE_BOUNDARY).sum()
+    )
+    summary["core_count"] = int((document_types == DOCUMENT_TYPE_CORE).sum())
     summary["noise_by_level"] = {
         str(level): int((all_assignments["noise_level"] == level).sum())
         for level in range(1, len(level_columns) + 1)
@@ -535,14 +752,21 @@ def update_incremental_state(
         if noise_threshold is None
         else noise_threshold
     )
-    new_assignments, new_noise_ratio = assign_to_hierarchy(
+    forced_noise_ratio = float(
+        state.config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
+    )
+    new_assignments, natural_noise_ratio = assign_to_hierarchy(
         values,
         frame,
         state.hierarchy_model,
         min_membership=float(state.config["min_membership"]),
+        max_membership_gap=float(
+            state.config.get("max_membership_gap", DEFAULT_MAX_MEMBERSHIP_GAP)
+        ),
+        forced_noise_ratio=0.0,
         m=float(state.config["m"]),
     )
-    should_recluster = new_noise_ratio > threshold
+    should_recluster = natural_noise_ratio > threshold
     new_coordinates = transform_projection(
         values,
         pca=state.visual_pca,
@@ -569,15 +793,23 @@ def update_incremental_state(
     else:
         hierarchy_model = state.hierarchy_model
         assignments = _append_assignments(state.assignments, new_assignments)
+        assignments = _apply_global_forced_noise(
+            assignments,
+            forced_noise_ratio=forced_noise_ratio,
+        )
+        effective_new_assignments = assignments.iloc[-len(values):].copy()
         tree = _refresh_tree_after_append(
             state.tree,
-            new_assignments,
+            effective_new_assignments,
             assignments,
             int(config["update_count"]),
         )
         reclustered = False
 
+    effective_new_assignments = assignments.iloc[-len(values):].copy()
+    new_noise_ratio = float(effective_new_assignments["is_noise"].mean())
     config["last_update_noise_ratio"] = float(new_noise_ratio)
+    config["last_update_natural_noise_ratio"] = float(natural_noise_ratio)
     config["last_update_reclustered"] = reclustered
     updated_state = IncrementalClusterState(
         embeddings=combined_embeddings,
@@ -593,7 +825,21 @@ def update_incremental_state(
     summary = {
         "new_samples": int(len(values)),
         "new_noise_count": int(round(new_noise_ratio * len(values))),
+        "new_natural_noise_count": int(
+            effective_new_assignments["is_natural_noise"].sum()
+        ),
+        "new_forced_noise_count": int(
+            effective_new_assignments["is_forced_noise"].sum()
+        ),
+        "new_boundary_count": int(effective_new_assignments["is_boundary"].sum()),
+        "new_core_count": int(
+            (
+                effective_new_assignments["document_type"]
+                == DOCUMENT_TYPE_CORE
+            ).sum()
+        ),
         "new_noise_ratio": float(new_noise_ratio),
+        "new_natural_noise_ratio": float(natural_noise_ratio),
         "noise_threshold": float(threshold),
         "reclustered": reclustered,
         "total_samples": int(len(combined_embeddings)),
@@ -753,6 +999,21 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--min-clusters", type=int, default=2)
     parser.add_argument("--max-clusters", type=int, default=4)
     parser.add_argument("--min-membership", type=float, default=0.20)
+    parser.add_argument(
+        "--max-membership-gap",
+        type=float,
+        default=DEFAULT_MAX_MEMBERSHIP_GAP,
+        help=(
+            "Treat low-membership points as boundary candidates when the "
+            "top-two membership gap is below this value (default: 0.10)."
+        ),
+    )
+    parser.add_argument(
+        "--forced-noise-ratio",
+        type=float,
+        default=DEFAULT_FORCED_NOISE_RATIO,
+        help="Force the highest-risk fraction to noise (default: 0.01).",
+    )
     parser.add_argument("--distance-z", type=float, default=3.5)
     parser.add_argument(
         "--selection-method",
@@ -838,6 +1099,8 @@ def _run_fit(args: argparse.Namespace) -> None:
         min_clusters=args.min_clusters,
         max_clusters=args.max_clusters,
         min_membership=args.min_membership,
+        max_membership_gap=args.max_membership_gap,
+        forced_noise_ratio=args.forced_noise_ratio,
         distance_z=args.distance_z,
         selection_method=args.selection_method,
         min_xb_relative_improvement=args.min_xb_relative_improvement,
