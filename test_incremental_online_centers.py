@@ -12,10 +12,12 @@ import pandas as pd
 from clustering_types import HierarchicalModel, HierarchyNodeModel
 from fcm_hierarchy import fit_pca_normalized_features, spherical_fcm
 from incremental_clustering import (
+    DEFAULT_NOISE_THRESHOLD,
     IncrementalClusterState,
     _build_center_statistics,
     _rebuild_tree_counts,
     assign_to_hierarchy,
+    hierarchy_xie_beni_index,
     load_state,
     save_state,
     update_incremental_state,
@@ -73,7 +75,7 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self,
         *,
         center_refresh_interval: int = 10,
-        recluster_interval: int = 3,
+        max_xb_relative_degradation: float = 0.05,
     ) -> IncrementalClusterState:
         projected, pca = fit_pca_normalized_features(
             self.X,
@@ -122,13 +124,21 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             "visual_densmap": False,
             "update_count": 0,
             "center_updates_before_membership_refresh": center_refresh_interval,
-            "membership_refreshes_before_recluster": recluster_interval,
+            "max_xb_relative_degradation": max_xb_relative_degradation,
             "center_updates_since_membership_refresh": 0,
             "membership_refreshes_since_recluster": 0,
             "total_center_updates": 0,
             "total_membership_refreshes": 0,
             "total_reclusters": 0,
         }
+        baseline_xie_beni = hierarchy_xie_beni_index(
+            self.X,
+            model,
+            min_membership=0.0,
+            m=2.0,
+        )
+        config["baseline_xie_beni"] = baseline_xie_beni
+        config["current_xie_beni"] = baseline_xie_beni
         tree = _rebuild_tree_counts(_tree_template(), assignments, 0)
         reducer = _IdentityReducer()
         coordinates = reducer.transform(projected)
@@ -178,10 +188,10 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             previous_centers,
         )
 
-    def test_refresh_then_recluster_and_revisualize_on_schedule(self) -> None:
+    def test_xb_degradation_reclusters_without_revisualizing(self) -> None:
         state = self._make_state(
             center_refresh_interval=1,
-            recluster_interval=2,
+            max_xb_relative_degradation=100.0,
         )
         first_batch = np.asarray(
             [[3.1, 0.4, 0.2, 0.0], [0.2, 3.2, 0.1, 0.0]],
@@ -198,22 +208,16 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self.assertFalse(first_summary["reclustered"])
         self.assertEqual(first.config["membership_refreshes_since_recluster"], 1)
         self.assertEqual(len(first.assignments), len(first.embeddings))
+        first.config["baseline_xie_beni"] = first.config["current_xie_beni"] * 0.1
+        first.config["max_xb_relative_degradation"] = 0.05
 
         second_batch = np.asarray(
             [[2.9, 0.5, 0.2, 0.1], [0.3, 3.0, 0.0, 0.2]],
             dtype=np.float64,
         )
         second_metadata = pd.DataFrame({"id": [102, 103]})
-        refitted_coordinates = np.full((10, 2), 7.0)
-        replacement_reducer = _IdentityReducer()
-
         with patch(
             "incremental_clustering._fit_visualization",
-            return_value=(
-                first.visual_pca,
-                replacement_reducer,
-                refitted_coordinates,
-            ),
         ) as fit_visualization:
             second, second_summary = update_incremental_state(
                 first,
@@ -222,13 +226,44 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             )
 
         self.assertTrue(second_summary["membership_refreshed"])
-        self.assertTrue(second_summary["scheduled_recluster"])
+        self.assertTrue(second_summary["xb_degradation_recluster"])
         self.assertTrue(second_summary["reclustered"])
-        self.assertTrue(second_summary["visualization_refitted"])
-        fit_visualization.assert_called_once()
-        np.testing.assert_array_equal(second.coordinates, refitted_coordinates)
+        self.assertFalse(second_summary["visualization_refitted"])
+        fit_visualization.assert_not_called()
+        np.testing.assert_array_equal(
+            second.coordinates[: len(first.coordinates)],
+            first.coordinates,
+        )
+        self.assertIs(second.visual_reducer, first.visual_reducer)
         self.assertEqual(second.config["membership_refreshes_since_recluster"], 0)
         self.assertEqual(second.config["total_reclusters"], 1)
+
+    def test_default_noise_threshold_is_five_percent(self) -> None:
+        self.assertEqual(DEFAULT_NOISE_THRESHOLD, 0.05)
+
+    def test_noise_above_five_percent_reclusters_without_revisualizing(self) -> None:
+        state = self._make_state(center_refresh_interval=10)
+        state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
+        state.hierarchy_model.nodes[""].distance_thresholds[:] = 0.0
+        previous_coordinates = state.coordinates.copy()
+        batch = np.asarray(
+            [[3.0, 0.8, 0.4, 0.0], [0.4, 3.0, 0.2, 0.1]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [200, 201]})
+
+        with patch("incremental_clustering._fit_visualization") as fit_visualization:
+            updated, summary = update_incremental_state(state, batch, metadata)
+
+        self.assertGreater(summary["new_noise_ratio"], 0.05)
+        self.assertTrue(summary["emergency_recluster"])
+        self.assertTrue(summary["reclustered"])
+        self.assertFalse(summary["visualization_refitted"])
+        fit_visualization.assert_not_called()
+        np.testing.assert_array_equal(
+            updated.coordinates[: len(previous_coordinates)],
+            previous_coordinates,
+        )
 
     def test_version_two_state_preserves_center_statistics(self) -> None:
         state = self._make_state()
@@ -262,6 +297,11 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
                 pickle.dump(payload, handle)
             loaded = load_state(path)
         self.assertEqual(loaded.center_statistics, {})
+        self.assertEqual(loaded.config["noise_threshold"], 0.05)
+        self.assertEqual(
+            loaded.config["recluster_trigger_policy"],
+            "xb_and_noise_v2",
+        )
 
 
 if __name__ == "__main__":

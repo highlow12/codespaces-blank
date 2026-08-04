@@ -2,8 +2,8 @@
 
 The initial batch is clustered with the existing recursive PCA + spherical FCM
 implementation. Later batches update fuzzy cluster centers online. Full
-memberships are periodically refreshed, and repeated refreshes or excessive
-new-batch noise trigger complete re-clustering plus PCA + UMAP re-fitting.
+memberships are periodically refreshed, and XB degradation or excessive
+new-batch noise triggers complete re-clustering while visualization stays fixed.
 """
 
 from __future__ import annotations
@@ -42,9 +42,9 @@ from fcm_hierarchy import (
 )
 
 
-DEFAULT_NOISE_THRESHOLD = 0.30
+DEFAULT_NOISE_THRESHOLD = 0.05
 DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
-DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER = 3
+DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
 
 
 @dataclass
@@ -452,6 +452,76 @@ def _refresh_distance_thresholds(
     return updated_model
 
 
+def hierarchy_xie_beni_index(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    *,
+    min_membership: float,
+    m: float,
+) -> float:
+    """Return the sample-weighted XB index across fitted hierarchy nodes."""
+
+    projected = transform_pca_normalized_features(
+        _validate_embeddings(embeddings),
+        hierarchy_model.pca,
+    )
+    if hierarchy_model.fallback_single_cluster:
+        return float("nan")
+
+    weighted_xb_sum = 0.0
+    evaluated_samples = 0
+    active: dict[str, np.ndarray] = {"": np.arange(len(projected), dtype=int)}
+    for _depth in range(hierarchy_model.max_depth):
+        next_active: dict[str, np.ndarray] = {}
+        for parent_path, indices in active.items():
+            node_model = hierarchy_model.nodes.get(parent_path)
+            if node_model is None or indices.size == 0:
+                continue
+            memberships, distances = fcm_memberships_from_centers(
+                projected[indices],
+                node_model.centers,
+                m=m,
+            )
+            center_differences = (
+                node_model.centers[:, None, :] - node_model.centers[None, :, :]
+            )
+            center_distances_squared = np.sum(center_differences**2, axis=2)
+            np.fill_diagonal(center_distances_squared, np.inf)
+            minimum_separation_squared = float(
+                np.min(center_distances_squared)
+            )
+            if np.isfinite(minimum_separation_squared):
+                numerator = float(np.sum((memberships**m) * (distances**2)))
+                node_xb = numerator / max(
+                    len(indices) * minimum_separation_squared,
+                    1e-12,
+                )
+                weighted_xb_sum += node_xb * len(indices)
+                evaluated_samples += len(indices)
+
+            local_labels = memberships.argmax(axis=1)
+            rows = np.arange(len(indices))
+            local_noise = (
+                memberships.max(axis=1) < min_membership
+            ) | (
+                distances[rows, local_labels]
+                > node_model.distance_thresholds[local_labels]
+            )
+            valid_indices = indices[~local_noise]
+            valid_labels = local_labels[~local_noise]
+            for cluster_id in range(node_model.centers.shape[0]):
+                child_indices = valid_indices[valid_labels == cluster_id]
+                if child_indices.size:
+                    next_active[_path_for_cluster(parent_path, cluster_id)] = (
+                        child_indices
+                    )
+        active = next_active
+
+    if evaluated_samples == 0:
+        return float("nan")
+    return float(weighted_xb_sum / evaluated_samples)
+
+
 def _cluster_config(
     *,
     max_depth: int,
@@ -474,14 +544,17 @@ def _cluster_config(
     visual_spread: float,
     visual_densmap: bool,
     center_updates_before_membership_refresh: int,
-    membership_refreshes_before_recluster: int,
+    max_xb_relative_degradation: float,
 ) -> dict[str, Any]:
     if center_updates_before_membership_refresh < 1:
         raise ValueError(
             "center_updates_before_membership_refresh must be at least 1"
         )
-    if membership_refreshes_before_recluster < 1:
-        raise ValueError("membership_refreshes_before_recluster must be at least 1")
+    if (
+        not np.isfinite(max_xb_relative_degradation)
+        or max_xb_relative_degradation < 0.0
+    ):
+        raise ValueError("max_xb_relative_degradation must be non-negative")
     return {
         "max_depth": int(max_depth),
         "min_node_size": int(min_node_size),
@@ -507,14 +580,13 @@ def _cluster_config(
         "center_updates_before_membership_refresh": int(
             center_updates_before_membership_refresh
         ),
-        "membership_refreshes_before_recluster": int(
-            membership_refreshes_before_recluster
-        ),
+        "max_xb_relative_degradation": float(max_xb_relative_degradation),
         "center_updates_since_membership_refresh": 0,
         "membership_refreshes_since_recluster": 0,
         "total_center_updates": 0,
         "total_membership_refreshes": 0,
         "total_reclusters": 0,
+        "recluster_trigger_policy": "xb_and_noise_v2",
     }
 
 
@@ -590,9 +662,7 @@ def fit_incremental_state(
     center_updates_before_membership_refresh: int = (
         DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
     ),
-    membership_refreshes_before_recluster: int = (
-        DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER
-    ),
+    max_xb_relative_degradation: float = DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
 ) -> IncrementalClusterState:
     """Fit the initial batch and persist reusable clustering/visual models."""
 
@@ -629,11 +699,17 @@ def fit_incremental_state(
         center_updates_before_membership_refresh=(
             center_updates_before_membership_refresh
         ),
-        membership_refreshes_before_recluster=(
-            membership_refreshes_before_recluster
-        ),
+        max_xb_relative_degradation=max_xb_relative_degradation,
     )
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
+    baseline_xie_beni = hierarchy_xie_beni_index(
+        values,
+        hierarchy_model,
+        min_membership=min_membership,
+        m=float(config["m"]),
+    )
+    config["baseline_xie_beni"] = baseline_xie_beni
+    config["current_xie_beni"] = baseline_xie_beni
     visual_pca, visual_reducer, coordinates = _fit_visualization(
         values,
         assignments,
@@ -798,14 +874,24 @@ def update_incremental_state(
         DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH,
     )
     config.setdefault(
-        "membership_refreshes_before_recluster",
-        DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER,
+        "max_xb_relative_degradation",
+        DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
     )
     config.setdefault("center_updates_since_membership_refresh", 0)
     config.setdefault("membership_refreshes_since_recluster", 0)
     config.setdefault("total_center_updates", 0)
     config.setdefault("total_membership_refreshes", 0)
     config.setdefault("total_reclusters", 0)
+    baseline_xie_beni = float(config.get("baseline_xie_beni", np.nan))
+    if not np.isfinite(baseline_xie_beni):
+        baseline_xie_beni = hierarchy_xie_beni_index(
+            state.embeddings,
+            state.hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        config["baseline_xie_beni"] = baseline_xie_beni
+    config.setdefault("current_xie_beni", baseline_xie_beni)
 
     new_assignments, new_noise_ratio = assign_to_hierarchy(
         values,
@@ -865,11 +951,55 @@ def update_incremental_state(
             int(config["total_membership_refreshes"]) + 1
         )
 
-    scheduled_recluster = membership_refreshed and (
-        int(config["membership_refreshes_since_recluster"])
-        >= int(config["membership_refreshes_before_recluster"])
-    )
-    should_recluster = emergency_recluster or scheduled_recluster
+    refreshed_assignments: pd.DataFrame | None = None
+    refreshed_tree: dict[str, Any] | None = None
+    current_xie_beni = float(config["current_xie_beni"])
+    xb_relative_degradation: float | None = None
+    xb_degradation_recluster = False
+    if membership_refreshed:
+        hierarchy_model = _refresh_distance_thresholds(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            distance_z=float(config["distance_z"]),
+            m=float(config["m"]),
+        )
+        refreshed_assignments, _ = assign_to_hierarchy(
+            combined_embeddings,
+            combined_metadata,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        refreshed_tree = _rebuild_tree_counts(
+            state.tree,
+            refreshed_assignments,
+            int(config["update_count"]),
+        )
+        center_statistics = _build_center_statistics(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        current_xie_beni = hierarchy_xie_beni_index(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        config["current_xie_beni"] = current_xie_beni
+        if np.isfinite(baseline_xie_beni) and np.isfinite(current_xie_beni):
+            xb_relative_degradation = float(
+                (current_xie_beni - baseline_xie_beni)
+                / max(abs(baseline_xie_beni), 1e-12)
+            )
+            xb_degradation_recluster = (
+                xb_relative_degradation
+                >= float(config["max_xb_relative_degradation"])
+            )
+
+    should_recluster = emergency_recluster or xb_degradation_recluster
 
     visualization_refitted = False
     if should_recluster:
@@ -878,11 +1008,8 @@ def update_incremental_state(
             combined_metadata,
             config,
         )
-        visual_pca, visual_reducer, combined_coordinates = _fit_visualization(
-            combined_embeddings,
-            assignments,
-            config,
-        )
+        visual_pca = state.visual_pca
+        visual_reducer = state.visual_reducer
         center_statistics = _build_center_statistics(
             combined_embeddings,
             hierarchy_model,
@@ -892,34 +1019,21 @@ def update_incremental_state(
         config["center_updates_since_membership_refresh"] = 0
         config["membership_refreshes_since_recluster"] = 0
         config["total_reclusters"] = int(config["total_reclusters"]) + 1
+        baseline_xie_beni = hierarchy_xie_beni_index(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        current_xie_beni = baseline_xie_beni
+        config["baseline_xie_beni"] = baseline_xie_beni
+        config["current_xie_beni"] = current_xie_beni
         reclustered = True
-        visualization_refitted = True
     elif membership_refreshed:
-        hierarchy_model = _refresh_distance_thresholds(
-            combined_embeddings,
-            hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            distance_z=float(config["distance_z"]),
-            m=float(config["m"]),
-        )
-        assignments, _ = assign_to_hierarchy(
-            combined_embeddings,
-            combined_metadata,
-            hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
-        )
-        tree = _rebuild_tree_counts(
-            state.tree,
-            assignments,
-            int(config["update_count"]),
-        )
-        center_statistics = _build_center_statistics(
-            combined_embeddings,
-            hierarchy_model,
-            min_membership=float(config["min_membership"]),
-            m=float(config["m"]),
-        )
+        if refreshed_assignments is None or refreshed_tree is None:
+            raise RuntimeError("Membership refresh results are unavailable")
+        assignments = refreshed_assignments
+        tree = refreshed_tree
         visual_pca = state.visual_pca
         visual_reducer = state.visual_reducer
         reclustered = False
@@ -939,13 +1053,15 @@ def update_incremental_state(
     config["last_update_reclustered"] = reclustered
     config["last_update_membership_refreshed"] = membership_refreshed
     config["last_update_visualization_refitted"] = visualization_refitted
+    config["last_xb_relative_degradation"] = xb_relative_degradation
+    config["last_update_xb_degradation_recluster"] = xb_degradation_recluster
     tree.setdefault("config", {}).update(
         {
             "center_updates_before_membership_refresh": int(
                 config["center_updates_before_membership_refresh"]
             ),
-            "membership_refreshes_before_recluster": int(
-                config["membership_refreshes_before_recluster"]
+            "max_xb_relative_degradation": float(
+                config["max_xb_relative_degradation"]
             ),
             "center_updates_since_membership_refresh": int(
                 config["center_updates_since_membership_refresh"]
@@ -953,6 +1069,8 @@ def update_incremental_state(
             "membership_refreshes_since_recluster": int(
                 config["membership_refreshes_since_recluster"]
             ),
+            "baseline_xie_beni": float(config["baseline_xie_beni"]),
+            "current_xie_beni": float(config["current_xie_beni"]),
         }
     )
     tree.setdefault("summary", {}).update(
@@ -984,7 +1102,9 @@ def update_incremental_state(
         "center_updated": updated_node_count > 0,
         "updated_center_nodes": int(updated_node_count),
         "membership_refreshed": membership_refreshed,
-        "scheduled_recluster": scheduled_recluster,
+        "xie_beni": float(current_xie_beni),
+        "xb_relative_degradation": xb_relative_degradation,
+        "xb_degradation_recluster": xb_degradation_recluster,
         "emergency_recluster": emergency_recluster,
         "reclustered": reclustered,
         "visualization_refitted": visualization_refitted,
@@ -1067,6 +1187,13 @@ def load_state(path: Path) -> IncrementalClusterState:
         raise ValueError(f"Invalid incremental state: {path}")
     if not hasattr(state, "center_statistics"):
         state.center_statistics = {}
+    if state.config.get("recluster_trigger_policy") != "xb_and_noise_v2":
+        state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
+        state.config.setdefault(
+            "max_xb_relative_degradation",
+            DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
+        )
+        state.config["recluster_trigger_policy"] = "xb_and_noise_v2"
     _validate_embeddings(state.embeddings)
     _validate_metadata(state.metadata, len(state.embeddings))
     if len(state.assignments) != len(state.embeddings):
@@ -1204,10 +1331,10 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         help="Recompute every document membership after this many batch center updates.",
     )
     parser.add_argument(
-        "--membership-refreshes-before-recluster",
-        type=int,
-        default=DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER,
-        help="Re-cluster and re-fit visualization after this many full membership refreshes.",
+        "--max-xb-relative-degradation",
+        type=float,
+        default=DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
+        help="Re-cluster when the hierarchy XB index worsens by this fraction.",
     )
 
 
@@ -1247,9 +1374,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         center_updates_before_membership_refresh=(
             args.center_updates_before_membership_refresh
         ),
-        membership_refreshes_before_recluster=(
-            args.membership_refreshes_before_recluster
-        ),
+        max_xb_relative_degradation=args.max_xb_relative_degradation,
     )
     save_state(state, args.state_output)
     write_outputs(
@@ -1317,7 +1442,7 @@ def build_parser() -> argparse.ArgumentParser:
         "update",
         help=(
             "Update centers and periodically refresh memberships, clustering, "
-            "and visualization."
+            "while keeping visualization coordinates fixed."
         ),
     )
     _add_input_args(update_parser)
