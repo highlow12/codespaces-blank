@@ -25,6 +25,7 @@ from fcm_document_classification import (
     merge_forced_noise,
 )
 from fcm_validity import (
+    _filter_fcm_labels,
     _validate_fcm_selection_parameters,
     select_fcm_cluster_count,
 )

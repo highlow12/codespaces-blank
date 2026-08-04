@@ -11,6 +11,7 @@ from fcm_hierarchy import (
     normalized_partition_entropy,
     partition_coefficient,
     partition_entropy,
+    run_hierarchical_pca_fcm,
     select_fcm_cluster_count,
 )
 
@@ -162,6 +163,26 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertEqual(best.n_clusters, 3)
         scores = {metric["k"]: metric["selection_score"] for metric in metrics}
         self.assertGreater(scores[3], scores[2])
+
+    def test_hierarchical_multi_metric_path_runs(self) -> None:
+        result = run_hierarchical_pca_fcm(
+            self.features,
+            max_depth=1,
+            min_node_size=8,
+            min_child_size=4,
+            min_clusters=2,
+            max_clusters=2,
+            min_membership=0.0,
+            max_membership_gap=0.0,
+            forced_noise_ratio=0.0,
+            selection_method="multi_metric",
+            min_split_silhouette=-1.0,
+            pca_components=3,
+            seed=42,
+        )
+
+        self.assertIsNotNone(result.model)
+        self.assertEqual(len(result.assignments), len(self.features))
 
 
 if __name__ == "__main__":
