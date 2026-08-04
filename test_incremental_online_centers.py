@@ -14,8 +14,11 @@ from fcm_hierarchy import fit_pca_normalized_features, spherical_fcm
 from incremental_clustering import (
     DEFAULT_NOISE_THRESHOLD,
     IncrementalClusterState,
+    _aggregate_center_contributions,
     _build_center_statistics,
+    _center_contributions_for_batch,
     _rebuild_tree_counts,
+    _update_hierarchy_centers_from_statistics,
     assign_to_hierarchy,
     hierarchy_xie_beni_index,
     load_state,
@@ -187,6 +190,77 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             state.hierarchy_model.nodes[""].centers,
             previous_centers,
         )
+
+    def test_changed_note_replaces_embedding_and_center_contribution(self) -> None:
+        state = self._make_state(center_refresh_interval=10)
+        changed_embedding = np.asarray(
+            [[2.7, 0.9, 0.2, 0.1]],
+            dtype=np.float64,
+        )
+        changed_metadata = pd.DataFrame(
+            {
+                "id": [1],
+                "text": ["updated note"],
+            }
+        )
+
+        old_contributions = _center_contributions_for_batch(
+            state.embeddings,
+            state.metadata,
+            state.hierarchy_model,
+            min_membership=0.0,
+            m=2.0,
+        )
+        replacement_contributions = _center_contributions_for_batch(
+            changed_embedding,
+            changed_metadata,
+            state.hierarchy_model,
+            min_membership=0.0,
+            m=2.0,
+        )
+        expected_contributions = dict(old_contributions)
+        expected_contributions[1] = replacement_contributions[1]
+        expected_statistics = _aggregate_center_contributions(
+            expected_contributions
+        )
+        expected_model, _ = _update_hierarchy_centers_from_statistics(
+            state.hierarchy_model,
+            expected_statistics,
+        )
+
+        updated, summary = update_incremental_state(
+            state,
+            changed_embedding,
+            changed_metadata,
+        )
+
+        self.assertFalse(summary["reclustered"])
+        self.assertEqual(summary["replaced_samples"], 1)
+        self.assertEqual(summary["appended_samples"], 0)
+        self.assertEqual(len(updated.embeddings), len(state.embeddings))
+        self.assertEqual(
+            updated.metadata["id"].tolist(),
+            state.metadata["id"].tolist(),
+        )
+        np.testing.assert_allclose(updated.embeddings[1], changed_embedding[0])
+        np.testing.assert_allclose(
+            updated.hierarchy_model.nodes[""].centers,
+            expected_model.nodes[""].centers,
+        )
+        np.testing.assert_allclose(
+            updated.center_statistics[""]["weighted_sum"],
+            expected_statistics[""]["weighted_sum"],
+        )
+        self.assertEqual(
+            set(updated.center_contributions),
+            set(state.metadata["id"].tolist()),
+        )
+        self.assertEqual(
+            updated.assignments["id"].tolist(),
+            state.metadata["id"].tolist(),
+        )
+        self.assertEqual(updated.tree["summary"]["samples"], len(state.embeddings))
+        self.assertEqual(updated.metadata.loc[1, "text"], "updated note")
 
     def test_xb_degradation_reclusters_without_revisualizing(self) -> None:
         state = self._make_state(
