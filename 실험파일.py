@@ -11,41 +11,16 @@ from sklearn.preprocessing import normalize
 from clustering_pipelines import (
     PIPELINE_NAMES,
     build_soft_assignments,
-    build_compact_umap,
     choose_best_pipeline,
-    compact_umap_presets,
-    evaluate_clustering,
     pipeline_to_filename,
-    run_compact_umap_sweep,
-    run_pipeline_1,
-    run_pipeline_2,
-    run_pipeline_2b,
-    run_pipeline_3,
-    run_pipeline_4,
-    run_pipeline_5,
-    run_pipeline_6,
-    run_pipeline_by_name,
     run_selected_pipelines,
     save_soft_assignments,
-    sort_candidate_metrics,
 )
-from clustering_types import (
-    FCMKCandidate,
-    FCMResult,
-    HierarchicalResult,
-    PipelineResult,
-)
+from clustering_types import HierarchicalResult
 from embedding_data import load_embeddings_from_json, make_synthetic_embeddings
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
-    fcm_noise_mask,
-    fuzzy_silhouette_proxy,
-    pca_normalized_features,
     run_hierarchical_pca_fcm,
-    select_fcm_cluster_count,
-    spherical_fcm,
-    spherical_fcm_objective,
-    xie_beni_index,
 )
 
 
@@ -104,9 +79,9 @@ def main() -> None:
     parser.add_argument(
         "--pipeline",
         nargs="+",
-        choices=["all", *PIPELINE_NAMES],
-        default=["all"],
-        help="Pipeline(s) to run. The default runs all pipelines.",
+        choices=PIPELINE_NAMES,
+        default=["2_pca256_fcm"],
+        help="Clustering pipeline to run (currently PCA-256 + spherical FCM).",
     )
     args = parser.parse_args()
 
@@ -133,14 +108,8 @@ def main() -> None:
 
     X = normalize(X, norm="l2")
 
-    if "all" in args.pipeline:
-        if args.pipeline != ["all"]:
-            parser.error("'all' cannot be combined with individual pipeline names")
-        selected_pipeline_names = list(PIPELINE_NAMES)
-        pipeline_selection_name = "all"
-    else:
-        selected_pipeline_names = list(dict.fromkeys(args.pipeline))
-        pipeline_selection_name = "+".join(selected_pipeline_names)
+    selected_pipeline_names = list(dict.fromkeys(args.pipeline))
+    pipeline_selection_name = "+".join(selected_pipeline_names)
     pipeline_runs = run_selected_pipelines(
         selected_pipeline_names,
         X,
@@ -173,9 +142,7 @@ def main() -> None:
             frame[column] = np.nan
     frame = frame[benchmark_columns]
 
-    if pipeline_selection_name == "all":
-        benchmark_stem = "four_pipeline"
-    elif len(selected_pipeline_names) == 1:
+    if len(selected_pipeline_names) == 1:
         benchmark_stem = f"pipeline_{pipeline_to_filename(selected_pipeline_names[0])}"
     else:
         benchmark_stem = "selected_pipelines"

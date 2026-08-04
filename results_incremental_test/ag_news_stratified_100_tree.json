@@ -1,0 +1,1608 @@
+{
+  "config": {
+    "max_depth": 4,
+    "min_node_size": 60,
+    "min_child_size": 20,
+    "min_clusters": 2,
+    "max_clusters": 4,
+    "selection_method": "silhouette",
+    "min_split_silhouette": 0.05,
+    "min_membership": 0.2,
+    "distance_z": 3.5,
+    "pca_components_requested": 64,
+    "seed": 42,
+    "incremental_update_count": 1
+  },
+  "summary": {
+    "method": "recursive_pca64_spherical_fcm",
+    "samples": 4000,
+    "pca_components": 64,
+    "levels_requested": 4,
+    "levels_reached": 4,
+    "node_count": 48,
+    "leaf_count": 26,
+    "noise_count": 57,
+    "noise_by_level": {
+      "1": 0,
+      "2": 22,
+      "3": 6,
+      "4": 29
+    },
+    "leaf_cluster_count": 26,
+    "runtime_sec": 10.11787287900006,
+    "incremental_update_count": 1
+  },
+  "root": {
+    "node_id": "root",
+    "parent_id": null,
+    "path": "",
+    "depth": 0,
+    "size": 4000,
+    "selected_k": 3,
+    "selected_silhouette": 0.07980705420322276,
+    "selected_valid_clusters": 3,
+    "noise_count": 0,
+    "candidate_metrics": [
+      {
+        "k": 2,
+        "silhouette": 0.05727223150879049,
+        "xie_beni": 0.23193200613191317,
+        "objective": 0.9203391319310684,
+        "valid_clusters": 2,
+        "noise_count": 0,
+        "cluster_sizes": [
+          1585,
+          2015
+        ]
+      },
+      {
+        "k": 3,
+        "silhouette": 0.07980705420322276,
+        "xie_beni": 0.21018400872872894,
+        "objective": 0.6024566014396009,
+        "valid_clusters": 3,
+        "noise_count": 0,
+        "cluster_sizes": [
+          1464,
+          1066,
+          1070
+        ]
+      },
+      {
+        "k": 4,
+        "silhouette": 0.06611481803444691,
+        "xie_beni": 0.9269253664491186,
+        "objective": 0.45495011630147764,
+        "valid_clusters": 4,
+        "noise_count": 0,
+        "cluster_sizes": [
+          1027,
+          1433,
+          514,
+          626
+        ]
+      }
+    ],
+    "stop_reason": null,
+    "children": [
+      {
+        "node_id": "0",
+        "parent_id": "root",
+        "path": "0",
+        "depth": 1,
+        "size": 1626,
+        "selected_k": 2,
+        "selected_silhouette": 0.07192400133156783,
+        "selected_valid_clusters": 2,
+        "noise_count": 0,
+        "candidate_metrics": [
+          {
+            "k": 2,
+            "silhouette": 0.07192400133156783,
+            "xie_beni": 2135600954.587027,
+            "objective": 0.7005709201393872,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              743,
+              721
+            ]
+          },
+          {
+            "k": 3,
+            "silhouette": 0.07192400133156783,
+            "xie_beni": 153925646292.77322,
+            "objective": 0.4670472800928907,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              743,
+              721
+            ]
+          },
+          {
+            "k": 4,
+            "silhouette": 0.07192400133156783,
+            "xie_beni": 2705909892700.126,
+            "objective": 0.3502854600699154,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              743,
+              721
+            ]
+          }
+        ],
+        "stop_reason": null,
+        "children": [
+          {
+            "node_id": "0/0",
+            "parent_id": "0",
+            "path": "0/0",
+            "depth": 2,
+            "size": 821,
+            "selected_k": 2,
+            "selected_silhouette": 0.07588861577334749,
+            "selected_valid_clusters": 2,
+            "noise_count": 0,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.07588861577334749,
+                "xie_beni": 6516387769.76142,
+                "objective": 0.6133277749711162,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  355,
+                  388
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.07588861577334749,
+                "xie_beni": 9324154067.300652,
+                "objective": 0.40888518331470175,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  355,
+                  388
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.07588861577334749,
+                "xie_beni": 23004578447.945427,
+                "objective": 0.30666388748637535,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  388,
+                  355
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "0/0/0",
+                "parent_id": "0/0",
+                "path": "0/0/0",
+                "depth": 3,
+                "size": 391,
+                "selected_k": 2,
+                "selected_silhouette": 0.07407178831968396,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.07407178831968396,
+                    "xie_beni": 11966198599.614483,
+                    "objective": 0.5164721318826089,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      176,
+                      179
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.07407178831968396,
+                    "xie_beni": 393967428979.2909,
+                    "objective": 0.3443147545884016,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      179,
+                      176
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.07407178831968396,
+                    "xie_beni": 145574145743.88245,
+                    "objective": 0.25823606594152543,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      176,
+                      179
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "0/0/0/0",
+                    "parent_id": "0/0/0",
+                    "path": "0/0/0/0",
+                    "depth": 4,
+                    "size": 193,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "0/0/0/1",
+                    "parent_id": "0/0/0",
+                    "path": "0/0/0/1",
+                    "depth": 4,
+                    "size": 198,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "0/0/1",
+                "parent_id": "0/0",
+                "path": "0/0/1",
+                "depth": 3,
+                "size": 430,
+                "selected_k": 4,
+                "selected_silhouette": 0.0634269562392857,
+                "selected_valid_clusters": 2,
+                "noise_count": 1,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.06296156911137449,
+                    "xie_beni": 55160661779.89586,
+                    "objective": 0.552837600238003,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      189,
+                      199
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.06309967997491327,
+                    "xie_beni": 524601603545.7444,
+                    "objective": 0.3685584001586439,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      193,
+                      195
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.0634269562392857,
+                    "xie_beni": 268698382303.97278,
+                    "objective": 0.27641880011903947,
+                    "valid_clusters": 2,
+                    "noise_count": 1,
+                    "cluster_sizes": [
+                      194,
+                      193
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "0/0/1/0",
+                    "parent_id": "0/0/1",
+                    "path": "0/0/1/0",
+                    "depth": 4,
+                    "size": 212,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "0/0/1/1",
+                    "parent_id": "0/0/1",
+                    "path": "0/0/1/1",
+                    "depth": 4,
+                    "size": 217,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "0/1",
+            "parent_id": "0",
+            "path": "0/1",
+            "depth": 2,
+            "size": 805,
+            "selected_k": 2,
+            "selected_silhouette": 0.052579164903587015,
+            "selected_valid_clusters": 2,
+            "noise_count": 0,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.052579164903587015,
+                "xie_beni": 117310119034.7952,
+                "objective": 0.5967745147265447,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  338,
+                  383
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.04786917575192827,
+                "xie_beni": 712994689520.3076,
+                "objective": 0.3978496764843816,
+                "valid_clusters": 3,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  271,
+                  122,
+                  328
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.03772499969241725,
+                "xie_beni": 70353214024.08296,
+                "objective": 0.29838725736342137,
+                "valid_clusters": 4,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  217,
+                  79,
+                  166,
+                  259
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "0/1/0",
+                "parent_id": "0/1",
+                "path": "0/1/0",
+                "depth": 3,
+                "size": 370,
+                "selected_k": 4,
+                "selected_silhouette": 0.07557950161242454,
+                "selected_valid_clusters": 2,
+                "noise_count": 13,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.07022221688841838,
+                    "xie_beni": 61929541814.340416,
+                    "objective": 0.5309238925567731,
+                    "valid_clusters": 2,
+                    "noise_count": 5,
+                    "cluster_sizes": [
+                      154,
+                      179
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.07054932642301491,
+                    "xie_beni": 122430550162.9134,
+                    "objective": 0.3539492617046519,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      165,
+                      173
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.07557950161242454,
+                    "xie_beni": 5131048593740.924,
+                    "objective": 0.2654619462786634,
+                    "valid_clusters": 2,
+                    "noise_count": 13,
+                    "cluster_sizes": [
+                      168,
+                      157
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "0/1/0/0",
+                    "parent_id": "0/1/0",
+                    "path": "0/1/0/0",
+                    "depth": 4,
+                    "size": 184,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "0/1/0/1",
+                    "parent_id": "0/1/0",
+                    "path": "0/1/0/1",
+                    "depth": 4,
+                    "size": 173,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "0/1/1",
+                "parent_id": "0/1",
+                "path": "0/1/1",
+                "depth": 3,
+                "size": 435,
+                "selected_k": 2,
+                "selected_silhouette": 0.07321359014641118,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.07321359014641118,
+                    "xie_beni": 13017130841.917181,
+                    "objective": 0.558555083668894,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      181,
+                      202
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.07321359014641118,
+                    "xie_beni": 170566074496.76822,
+                    "objective": 0.3723700557794418,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      181,
+                      202
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.07321359014641118,
+                    "xie_beni": 1314954765645.516,
+                    "objective": 0.27927754183475173,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      202,
+                      181
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "0/1/1/0",
+                    "parent_id": "0/1/1",
+                    "path": "0/1/1/0",
+                    "depth": 4,
+                    "size": 198,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "0/1/1/1",
+                    "parent_id": "0/1/1",
+                    "path": "0/1/1/1",
+                    "depth": 4,
+                    "size": 237,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "node_id": "1",
+        "parent_id": "root",
+        "path": "1",
+        "depth": 1,
+        "size": 1194,
+        "selected_k": 4,
+        "selected_silhouette": 0.054914322090253424,
+        "selected_valid_clusters": 2,
+        "noise_count": 1,
+        "candidate_metrics": [
+          {
+            "k": 2,
+            "silhouette": 0.0547292486957131,
+            "xie_beni": 31396498215.53122,
+            "objective": 0.6387008648661316,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              568,
+              498
+            ]
+          },
+          {
+            "k": 3,
+            "silhouette": 0.05484144459616217,
+            "xie_beni": 312572993970.32635,
+            "objective": 0.4258005765773625,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              568,
+              498
+            ]
+          },
+          {
+            "k": 4,
+            "silhouette": 0.054914322090253424,
+            "xie_beni": 3217508922832.614,
+            "objective": 0.31935043243306943,
+            "valid_clusters": 2,
+            "noise_count": 1,
+            "cluster_sizes": [
+              567,
+              498
+            ]
+          }
+        ],
+        "stop_reason": null,
+        "children": [
+          {
+            "node_id": "1/0",
+            "parent_id": "1",
+            "path": "1/0",
+            "depth": 2,
+            "size": 638,
+            "selected_k": 3,
+            "selected_silhouette": 0.056983206312152056,
+            "selected_valid_clusters": 3,
+            "noise_count": 0,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.051885758498370474,
+                "xie_beni": 45060756670.527664,
+                "objective": 0.6271696229021796,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  279,
+                  288
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.056983206312152056,
+                "xie_beni": 39076407404.35635,
+                "objective": 0.418113081934984,
+                "valid_clusters": 3,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  111,
+                  257,
+                  199
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.03590837832947185,
+                "xie_beni": 134245288973.49794,
+                "objective": 0.31358481145131695,
+                "valid_clusters": 4,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  110,
+                  85,
+                  213,
+                  159
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "1/0/0",
+                "parent_id": "1/0",
+                "path": "1/0/0",
+                "depth": 3,
+                "size": 124,
+                "selected_k": 3,
+                "selected_silhouette": 0.10028491219759442,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.10028491219759442,
+                    "xie_beni": 194016898.667166,
+                    "objective": 0.4845645681826442,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      62,
+                      49
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.10028491219759442,
+                    "xie_beni": 159516624.55310655,
+                    "objective": 0.32304304546715845,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      62,
+                      49
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.10028491219759442,
+                    "xie_beni": 214897568588.70233,
+                    "objective": 0.24228228412617983,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      49,
+                      62
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "1/0/0/0",
+                    "parent_id": "1/0/0",
+                    "path": "1/0/0/0",
+                    "depth": 4,
+                    "size": 70,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "1/0/0/1",
+                    "parent_id": "1/0/0",
+                    "path": "1/0/0/1",
+                    "depth": 4,
+                    "size": 54,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "1/0/1",
+                "parent_id": "1/0",
+                "path": "1/0/1",
+                "depth": 3,
+                "size": 282,
+                "selected_k": 2,
+                "selected_silhouette": 0.056171562617816424,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.056171562617816424,
+                    "xie_beni": 65238698464.247665,
+                    "objective": 0.5689192769075786,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      114,
+                      143
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.03917009947313663,
+                    "xie_beni": 140528432386.4432,
+                    "objective": 0.37927951793852827,
+                    "valid_clusters": 3,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      129,
+                      89,
+                      39
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.03323514906305878,
+                    "xie_beni": 1799286968739.45,
+                    "objective": 0.28445963845380196,
+                    "valid_clusters": 4,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      25,
+                      124,
+                      72,
+                      36
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "1/0/1/0",
+                    "parent_id": "1/0/1",
+                    "path": "1/0/1/0",
+                    "depth": 4,
+                    "size": 126,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "1/0/1/1",
+                    "parent_id": "1/0/1",
+                    "path": "1/0/1/1",
+                    "depth": 4,
+                    "size": 156,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "1/0/2",
+                "parent_id": "1/0",
+                "path": "1/0/2",
+                "depth": 3,
+                "size": 232,
+                "selected_k": 2,
+                "selected_silhouette": 0.054848761143686746,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.054848761143686746,
+                    "xie_beni": 71302425629.16698,
+                    "objective": 0.4936279557286,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      84,
+                      115
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.054848761143686746,
+                    "xie_beni": 155271707873.50366,
+                    "objective": 0.3290853038190529,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      115,
+                      84
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.054848761143686746,
+                    "xie_beni": 6736674780239.655,
+                    "objective": 0.2468139778643115,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      115,
+                      84
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "1/0/2/0",
+                    "parent_id": "1/0/2",
+                    "path": "1/0/2/0",
+                    "depth": 4,
+                    "size": 99,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "1/0/2/1",
+                    "parent_id": "1/0/2",
+                    "path": "1/0/2/1",
+                    "depth": 4,
+                    "size": 133,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "1/1",
+            "parent_id": "1",
+            "path": "1/1",
+            "depth": 2,
+            "size": 555,
+            "selected_k": 3,
+            "selected_silhouette": 0.07294753754143057,
+            "selected_valid_clusters": 2,
+            "noise_count": 2,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.07276141806895838,
+                "xie_beni": 96313701853.94025,
+                "objective": 0.5262437733399645,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  253,
+                  245
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.07294753754143057,
+                "xie_beni": 86565536617.74701,
+                "objective": 0.35082918222675696,
+                "valid_clusters": 2,
+                "noise_count": 2,
+                "cluster_sizes": [
+                  251,
+                  245
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.03933554333194167,
+                "xie_beni": 3726401354593.073,
+                "objective": 0.26312188667012504,
+                "valid_clusters": 3,
+                "noise_count": 6,
+                "cluster_sizes": [
+                  74,
+                  181,
+                  237
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "1/1/0",
+                "parent_id": "1/1",
+                "path": "1/1/0",
+                "depth": 3,
+                "size": 284,
+                "selected_k": 3,
+                "selected_silhouette": 0.08868730471493852,
+                "selected_valid_clusters": 2,
+                "noise_count": 4,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.08834744073646135,
+                    "xie_beni": 36791274719.12535,
+                    "objective": 0.40762784931870516,
+                    "valid_clusters": 2,
+                    "noise_count": 1,
+                    "cluster_sizes": [
+                      100,
+                      150
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.08868730471493852,
+                    "xie_beni": 165621727252.44507,
+                    "objective": 0.2717518995458563,
+                    "valid_clusters": 2,
+                    "noise_count": 4,
+                    "cluster_sizes": [
+                      100,
+                      147
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.08739528059239134,
+                    "xie_beni": 354811099787.03827,
+                    "objective": 0.20381392465941683,
+                    "valid_clusters": 2,
+                    "noise_count": 2,
+                    "cluster_sizes": [
+                      101,
+                      148
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "1/1/0/0",
+                    "parent_id": "1/1/0",
+                    "path": "1/1/0/0",
+                    "depth": 4,
+                    "size": 113,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "1/1/0/1",
+                    "parent_id": "1/1/0",
+                    "path": "1/1/0/1",
+                    "depth": 4,
+                    "size": 167,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "1/1/1",
+                "parent_id": "1/1",
+                "path": "1/1/1",
+                "depth": 3,
+                "size": 269,
+                "selected_k": 2,
+                "selected_silhouette": 0.07449442765244489,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.07449442765244489,
+                    "xie_beni": 9785526296.841534,
+                    "objective": 0.543955454187016,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      144,
+                      101
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.07449442765244489,
+                    "xie_beni": 66198034960.95729,
+                    "objective": 0.3626369694579918,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      144,
+                      101
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.07449442765244489,
+                    "xie_beni": 50652501463.59666,
+                    "objective": 0.2719777270937961,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      101,
+                      144
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "1/1/1/0",
+                    "parent_id": "1/1/1",
+                    "path": "1/1/1/0",
+                    "depth": 4,
+                    "size": 160,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "1/1/1/1",
+                    "parent_id": "1/1/1",
+                    "path": "1/1/1/1",
+                    "depth": 4,
+                    "size": 109,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "node_id": "2",
+        "parent_id": "root",
+        "path": "2",
+        "depth": 1,
+        "size": 1180,
+        "selected_k": 3,
+        "selected_silhouette": 0.06577396167595538,
+        "selected_valid_clusters": 2,
+        "noise_count": 21,
+        "candidate_metrics": [
+          {
+            "k": 2,
+            "silhouette": 0.06255879286040371,
+            "xie_beni": 26597856584.578037,
+            "objective": 0.6193380753545781,
+            "valid_clusters": 2,
+            "noise_count": 0,
+            "cluster_sizes": [
+              503,
+              567
+            ]
+          },
+          {
+            "k": 3,
+            "silhouette": 0.06577396167595538,
+            "xie_beni": 34911346111.12041,
+            "objective": 0.4128920502365711,
+            "valid_clusters": 2,
+            "noise_count": 21,
+            "cluster_sizes": [
+              541,
+              508
+            ]
+          },
+          {
+            "k": 4,
+            "silhouette": 0.06391321853354551,
+            "xie_beni": 2063055270257.3872,
+            "objective": 0.30966903767781634,
+            "valid_clusters": 2,
+            "noise_count": 12,
+            "cluster_sizes": [
+              563,
+              495
+            ]
+          }
+        ],
+        "stop_reason": null,
+        "children": [
+          {
+            "node_id": "2/0",
+            "parent_id": "2",
+            "path": "2/0",
+            "depth": 2,
+            "size": 593,
+            "selected_k": 2,
+            "selected_silhouette": 0.09443230361834659,
+            "selected_valid_clusters": 2,
+            "noise_count": 4,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.09443230361834659,
+                "xie_beni": 437563323.78046775,
+                "objective": 0.5453567672640174,
+                "valid_clusters": 2,
+                "noise_count": 3,
+                "cluster_sizes": [
+                  205,
+                  333
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.09443230361834659,
+                "xie_beni": 632544724.2400937,
+                "objective": 0.3635711781772801,
+                "valid_clusters": 2,
+                "noise_count": 3,
+                "cluster_sizes": [
+                  333,
+                  205
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.09443230361834659,
+                "xie_beni": 2013316152.194692,
+                "objective": 0.27267838363444274,
+                "valid_clusters": 2,
+                "noise_count": 3,
+                "cluster_sizes": [
+                  333,
+                  205
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "2/0/0",
+                "parent_id": "2/0",
+                "path": "2/0/0",
+                "depth": 3,
+                "size": 230,
+                "selected_k": 2,
+                "selected_silhouette": 0.10217091380160143,
+                "selected_valid_clusters": 2,
+                "noise_count": 11,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.10217091380160143,
+                    "xie_beni": 21818832555.324306,
+                    "objective": 0.4093841399968448,
+                    "valid_clusters": 2,
+                    "noise_count": 9,
+                    "cluster_sizes": [
+                      100,
+                      96
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.10217091380160143,
+                    "xie_beni": 174916015401.67813,
+                    "objective": 0.2729227599979272,
+                    "valid_clusters": 2,
+                    "noise_count": 9,
+                    "cluster_sizes": [
+                      96,
+                      100
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.10217091380160143,
+                    "xie_beni": 56900878351.42208,
+                    "objective": 0.20469206999859973,
+                    "valid_clusters": 2,
+                    "noise_count": 9,
+                    "cluster_sizes": [
+                      100,
+                      96
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "2/0/0/0",
+                    "parent_id": "2/0/0",
+                    "path": "2/0/0/0",
+                    "depth": 4,
+                    "size": 116,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "2/0/0/1",
+                    "parent_id": "2/0/0",
+                    "path": "2/0/0/1",
+                    "depth": 4,
+                    "size": 103,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "2/0/1",
+                "parent_id": "2/0",
+                "path": "2/0/1",
+                "depth": 3,
+                "size": 359,
+                "selected_k": 2,
+                "selected_silhouette": 0.06879901269345161,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.06879901269345161,
+                    "xie_beni": 16340443219.049568,
+                    "objective": 0.5067221351597927,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      173,
+                      160
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.06879901269345161,
+                    "xie_beni": 635763649278.9686,
+                    "objective": 0.33781475677331857,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      160,
+                      173
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.06879901269345161,
+                    "xie_beni": 177152120717.9829,
+                    "objective": 0.25336106758023286,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      160,
+                      173
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "2/0/1/0",
+                    "parent_id": "2/0/1",
+                    "path": "2/0/1/0",
+                    "depth": 4,
+                    "size": 187,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "2/0/1/1",
+                    "parent_id": "2/0/1",
+                    "path": "2/0/1/1",
+                    "depth": 4,
+                    "size": 172,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "node_id": "2/1",
+            "parent_id": "2",
+            "path": "2/1",
+            "depth": 2,
+            "size": 566,
+            "selected_k": 2,
+            "selected_silhouette": 0.06447663564375432,
+            "selected_valid_clusters": 2,
+            "noise_count": 0,
+            "candidate_metrics": [
+              {
+                "k": 2,
+                "silhouette": 0.06447663564375432,
+                "xie_beni": 14315629450.915388,
+                "objective": 0.5623007809039411,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  268,
+                  240
+                ]
+              },
+              {
+                "k": 3,
+                "silhouette": 0.06447663564375432,
+                "xie_beni": 193740156632.929,
+                "objective": 0.37486718726927726,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  240,
+                  268
+                ]
+              },
+              {
+                "k": 4,
+                "silhouette": 0.06447663564375432,
+                "xie_beni": 142824398349650.56,
+                "objective": 0.281150390452068,
+                "valid_clusters": 2,
+                "noise_count": 0,
+                "cluster_sizes": [
+                  240,
+                  268
+                ]
+              }
+            ],
+            "stop_reason": null,
+            "children": [
+              {
+                "node_id": "2/1/0",
+                "parent_id": "2/1",
+                "path": "2/1/0",
+                "depth": 3,
+                "size": 295,
+                "selected_k": 2,
+                "selected_silhouette": 0.07747598659627376,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.07747598659627376,
+                    "xie_beni": 2596671206.2544365,
+                    "objective": 0.556994264875502,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      158,
+                      110
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.07747598659627376,
+                    "xie_beni": 10565910235.31387,
+                    "objective": 0.3713295099170961,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      158,
+                      110
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.07747598659627376,
+                    "xie_beni": 13023483291.518295,
+                    "objective": 0.2784971324383181,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      110,
+                      158
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "2/1/0/0",
+                    "parent_id": "2/1/0",
+                    "path": "2/1/0/0",
+                    "depth": 4,
+                    "size": 182,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "2/1/0/1",
+                    "parent_id": "2/1/0",
+                    "path": "2/1/0/1",
+                    "depth": 4,
+                    "size": 113,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "node_id": "2/1/1",
+                "parent_id": "2/1",
+                "path": "2/1/1",
+                "depth": 3,
+                "size": 271,
+                "selected_k": 2,
+                "selected_silhouette": 0.08948151854750673,
+                "selected_valid_clusters": 2,
+                "noise_count": 0,
+                "candidate_metrics": [
+                  {
+                    "k": 2,
+                    "silhouette": 0.08948151854750673,
+                    "xie_beni": 3095879084.9417167,
+                    "objective": 0.45845940616855696,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      104,
+                      136
+                    ]
+                  },
+                  {
+                    "k": 3,
+                    "silhouette": 0.08948151854750673,
+                    "xie_beni": 44883945779.438644,
+                    "objective": 0.3056396041125475,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      136,
+                      104
+                    ]
+                  },
+                  {
+                    "k": 4,
+                    "silhouette": 0.08948151854750673,
+                    "xie_beni": 32853081464.377373,
+                    "objective": 0.22922970308500157,
+                    "valid_clusters": 2,
+                    "noise_count": 0,
+                    "cluster_sizes": [
+                      104,
+                      136
+                    ]
+                  }
+                ],
+                "stop_reason": null,
+                "children": [
+                  {
+                    "node_id": "2/1/1/0",
+                    "parent_id": "2/1/1",
+                    "path": "2/1/1/0",
+                    "depth": 4,
+                    "size": 117,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  },
+                  {
+                    "node_id": "2/1/1/1",
+                    "parent_id": "2/1/1",
+                    "path": "2/1/1/1",
+                    "depth": 4,
+                    "size": 154,
+                    "selected_k": null,
+                    "selected_silhouette": null,
+                    "selected_valid_clusters": 0,
+                    "noise_count": 0,
+                    "candidate_metrics": [],
+                    "stop_reason": "max_depth_reached",
+                    "children": []
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "data": {
+    "pipeline": "2_pca256_fcm",
+    "pipelines": [
+      "2_pca256_fcm"
+    ],
+    "input_normalized": true,
+    "samples": 1200,
+    "clusters": 4,
+    "latent_dim": 12,
+    "embedding_dim": 768,
+    "cluster_std": 1.9,
+    "seed": 42
+  },
+  "results": [
+    {
+      "pipeline": "2_pca256_fcm",
+      "umap_preset": NaN,
+      "umap_n_neighbors": NaN,
+      "umap_min_dist": NaN,
+      "umap_spread": NaN,
+      "umap_densmap": NaN,
+      "runtime_sec": 2.5015550139996776,
+      "clusters": 4,
+      "noise_ratio": 0.0,
+      "nmi": 0.5560977977972441,
+      "ari": 0.590276879286234,
+      "tag_fragmentation": 4.0,
+      "silhouette": 0.0533303915724214,
+      "xie_beni": 1.1137611863075618,
+      "fuzzy_silhouette": 0.051456754149565506,
+      "iterations": 115
+    }
+  ]
+}
