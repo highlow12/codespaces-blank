@@ -36,10 +36,21 @@ python incremental_clustering.py update \
 
 ## FCM 클러스터 개수 자동 선택
 
-각 계층 노드의 FCM은 기본적으로 `K=2`부터 시작해 XB(Xie-Beni) index를
-계산한다. XB는 작을수록 좋으며, 다음 상대 개선율이 처음으로 설정값보다
-작아지면 탐색을 중단하고 그 직전까지의 후보 중 XB가 가장 작은 `K`를
-선택한다.
+각 계층 노드의 FCM은 기본적으로 `K=2`부터 시작해 다음 네 지표를 계산한다.
+
+- XB(Xie-Beni): 낮을수록 좋음
+- Partition Coefficient: 높을수록 좋음
+- Partition Entropy: 낮을수록 좋음
+- Silhouette coefficient: 높을수록 좋음
+
+기본 `multi_metric` 방식에서는 별도 noise를 만들지 않고 모든 샘플을 최대
+membership의 클러스터에 배정한 뒤 지표를 계산한다. 단, 최소 child 크기를
+충족하지 못한 후보는 선택 대상에서 제외한다.
+
+XB 상대 개선율이 처음으로 설정값보다 작아지면 탐색을 중단한다. 평가한
+후보 전체에 대해 XB, modified PC, normalized PE, silhouette을 각각
+`0~1`로 정규화하고 동일 가중치 평균인 `selection_score`가 가장 높은 `K`를
+선택한다. PC와 PE 원값도 결과에 함께 저장한다.
 
 ```text
 relative_improvement(K) = (XB(K-1) - XB(K)) / abs(XB(K-1))
@@ -50,13 +61,13 @@ relative_improvement(K) = (XB(K-1) - XB(K)) / abs(XB(K-1))
 ```bash
 python incremental_clustering.py fit \
   ... \
-  --selection-method xie_beni \
+  --selection-method multi_metric \
   --min-xb-relative-improvement 0.03
 ```
 
-임계값까지 개선율이 둔화되지 않으면 `--max-clusters`까지 평가한 후보 중
-XB 최솟값을 선택한다. 각 후보의 `xie_beni`와
-`xb_relative_improvement`는 tree JSON의 `candidate_metrics`에 저장된다.
+임계값까지 개선율이 둔화되지 않으면 `--max-clusters`까지 평가한다. 각
+후보의 모든 지표와 `selection_score`는 tree JSON의 `candidate_metrics`에
+저장된다.
 
 ## ID 규칙
 

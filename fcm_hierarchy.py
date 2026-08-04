@@ -99,6 +99,45 @@ def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
     return float(numerator / max(denominator, 1e-12))
 
 
+def partition_coefficient(result: FCMResult) -> float:
+    """Return the FCM partition coefficient (higher is crisper)."""
+
+    memberships = np.asarray(result.memberships, dtype=np.float64)
+    if memberships.ndim != 2 or memberships.shape[0] == 0:
+        raise ValueError("memberships must be a non-empty 2D array")
+    return float(np.mean(np.sum(memberships**2, axis=1)))
+
+
+def modified_partition_coefficient(result: FCMResult) -> float:
+    """Remove the raw partition coefficient's 1/k baseline."""
+
+    cluster_count = result.memberships.shape[1]
+    if cluster_count < 2:
+        return 1.0
+    coefficient = partition_coefficient(result)
+    baseline = 1.0 / cluster_count
+    return float((coefficient - baseline) / (1.0 - baseline))
+
+
+def partition_entropy(result: FCMResult) -> float:
+    """Return fuzzy partition entropy (lower is crisper)."""
+
+    memberships = np.asarray(result.memberships, dtype=np.float64)
+    if memberships.ndim != 2 or memberships.shape[0] == 0:
+        raise ValueError("memberships must be a non-empty 2D array")
+    safe_memberships = np.maximum(memberships, 1e-12)
+    return float(-np.mean(np.sum(memberships * np.log(safe_memberships), axis=1)))
+
+
+def normalized_partition_entropy(result: FCMResult) -> float:
+    """Normalize partition entropy to [0, 1] using log(k)."""
+
+    cluster_count = result.memberships.shape[1]
+    if cluster_count < 2:
+        return 0.0
+    return float(partition_entropy(result) / np.log(cluster_count))
+
+
 def fuzzy_silhouette_proxy(
     X: np.ndarray,
     result: FCMResult,
@@ -346,11 +385,68 @@ def _candidate_to_record(candidate: FCMKCandidate) -> dict[str, Any]:
             if candidate.xb_relative_improvement is not None
             else None
         ),
+        "partition_coefficient": finite_or_none(
+            candidate.partition_coefficient
+        ),
+        "modified_partition_coefficient": finite_or_none(
+            candidate.modified_partition_coefficient
+        ),
+        "partition_entropy": finite_or_none(candidate.partition_entropy),
+        "normalized_partition_entropy": finite_or_none(
+            candidate.normalized_partition_entropy
+        ),
+        "selection_score": (
+            finite_or_none(candidate.selection_score)
+            if candidate.selection_score is not None
+            else None
+        ),
         "objective": finite_or_none(candidate.objective),
         "valid_clusters": int(len(candidate.cluster_sizes)),
         "noise_count": int(candidate.noise_count),
         "cluster_sizes": [int(size) for size in candidate.cluster_sizes],
     }
+
+
+def _normalized_desirability(
+    values: np.ndarray,
+    *,
+    higher_is_better: bool,
+) -> np.ndarray:
+    """Scale one metric to [0, 1], returning neutral scores for ties."""
+
+    spread = float(np.ptp(values))
+    if not np.all(np.isfinite(values)) or spread <= 1e-12:
+        return np.full(values.shape, 0.5, dtype=np.float64)
+    scores = (values - np.min(values)) / spread
+    return scores if higher_is_better else 1.0 - scores
+
+
+def _score_multi_metric_candidates(candidates: list[FCMKCandidate]) -> None:
+    """Set an equal-weight validity score across four complementary metrics."""
+
+    if not candidates:
+        return
+    metric_specs = (
+        ("xie_beni", False),
+        ("modified_partition_coefficient", True),
+        ("normalized_partition_entropy", False),
+        ("silhouette", True),
+    )
+    desirabilities = []
+    for attribute, higher_is_better in metric_specs:
+        values = np.asarray(
+            [getattr(candidate, attribute) for candidate in candidates],
+            dtype=np.float64,
+        )
+        desirabilities.append(
+            _normalized_desirability(
+                values,
+                higher_is_better=higher_is_better,
+            )
+        )
+    scores = np.mean(np.vstack(desirabilities), axis=0)
+    for candidate, score in zip(candidates, scores, strict=True):
+        candidate.selection_score = float(score)
 
 
 def _choose_knee_candidate(candidates: list[FCMKCandidate]) -> FCMKCandidate:
@@ -393,18 +489,17 @@ def select_fcm_cluster_count(
     min_child_size: int = 20,
     min_membership: float = 0.40,
     distance_z: float = 3.5,
-    selection_method: str = "xie_beni",
+    selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
     seed: int = 42,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
     """Evaluate increasing k values and return the best FCM split.
 
-    With ``selection_method="xie_beni"``, candidates are evaluated from the
-    configured minimum k upward. Evaluation stops when the relative XB
-    improvement over the preceding k falls below the configured threshold.
-    The lowest-XB valid candidate before that low-gain candidate is selected.
-    If the threshold is never crossed, the lowest-XB candidate in the entire
-    evaluated range is selected.
+    With ``selection_method="multi_metric"``, candidates are evaluated from
+    the configured minimum k upward until XB improvement falls below the
+    configured threshold. XB, modified partition coefficient, normalized
+    partition entropy, and silhouette are then normalized to [0, 1] and
+    averaged with equal weights. Raw PC and PE are retained for reporting.
     """
 
     if min_clusters < 2:
@@ -413,9 +508,15 @@ def select_fcm_cluster_count(
         raise ValueError("max_clusters must be at least min_clusters")
     if min_child_size < 2:
         raise ValueError("min_child_size must be at least 2")
-    if selection_method not in {"silhouette", "knee", "xie_beni"}:
+    if selection_method not in {
+        "silhouette",
+        "knee",
+        "xie_beni",
+        "multi_metric",
+    }:
         raise ValueError(
-            "selection_method must be 'silhouette', 'knee', or 'xie_beni'"
+            "selection_method must be 'silhouette', 'knee', 'xie_beni', "
+            "or 'multi_metric'"
         )
     if not 0.0 <= min_xb_relative_improvement <= 1.0:
         raise ValueError("min_xb_relative_improvement must be between 0 and 1")
@@ -434,13 +535,20 @@ def select_fcm_cluster_count(
             n_clusters=candidate_k,
             seed=seed + candidate_k * 1009,
         )
-        labels, cluster_sizes = _filter_fcm_labels(
-            Xn,
-            result,
-            min_child_size=min_child_size,
-            min_membership=min_membership,
-            distance_z=distance_z,
-        )
+        if selection_method == "multi_metric":
+            labels = result.memberships.argmax(axis=1)
+            cluster_sizes = [
+                int(np.sum(labels == cluster_id))
+                for cluster_id in range(candidate_k)
+            ]
+        else:
+            labels, cluster_sizes = _filter_fcm_labels(
+                Xn,
+                result,
+                min_child_size=min_child_size,
+                min_membership=min_membership,
+                distance_z=distance_z,
+            )
         non_noise = labels != -1
         valid_cluster_count = len(cluster_sizes)
         silhouette = float("nan")
@@ -475,6 +583,13 @@ def select_fcm_cluster_count(
             silhouette=silhouette,
             xie_beni=xie_beni,
             xb_relative_improvement=xb_relative_improvement,
+            partition_coefficient=partition_coefficient(result),
+            modified_partition_coefficient=modified_partition_coefficient(
+                result
+            ),
+            partition_entropy=partition_entropy(result),
+            normalized_partition_entropy=normalized_partition_entropy(result),
+            selection_score=None,
             objective=spherical_fcm_objective(Xn, result),
             noise_count=int(np.sum(~non_noise)),
             cluster_sizes=cluster_sizes,
@@ -484,17 +599,19 @@ def select_fcm_cluster_count(
         previous_candidate = candidates[-2] if len(candidates) >= 2 else None
         current_is_valid = (
             len(candidate.cluster_sizes) >= 2
+            and min(candidate.cluster_sizes) >= min_child_size
             and np.isfinite(candidate.silhouette)
             and np.isfinite(candidate.xie_beni)
         )
         previous_is_valid = (
             previous_candidate is not None
             and len(previous_candidate.cluster_sizes) >= 2
+            and min(previous_candidate.cluster_sizes) >= min_child_size
             and np.isfinite(previous_candidate.silhouette)
             and np.isfinite(previous_candidate.xie_beni)
         )
         if (
-            selection_method == "xie_beni"
+            selection_method in {"xie_beni", "multi_metric"}
             and current_is_valid
             and previous_is_valid
             and xb_relative_improvement is not None
@@ -504,6 +621,7 @@ def select_fcm_cluster_count(
                 evaluated
                 for evaluated in candidates[:-1]
                 if len(evaluated.cluster_sizes) >= 2
+                and min(evaluated.cluster_sizes) >= min_child_size
                 and np.isfinite(evaluated.silhouette)
                 and np.isfinite(evaluated.xie_beni)
             ]
@@ -517,16 +635,24 @@ def select_fcm_cluster_count(
         candidate
         for candidate in candidates
         if len(candidate.cluster_sizes) >= 2
+        and min(candidate.cluster_sizes) >= min_child_size
         and np.isfinite(candidate.silhouette)
         and (
-            selection_method != "xie_beni"
+            selection_method not in {"xie_beni", "multi_metric"}
             or np.isfinite(candidate.xie_beni)
+        )
+        and (
+            selection_method != "multi_metric"
+            or (
+                np.isfinite(candidate.modified_partition_coefficient)
+                and np.isfinite(candidate.normalized_partition_entropy)
+            )
         )
     ]
     if not valid_candidates:
         invalid_reason = (
             "no_valid_xie_beni_split"
-            if selection_method == "xie_beni"
+            if selection_method in {"xie_beni", "multi_metric"}
             else "no_valid_silhouette_split"
         )
         return (
@@ -548,6 +674,17 @@ def select_fcm_cluster_count(
         )
     elif selection_method == "knee":
         best = _choose_knee_candidate(valid_candidates)
+    elif selection_method == "multi_metric":
+        _score_multi_metric_candidates(valid_candidates)
+        best = max(
+            valid_candidates,
+            key=lambda candidate: (
+                candidate.selection_score,
+                candidate.silhouette,
+                -candidate.xie_beni,
+                -candidate.n_clusters,
+            ),
+        )
     elif xb_stop_candidate is not None:
         best = xb_stop_candidate
     else:
@@ -556,7 +693,13 @@ def select_fcm_cluster_count(
             key=lambda candidate: (candidate.xie_beni, candidate.n_clusters),
         )
 
-    if selection_method == "xie_beni":
+    if selection_method == "multi_metric":
+        selection_reason = (
+            "selected_multi_metric_xb_stop"
+            if xb_stop_candidate is not None
+            else "selected_multi_metric_max_k"
+        )
+    elif selection_method == "xie_beni":
         selection_reason = (
             "selected_xb_relative_improvement"
             if xb_stop_candidate is not None
@@ -582,7 +725,7 @@ def run_hierarchical_pca_fcm(
     max_clusters: int = 8,
     min_membership: float = 0.40,
     distance_z: float = 3.5,
-    selection_method: str = "xie_beni",
+    selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
     min_split_silhouette: float = 0.05,
     pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
@@ -605,9 +748,15 @@ def run_hierarchical_pca_fcm(
         raise ValueError("min_clusters must be at least 2")
     if max_clusters < min_clusters:
         raise ValueError("max_clusters must be at least min_clusters")
-    if selection_method not in {"silhouette", "knee", "xie_beni"}:
+    if selection_method not in {
+        "silhouette",
+        "knee",
+        "xie_beni",
+        "multi_metric",
+    }:
         raise ValueError(
-            "selection_method must be 'silhouette', 'knee', or 'xie_beni'"
+            "selection_method must be 'silhouette', 'knee', 'xie_beni', "
+            "or 'multi_metric'"
         )
     if not 0.0 <= min_xb_relative_improvement <= 1.0:
         raise ValueError("min_xb_relative_improvement must be between 0 and 1")
@@ -650,6 +799,9 @@ def run_hierarchical_pca_fcm(
             "selected_k": None,
             "selected_silhouette": None,
             "selected_xie_beni": None,
+            "selected_partition_coefficient": None,
+            "selected_partition_entropy": None,
+            "selected_selection_score": None,
             "selected_valid_clusters": 0,
             "selection_reason": None,
             "noise_count": 0,
@@ -717,6 +869,15 @@ def run_hierarchical_pca_fcm(
         node["selected_k"] = int(best.n_clusters)
         node["selected_silhouette"] = float(best.silhouette)
         node["selected_xie_beni"] = float(best.xie_beni)
+        node["selected_partition_coefficient"] = float(
+            best.partition_coefficient
+        )
+        node["selected_partition_entropy"] = float(best.partition_entropy)
+        node["selected_selection_score"] = (
+            float(best.selection_score)
+            if best.selection_score is not None
+            else None
+        )
         node["selected_valid_clusters"] = int(len(best.cluster_sizes))
         node["noise_count"] = int(best.noise_count)
 
@@ -880,6 +1041,13 @@ def run_hierarchical_pca_fcm(
         "max_clusters": int(max_clusters),
         "selection_method": selection_method,
         "min_xb_relative_improvement": float(min_xb_relative_improvement),
+        "multi_metric_weights": {
+            "xie_beni": 0.25,
+            "modified_partition_coefficient": 0.25,
+            "normalized_partition_entropy": 0.25,
+            "silhouette": 0.25,
+        },
+        "multi_metric_assign_all_samples": True,
         "min_split_silhouette": float(min_split_silhouette),
         "min_membership": float(min_membership),
         "distance_z": float(distance_z),

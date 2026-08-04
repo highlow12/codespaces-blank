@@ -53,8 +53,8 @@ def main() -> None:
     parser.add_argument("--hierarchical-max-clusters", type=int, default=8)
     parser.add_argument(
         "--hierarchical-k-selection",
-        choices=["silhouette", "knee", "xie_beni"],
-        default="xie_beni",
+        choices=["silhouette", "knee", "xie_beni", "multi_metric"],
+        default="multi_metric",
         help="How to choose k independently at each hierarchy node.",
     )
     parser.add_argument(

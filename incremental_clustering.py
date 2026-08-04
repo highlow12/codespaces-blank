@@ -344,7 +344,7 @@ def fit_incremental_state(
     max_clusters: int = 4,
     min_membership: float = 0.20,
     distance_z: float = 3.5,
-    selection_method: str = "xie_beni",
+    selection_method: str = "multi_metric",
     min_xb_relative_improvement: float = 0.05,
     min_split_silhouette: float = 0.05,
     pca_components: int = DEFAULT_CLUSTERING_PCA_COMPONENTS,
@@ -751,8 +751,8 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--distance-z", type=float, default=3.5)
     parser.add_argument(
         "--selection-method",
-        choices=["silhouette", "knee", "xie_beni"],
-        default="xie_beni",
+        choices=["silhouette", "knee", "xie_beni", "multi_metric"],
+        default="multi_metric",
     )
     parser.add_argument(
         "--min-xb-relative-improvement",

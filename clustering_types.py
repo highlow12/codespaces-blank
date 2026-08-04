@@ -32,6 +32,11 @@ class FCMKCandidate:
     silhouette: float
     xie_beni: float
     xb_relative_improvement: float | None
+    partition_coefficient: float
+    modified_partition_coefficient: float
+    partition_entropy: float
+    normalized_partition_entropy: float
+    selection_score: float | None
     objective: float
     noise_count: int
     cluster_sizes: list[int]

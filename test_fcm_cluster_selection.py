@@ -6,7 +6,13 @@ from unittest.mock import patch
 import numpy as np
 
 from clustering_types import FCMResult
-from fcm_hierarchy import select_fcm_cluster_count
+from fcm_hierarchy import (
+    modified_partition_coefficient,
+    normalized_partition_entropy,
+    partition_coefficient,
+    partition_entropy,
+    select_fcm_cluster_count,
+)
 
 
 class XieBeniClusterSelectionTest(unittest.TestCase):
@@ -41,6 +47,7 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         xb_values: list[float],
         *,
         threshold: float = 0.05,
+        selection_method: str = "xie_beni",
     ):
         with (
             patch("fcm_hierarchy.spherical_fcm", side_effect=self._fcm_result),
@@ -54,7 +61,7 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
                 min_clusters=2,
                 max_clusters=len(xb_values) + 1,
                 min_child_size=4,
-                selection_method="xie_beni",
+                selection_method=selection_method,
                 min_xb_relative_improvement=threshold,
             )
 
@@ -88,6 +95,35 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
                 selection_method="xie_beni",
                 min_xb_relative_improvement=1.01,
             )
+
+    def test_partition_validity_metrics(self) -> None:
+        memberships = np.asarray([[1.0, 0.0], [0.5, 0.5]])
+        result = FCMResult(
+            labels=np.asarray([0, 0]),
+            memberships=memberships,
+            centers=np.eye(2),
+            iterations=1,
+        )
+
+        self.assertAlmostEqual(partition_coefficient(result), 0.75)
+        self.assertAlmostEqual(modified_partition_coefficient(result), 0.50)
+        self.assertAlmostEqual(partition_entropy(result), np.log(2.0) / 2.0)
+        self.assertAlmostEqual(normalized_partition_entropy(result), 0.50)
+
+    def test_multi_metric_scores_all_candidates_seen_at_xb_stop(self) -> None:
+        best, metrics, reason = self._select(
+            [0.50, 0.30, 0.29, 0.10],
+            selection_method="multi_metric",
+        )
+
+        self.assertEqual(reason, "selected_multi_metric_xb_stop")
+        self.assertIsNotNone(best)
+        self.assertEqual(best.n_clusters, 4)
+        self.assertEqual([metric["k"] for metric in metrics], [2, 3, 4])
+        for metric in metrics:
+            self.assertIsNotNone(metric["partition_coefficient"])
+            self.assertIsNotNone(metric["partition_entropy"])
+            self.assertIsNotNone(metric["selection_score"])
 
 
 if __name__ == "__main__":
