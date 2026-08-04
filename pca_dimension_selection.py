@@ -18,7 +18,7 @@ DEFAULT_MAX_COMPONENTS = 512
 DEFAULT_MIN_COMPONENTS = 32
 DEFAULT_COMPONENT_STEP = 32
 DEFAULT_K_VALUES = (15, 30)
-DEFAULT_SHARP_PRESERVATION_GAIN = 0.05
+DEFAULT_MINIMUM_PRESERVATION_GAIN = 0.05
 
 
 @dataclass(frozen=True)
@@ -55,7 +55,7 @@ class PcaDimensionSelection:
     min_components: int
     component_step: int
     k_values: tuple[int, ...]
-    sharp_preservation_gain: float
+    minimum_preservation_gain: float
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -66,7 +66,7 @@ class PcaDimensionSelection:
                 "min_components": self.min_components,
                 "component_step": self.component_step,
                 "k_values": list(self.k_values),
-                "sharp_preservation_gain": self.sharp_preservation_gain,
+                "minimum_preservation_gain": self.minimum_preservation_gain,
                 "input_normalized": True,
             },
             "candidates": [candidate.to_dict() for candidate in self.candidates],
@@ -80,7 +80,7 @@ def _validate_inputs(
     min_components: int,
     component_step: int,
     k_values: Sequence[int],
-    sharp_preservation_gain: float,
+    minimum_preservation_gain: float,
 ) -> tuple[np.ndarray, tuple[int, ...], int, tuple[int, ...]]:
     X = np.asarray(X, dtype=np.float64)
     if X.ndim != 2 or X.shape[0] == 0 or X.shape[1] == 0:
@@ -93,8 +93,8 @@ def _validate_inputs(
         raise ValueError("min_components must be at least 1")
     if component_step < 1:
         raise ValueError("component_step must be at least 1")
-    if sharp_preservation_gain < 0.0 or sharp_preservation_gain > 1.0:
-        raise ValueError("sharp_preservation_gain must be between 0 and 1")
+    if minimum_preservation_gain < 0.0 or minimum_preservation_gain > 1.0:
+        raise ValueError("minimum_preservation_gain must be between 0 and 1")
 
     normalized_k_values = tuple(dict.fromkeys(int(k) for k in k_values))
     if not normalized_k_values:
@@ -158,17 +158,18 @@ def select_pca_dimension(
     min_components: int = DEFAULT_MIN_COMPONENTS,
     component_step: int = DEFAULT_COMPONENT_STEP,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
-    sharp_preservation_gain: float = DEFAULT_SHARP_PRESERVATION_GAIN,
+    minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
 ) -> PcaDimensionSelection:
     """Select a clustering PCA width from one maximum-width PCA fit.
 
     The input is L2-normalized, PCA is fitted once at up to ``max_components``,
     and every candidate is made by slicing the same projection with ``[:, :d]``.
-    The first candidate whose mean k-NN preservation improves by at least
-    ``sharp_preservation_gain`` over the previous candidate is selected. If no
-    such jump exists, the largest evaluated dimension is used as a conservative
-    fallback.
+    Candidates increase by ``component_step``. At the first candidate whose
+    mean k-NN preservation gain is less than ``minimum_preservation_gain``, the
+    previous dimension is selected. This chooses the last dimension before the
+    improvement plateaus. If every gain meets the minimum, the largest
+    evaluated dimension is selected.
     """
 
     (
@@ -182,7 +183,7 @@ def select_pca_dimension(
         min_components=min_components,
         component_step=component_step,
         k_values=k_values,
-        sharp_preservation_gain=sharp_preservation_gain,
+        minimum_preservation_gain=minimum_preservation_gain,
     )
 
     normalized_input = normalize(X, norm="l2")
@@ -200,6 +201,7 @@ def select_pca_dimension(
     candidates: list[PcaDimensionCandidate] = []
     previous_variance: float | None = None
     previous_preservation: float | None = None
+    previous_dimension: int | None = None
     selected_dimension: int | None = None
 
     for dimension in candidate_dimensions:
@@ -239,18 +241,21 @@ def select_pca_dimension(
         if (
             selected_dimension is None
             and preservation_gain is not None
-            and preservation_gain >= sharp_preservation_gain
+            and preservation_gain < minimum_preservation_gain
         ):
-            selected_dimension = dimension
+            if previous_dimension is None:
+                raise RuntimeError("Previous PCA dimension is unavailable")
+            selected_dimension = previous_dimension
 
         previous_variance = explained_variance
         previous_preservation = mean_preservation
+        previous_dimension = dimension
 
     if selected_dimension is None:
         selected_dimension = candidate_dimensions[-1]
-        selection_reason = "no_sharp_gain_use_maximum_evaluated_dimension"
+        selection_reason = "all_gains_meet_minimum_use_maximum_dimension"
     else:
-        selection_reason = "first_sharp_knn_preservation_gain"
+        selection_reason = "first_below_minimum_gain_use_previous_dimension"
 
     selected_features = normalize(
         maximum_projection[:, :selected_dimension],
@@ -267,7 +272,7 @@ def select_pca_dimension(
         min_components=min_components,
         component_step=component_step,
         k_values=normalized_k_values,
-        sharp_preservation_gain=sharp_preservation_gain,
+        minimum_preservation_gain=minimum_preservation_gain,
     )
 
 
@@ -319,10 +324,13 @@ def main() -> None:
     parser.add_argument("--component-step", type=int, default=DEFAULT_COMPONENT_STEP)
     parser.add_argument("--k", type=int, nargs="+", default=list(DEFAULT_K_VALUES))
     parser.add_argument(
-        "--sharp-preservation-gain",
+        "--minimum-preservation-gain",
         type=float,
-        default=DEFAULT_SHARP_PRESERVATION_GAIN,
-        help="Minimum mean k-NN preservation increase that selects a dimension.",
+        default=DEFAULT_MINIMUM_PRESERVATION_GAIN,
+        help=(
+            "Keep increasing PCA width while mean k-NN preservation improves "
+            "by at least this amount."
+        ),
     )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
@@ -334,7 +342,7 @@ def main() -> None:
         min_components=args.min_components,
         component_step=args.component_step,
         k_values=args.k,
-        sharp_preservation_gain=args.sharp_preservation_gain,
+        minimum_preservation_gain=args.minimum_preservation_gain,
         seed=args.seed,
     )
     _print_selection(selection)

@@ -25,7 +25,7 @@ class PcaDimensionSelectionTests(unittest.TestCase):
             min_components=8,
             component_step=8,
             k_values=(3, 5),
-            sharp_preservation_gain=1.0,
+            minimum_preservation_gain=0.0,
         )
 
         self.assertEqual(selection.fitted_dimension, 32)
@@ -36,7 +36,7 @@ class PcaDimensionSelectionTests(unittest.TestCase):
         self.assertEqual(selection.selected_dimension, 32)
         self.assertEqual(
             selection.selection_reason,
-            "no_sharp_gain_use_maximum_evaluated_dimension",
+            "all_gains_meet_minimum_use_maximum_dimension",
         )
         explained_variances = [
             candidate.cumulative_explained_variance
@@ -59,19 +59,19 @@ class PcaDimensionSelectionTests(unittest.TestCase):
         expected = normalize(maximum_projection[:, :32], norm="l2")
         np.testing.assert_allclose(selection.selected_features, expected)
 
-    def test_selects_first_gain_at_or_above_threshold(self) -> None:
+    def test_selects_previous_dimension_at_first_below_minimum_gain(self) -> None:
         selection = select_pca_dimension(
             self.X,
             max_components=32,
             min_components=8,
             component_step=8,
             k_values=(3,),
-            sharp_preservation_gain=0.0,
+            minimum_preservation_gain=1.0,
         )
-        self.assertEqual(selection.selected_dimension, 16)
+        self.assertEqual(selection.selected_dimension, 8)
         self.assertEqual(
             selection.selection_reason,
-            "first_sharp_knn_preservation_gain",
+            "first_below_minimum_gain_use_previous_dimension",
         )
 
     def test_transform_uses_selected_prefix(self) -> None:
@@ -81,7 +81,7 @@ class PcaDimensionSelectionTests(unittest.TestCase):
             min_components=8,
             component_step=8,
             k_values=(3,),
-            sharp_preservation_gain=0.0,
+            minimum_preservation_gain=0.0,
         )
         transformed = transform_with_selected_dimension(self.X[:5], selection)
         np.testing.assert_allclose(
