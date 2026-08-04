@@ -52,15 +52,15 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         silhouette_values: list[float] | None = None,
     ):
         with (
-            patch("fcm_hierarchy.spherical_fcm", side_effect=self._fcm_result),
-            patch("fcm_hierarchy._filter_fcm_labels", side_effect=self._filtered_labels),
+            patch("fcm_validity.spherical_fcm", side_effect=self._fcm_result),
+            patch("fcm_validity._filter_fcm_labels", side_effect=self._filtered_labels),
             patch(
-                "fcm_hierarchy.silhouette_score",
+                "fcm_validity.silhouette_score",
                 side_effect=silhouette_values,
                 return_value=0.5,
             ),
-            patch("fcm_hierarchy.xie_beni_index", side_effect=xb_values),
-            patch("fcm_hierarchy.spherical_fcm_objective", return_value=1.0),
+            patch("fcm_validity.xie_beni_index", side_effect=xb_values),
+            patch("fcm_validity.spherical_fcm_objective", return_value=1.0),
         ):
             return select_fcm_cluster_count(
                 self.features,
