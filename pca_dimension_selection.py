@@ -73,7 +73,7 @@ class PcaDimensionSelection:
         }
 
 
-def _validate_inputs(
+def validate_dimension_selection_inputs(
     X: np.ndarray,
     *,
     max_components: int,
@@ -114,12 +114,17 @@ def _validate_inputs(
     return X, normalized_k_values, fitted_dimension, candidate_dimensions
 
 
-def _neighbor_indices(X: np.ndarray, k: int) -> np.ndarray:
-    """Return exactly k non-self cosine neighbors for every row."""
+def neighbor_indices(
+    X: np.ndarray,
+    k: int,
+    *,
+    metric: str = "cosine",
+) -> np.ndarray:
+    """Return exactly k non-self neighbors for every row."""
 
     model = NearestNeighbors(
         n_neighbors=k + 1,
-        metric="cosine",
+        metric=metric,
         algorithm="brute",
     ).fit(X)
     raw_neighbors = model.kneighbors(X, return_distance=False)
@@ -132,7 +137,7 @@ def _neighbor_indices(X: np.ndarray, k: int) -> np.ndarray:
     return neighbors
 
 
-def _mean_neighbor_preservation(
+def mean_neighbor_preservation(
     reference_neighbors: np.ndarray,
     candidate_neighbors: np.ndarray,
 ) -> float:
@@ -177,7 +182,7 @@ def select_pca_dimension(
         normalized_k_values,
         fitted_dimension,
         candidate_dimensions,
-    ) = _validate_inputs(
+    ) = validate_dimension_selection_inputs(
         X,
         max_components=max_components,
         min_components=min_components,
@@ -196,7 +201,7 @@ def select_pca_dimension(
     cumulative_variance = np.cumsum(pca.explained_variance_ratio_)
 
     reference_neighbors = {
-        k: _neighbor_indices(normalized_input, k) for k in normalized_k_values
+        k: neighbor_indices(normalized_input, k) for k in normalized_k_values
     }
     candidates: list[PcaDimensionCandidate] = []
     previous_variance: float | None = None
@@ -210,9 +215,9 @@ def select_pca_dimension(
             norm="l2",
         )
         preservation_by_k = {
-            k: _mean_neighbor_preservation(
+            k: mean_neighbor_preservation(
                 reference_neighbors[k],
-                _neighbor_indices(candidate_features, k),
+                neighbor_indices(candidate_features, k),
             )
             for k in normalized_k_values
         }
