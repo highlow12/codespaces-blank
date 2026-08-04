@@ -1,10 +1,9 @@
 """Incremental hierarchical clustering and fixed-coordinate visualization.
 
 The initial batch is clustered with the existing recursive PCA + spherical FCM
-implementation. Later batches are transformed with the fitted PCA and assigned
-to the stored hierarchy. If a new batch contains too much noise, the complete
-accumulated dataset is clustered again while the original PCA + UMAP
-coordinates remain fixed.
+implementation. Later batches update fuzzy cluster centers online. Full
+memberships are periodically refreshed, and repeated refreshes or excessive
+new-batch noise trigger complete re-clustering plus PCA + UMAP re-fitting.
 """
 
 from __future__ import annotations
@@ -16,7 +15,7 @@ import os
 import pickle
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +43,8 @@ from fcm_hierarchy import (
 
 
 DEFAULT_NOISE_THRESHOLD = 0.30
+DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
+DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER = 3
 
 
 @dataclass
@@ -59,6 +60,9 @@ class IncrementalClusterState:
     config: dict[str, Any]
     visual_pca: Any
     visual_reducer: Any
+    center_statistics: dict[str, dict[str, np.ndarray]] = field(
+        default_factory=dict
+    )
 
 
 def _validate_embeddings(embeddings: np.ndarray) -> np.ndarray:
@@ -256,6 +260,198 @@ def assign_to_hierarchy(
     return assignments, float(np.mean(is_noise))
 
 
+def _center_statistics_for_batch(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    *,
+    min_membership: float,
+    m: float,
+) -> dict[str, dict[str, np.ndarray]]:
+    """Collect fuzzy weighted sums for every hierarchy node reached by a batch."""
+
+    values = _validate_embeddings(embeddings)
+    projected = transform_pca_normalized_features(values, hierarchy_model.pca)
+    statistics: dict[str, dict[str, np.ndarray]] = {}
+    if hierarchy_model.fallback_single_cluster:
+        return statistics
+
+    active: dict[str, np.ndarray] = {"": np.arange(len(values), dtype=int)}
+    for _depth in range(hierarchy_model.max_depth):
+        next_active: dict[str, np.ndarray] = {}
+        for parent_path, indices in active.items():
+            node_model = hierarchy_model.nodes.get(parent_path)
+            if node_model is None or indices.size == 0:
+                continue
+
+            memberships, distances = fcm_memberships_from_centers(
+                projected[indices],
+                node_model.centers,
+                m=m,
+            )
+            weights = memberships**m
+            statistics[parent_path] = {
+                "weighted_sum": weights.T @ projected[indices],
+                "weight": weights.sum(axis=0),
+            }
+
+            local_labels = memberships.argmax(axis=1)
+            row_indices = np.arange(len(indices))
+            assigned_distances = distances[row_indices, local_labels]
+            local_noise = (
+                memberships.max(axis=1) < min_membership
+            ) | (
+                assigned_distances
+                > node_model.distance_thresholds[local_labels]
+            )
+            valid_indices = indices[~local_noise]
+            valid_labels = local_labels[~local_noise]
+            for cluster_id in range(node_model.centers.shape[0]):
+                child_indices = valid_indices[valid_labels == cluster_id]
+                if child_indices.size:
+                    next_active[_path_for_cluster(parent_path, cluster_id)] = (
+                        child_indices
+                    )
+        active = next_active
+    return statistics
+
+
+def _build_center_statistics(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    *,
+    min_membership: float,
+    m: float,
+) -> dict[str, dict[str, np.ndarray]]:
+    return _center_statistics_for_batch(
+        embeddings,
+        hierarchy_model,
+        min_membership=min_membership,
+        m=m,
+    )
+
+
+def _update_hierarchy_centers(
+    hierarchy_model: HierarchicalModel,
+    center_statistics: dict[str, dict[str, np.ndarray]],
+    embeddings: np.ndarray,
+    *,
+    min_membership: float,
+    m: float,
+) -> tuple[HierarchicalModel, dict[str, dict[str, np.ndarray]], int]:
+    """Update node centers from cumulative online fuzzy sufficient statistics."""
+
+    updated_model = copy.deepcopy(hierarchy_model)
+    accumulated = {
+        path: {
+            "weighted_sum": values["weighted_sum"].copy(),
+            "weight": values["weight"].copy(),
+        }
+        for path, values in center_statistics.items()
+    }
+    batch_statistics = _center_statistics_for_batch(
+        embeddings,
+        hierarchy_model,
+        min_membership=min_membership,
+        m=m,
+    )
+    updated_node_count = 0
+    for path, batch_values in batch_statistics.items():
+        node_model = updated_model.nodes.get(path)
+        if node_model is None:
+            continue
+        if path not in accumulated:
+            accumulated[path] = {
+                "weighted_sum": np.zeros_like(batch_values["weighted_sum"]),
+                "weight": np.zeros_like(batch_values["weight"]),
+            }
+        stored = accumulated[path]
+        if (
+            stored["weighted_sum"].shape != batch_values["weighted_sum"].shape
+            or stored["weight"].shape != batch_values["weight"].shape
+        ):
+            raise ValueError(f"Center statistics do not match hierarchy node: {path}")
+        stored["weighted_sum"] += batch_values["weighted_sum"]
+        stored["weight"] += batch_values["weight"]
+        raw_centers = np.divide(
+            stored["weighted_sum"],
+            stored["weight"][:, None],
+            out=node_model.centers.copy(),
+            where=stored["weight"][:, None] > 1e-12,
+        )
+        center_norms = np.linalg.norm(raw_centers, axis=1, keepdims=True)
+        node_model.centers = np.divide(
+            raw_centers,
+            center_norms,
+            out=node_model.centers.copy(),
+            where=center_norms > 1e-12,
+        )
+        updated_node_count += 1
+    return updated_model, accumulated, updated_node_count
+
+
+def _refresh_distance_thresholds(
+    embeddings: np.ndarray,
+    hierarchy_model: HierarchicalModel,
+    *,
+    min_membership: float,
+    distance_z: float,
+    m: float,
+) -> HierarchicalModel:
+    """Recompute node distance cutoffs after centers have moved."""
+
+    updated_model = copy.deepcopy(hierarchy_model)
+    projected = transform_pca_normalized_features(
+        _validate_embeddings(embeddings),
+        updated_model.pca,
+    )
+    if updated_model.fallback_single_cluster:
+        return updated_model
+
+    active: dict[str, np.ndarray] = {"": np.arange(len(projected), dtype=int)}
+    for _depth in range(updated_model.max_depth):
+        next_active: dict[str, np.ndarray] = {}
+        for parent_path, indices in active.items():
+            node_model = updated_model.nodes.get(parent_path)
+            if node_model is None or indices.size == 0:
+                continue
+            memberships, distances = fcm_memberships_from_centers(
+                projected[indices],
+                node_model.centers,
+                m=m,
+            )
+            local_labels = memberships.argmax(axis=1)
+            thresholds = np.full(node_model.centers.shape[0], np.inf)
+            for cluster_id in range(node_model.centers.shape[0]):
+                cluster_distances = distances[
+                    local_labels == cluster_id,
+                    cluster_id,
+                ]
+                if cluster_distances.size < 4:
+                    continue
+                median = float(np.median(cluster_distances))
+                mad = float(np.median(np.abs(cluster_distances - median)))
+                if mad > 1e-12:
+                    thresholds[cluster_id] = (
+                        median + distance_z * 1.4826 * mad
+                    )
+            node_model.distance_thresholds = thresholds
+
+            rows = np.arange(len(indices))
+            local_noise = (
+                memberships.max(axis=1) < min_membership
+            ) | (distances[rows, local_labels] > thresholds[local_labels])
+            valid_indices = indices[~local_noise]
+            valid_labels = local_labels[~local_noise]
+            for cluster_id in range(node_model.centers.shape[0]):
+                child_indices = valid_indices[valid_labels == cluster_id]
+                if child_indices.size:
+                    next_active[_path_for_cluster(parent_path, cluster_id)] = (
+                        child_indices
+                    )
+        active = next_active
+    return updated_model
+
+
 def _cluster_config(
     *,
     max_depth: int,
@@ -277,7 +473,15 @@ def _cluster_config(
     visual_metric: str,
     visual_spread: float,
     visual_densmap: bool,
+    center_updates_before_membership_refresh: int,
+    membership_refreshes_before_recluster: int,
 ) -> dict[str, Any]:
+    if center_updates_before_membership_refresh < 1:
+        raise ValueError(
+            "center_updates_before_membership_refresh must be at least 1"
+        )
+    if membership_refreshes_before_recluster < 1:
+        raise ValueError("membership_refreshes_before_recluster must be at least 1")
     return {
         "max_depth": int(max_depth),
         "min_node_size": int(min_node_size),
@@ -300,6 +504,17 @@ def _cluster_config(
         "visual_spread": float(visual_spread),
         "visual_densmap": bool(visual_densmap),
         "update_count": 0,
+        "center_updates_before_membership_refresh": int(
+            center_updates_before_membership_refresh
+        ),
+        "membership_refreshes_before_recluster": int(
+            membership_refreshes_before_recluster
+        ),
+        "center_updates_since_membership_refresh": 0,
+        "membership_refreshes_since_recluster": 0,
+        "total_center_updates": 0,
+        "total_membership_refreshes": 0,
+        "total_reclusters": 0,
     }
 
 
@@ -328,6 +543,27 @@ def _fit_hierarchy(
     return result.model, result.tree, result.assignments
 
 
+def _fit_visualization(
+    embeddings: np.ndarray,
+    assignments: pd.DataFrame,
+    config: dict[str, Any],
+) -> tuple[Any, Any, np.ndarray]:
+    cluster_target, cluster_target_metric, _ = build_cluster_supervision(assignments)
+    return fit_projection_model(
+        embeddings,
+        seed=int(config["seed"]),
+        pca_components=int(config["visual_pca_components"]),
+        n_neighbors=int(config["visual_n_neighbors"]),
+        min_dist=float(config["visual_min_dist"]),
+        metric=str(config["visual_metric"]),
+        spread=float(config["visual_spread"]),
+        densmap=bool(config["visual_densmap"]),
+        cluster_target=cluster_target,
+        cluster_target_metric=cluster_target_metric,
+        cluster_target_weight=float(config["visual_cluster_target_weight"]),
+    )
+
+
 def fit_incremental_state(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
@@ -351,6 +587,12 @@ def fit_incremental_state(
     visual_metric: str = "cosine",
     visual_spread: float = 0.85,
     visual_densmap: bool = False,
+    center_updates_before_membership_refresh: int = (
+        DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
+    ),
+    membership_refreshes_before_recluster: int = (
+        DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER
+    ),
 ) -> IncrementalClusterState:
     """Fit the initial batch and persist reusable clustering/visual models."""
 
@@ -384,21 +626,18 @@ def fit_incremental_state(
         visual_metric=visual_metric,
         visual_spread=visual_spread,
         visual_densmap=visual_densmap,
+        center_updates_before_membership_refresh=(
+            center_updates_before_membership_refresh
+        ),
+        membership_refreshes_before_recluster=(
+            membership_refreshes_before_recluster
+        ),
     )
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
-    cluster_target, cluster_target_metric, _ = build_cluster_supervision(assignments)
-    visual_pca, visual_reducer, coordinates = fit_projection_model(
+    visual_pca, visual_reducer, coordinates = _fit_visualization(
         values,
-        seed=seed,
-        pca_components=visual_pca_components,
-        n_neighbors=visual_n_neighbors,
-        min_dist=visual_min_dist,
-        metric=visual_metric,
-        spread=visual_spread,
-        densmap=visual_densmap,
-        cluster_target=cluster_target,
-        cluster_target_metric=cluster_target_metric,
-        cluster_target_weight=visual_cluster_target_weight,
+        assignments,
+        config,
     )
     return IncrementalClusterState(
         embeddings=values.copy(),
@@ -410,6 +649,12 @@ def fit_incremental_state(
         config=config,
         visual_pca=visual_pca,
         visual_reducer=visual_reducer,
+        center_statistics=_build_center_statistics(
+            values,
+            hierarchy_model,
+            min_membership=min_membership,
+            m=float(config["m"]),
+        ),
     )
 
 
@@ -499,6 +744,30 @@ def _refresh_tree_after_append(
     return updated_tree
 
 
+def _rebuild_tree_counts(
+    tree: dict[str, Any],
+    assignments: pd.DataFrame,
+    update_count: int,
+) -> dict[str, Any]:
+    """Rebuild all mutable tree counts while preserving its split structure."""
+
+    reset_tree = copy.deepcopy(tree)
+
+    def reset(node: dict[str, Any]) -> None:
+        node["size"] = 0
+        node["noise_count"] = 0
+        for child in node["children"]:
+            reset(child)
+
+    reset(reset_tree["root"])
+    return _refresh_tree_after_append(
+        reset_tree,
+        assignments,
+        assignments,
+        update_count,
+    )
+
+
 def update_incremental_state(
     state: IncrementalClusterState,
     embeddings: np.ndarray,
@@ -506,7 +775,7 @@ def update_incremental_state(
     *,
     noise_threshold: float | None = None,
 ) -> tuple[IncrementalClusterState, dict[str, Any]]:
-    """Assign a new batch and optionally re-cluster all accumulated samples."""
+    """Update centers, memberships, and models on independent schedules."""
 
     values = _validate_embeddings(embeddings)
     frame = _validate_metadata(metadata, len(values))
@@ -523,6 +792,21 @@ def update_incremental_state(
         if noise_threshold is None
         else noise_threshold
     )
+    config = dict(state.config)
+    config.setdefault(
+        "center_updates_before_membership_refresh",
+        DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH,
+    )
+    config.setdefault(
+        "membership_refreshes_before_recluster",
+        DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER,
+    )
+    config.setdefault("center_updates_since_membership_refresh", 0)
+    config.setdefault("membership_refreshes_since_recluster", 0)
+    config.setdefault("total_center_updates", 0)
+    config.setdefault("total_membership_refreshes", 0)
+    config.setdefault("total_reclusters", 0)
+
     new_assignments, new_noise_ratio = assign_to_hierarchy(
         values,
         frame,
@@ -530,7 +814,7 @@ def update_incremental_state(
         min_membership=float(state.config["min_membership"]),
         m=float(state.config["m"]),
     )
-    should_recluster = new_noise_ratio > threshold
+    emergency_recluster = new_noise_ratio > threshold
     new_coordinates = transform_projection(
         values,
         pca=state.visual_pca,
@@ -543,19 +827,103 @@ def update_incremental_state(
         ignore_index=True,
     )
     combined_coordinates = np.vstack([state.coordinates, new_coordinates])
-    config = dict(state.config)
     config["noise_threshold"] = threshold
     config["update_count"] = int(config.get("update_count", 0)) + 1
 
+    center_statistics = getattr(state, "center_statistics", None) or {}
+    if not center_statistics:
+        center_statistics = _build_center_statistics(
+            state.embeddings,
+            state.hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+    hierarchy_model, center_statistics, updated_node_count = (
+        _update_hierarchy_centers(
+            state.hierarchy_model,
+            center_statistics,
+            values,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+    )
+    config["center_updates_since_membership_refresh"] = (
+        int(config["center_updates_since_membership_refresh"]) + 1
+    )
+    config["total_center_updates"] = int(config["total_center_updates"]) + 1
+
+    membership_refreshed = (
+        int(config["center_updates_since_membership_refresh"])
+        >= int(config["center_updates_before_membership_refresh"])
+    )
+    if membership_refreshed:
+        config["center_updates_since_membership_refresh"] = 0
+        config["membership_refreshes_since_recluster"] = (
+            int(config["membership_refreshes_since_recluster"]) + 1
+        )
+        config["total_membership_refreshes"] = (
+            int(config["total_membership_refreshes"]) + 1
+        )
+
+    scheduled_recluster = membership_refreshed and (
+        int(config["membership_refreshes_since_recluster"])
+        >= int(config["membership_refreshes_before_recluster"])
+    )
+    should_recluster = emergency_recluster or scheduled_recluster
+
+    visualization_refitted = False
     if should_recluster:
         hierarchy_model, tree, assignments = _fit_hierarchy(
             combined_embeddings,
             combined_metadata,
             config,
         )
+        visual_pca, visual_reducer, combined_coordinates = _fit_visualization(
+            combined_embeddings,
+            assignments,
+            config,
+        )
+        center_statistics = _build_center_statistics(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        config["center_updates_since_membership_refresh"] = 0
+        config["membership_refreshes_since_recluster"] = 0
+        config["total_reclusters"] = int(config["total_reclusters"]) + 1
         reclustered = True
+        visualization_refitted = True
+    elif membership_refreshed:
+        hierarchy_model = _refresh_distance_thresholds(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            distance_z=float(config["distance_z"]),
+            m=float(config["m"]),
+        )
+        assignments, _ = assign_to_hierarchy(
+            combined_embeddings,
+            combined_metadata,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        tree = _rebuild_tree_counts(
+            state.tree,
+            assignments,
+            int(config["update_count"]),
+        )
+        center_statistics = _build_center_statistics(
+            combined_embeddings,
+            hierarchy_model,
+            min_membership=float(config["min_membership"]),
+            m=float(config["m"]),
+        )
+        visual_pca = state.visual_pca
+        visual_reducer = state.visual_reducer
+        reclustered = False
     else:
-        hierarchy_model = state.hierarchy_model
         assignments = _append_assignments(state.assignments, new_assignments)
         tree = _refresh_tree_after_append(
             state.tree,
@@ -563,10 +931,39 @@ def update_incremental_state(
             assignments,
             int(config["update_count"]),
         )
+        visual_pca = state.visual_pca
+        visual_reducer = state.visual_reducer
         reclustered = False
 
     config["last_update_noise_ratio"] = float(new_noise_ratio)
     config["last_update_reclustered"] = reclustered
+    config["last_update_membership_refreshed"] = membership_refreshed
+    config["last_update_visualization_refitted"] = visualization_refitted
+    tree.setdefault("config", {}).update(
+        {
+            "center_updates_before_membership_refresh": int(
+                config["center_updates_before_membership_refresh"]
+            ),
+            "membership_refreshes_before_recluster": int(
+                config["membership_refreshes_before_recluster"]
+            ),
+            "center_updates_since_membership_refresh": int(
+                config["center_updates_since_membership_refresh"]
+            ),
+            "membership_refreshes_since_recluster": int(
+                config["membership_refreshes_since_recluster"]
+            ),
+        }
+    )
+    tree.setdefault("summary", {}).update(
+        {
+            "total_center_updates": int(config["total_center_updates"]),
+            "total_membership_refreshes": int(
+                config["total_membership_refreshes"]
+            ),
+            "total_reclusters": int(config["total_reclusters"]),
+        }
+    )
     updated_state = IncrementalClusterState(
         embeddings=combined_embeddings,
         metadata=combined_metadata,
@@ -575,15 +972,28 @@ def update_incremental_state(
         hierarchy_model=hierarchy_model,
         tree=tree,
         config=config,
-        visual_pca=state.visual_pca,
-        visual_reducer=state.visual_reducer,
+        visual_pca=visual_pca,
+        visual_reducer=visual_reducer,
+        center_statistics=center_statistics,
     )
     summary = {
         "new_samples": int(len(values)),
         "new_noise_count": int(round(new_noise_ratio * len(values))),
         "new_noise_ratio": float(new_noise_ratio),
         "noise_threshold": float(threshold),
+        "center_updated": updated_node_count > 0,
+        "updated_center_nodes": int(updated_node_count),
+        "membership_refreshed": membership_refreshed,
+        "scheduled_recluster": scheduled_recluster,
+        "emergency_recluster": emergency_recluster,
         "reclustered": reclustered,
+        "visualization_refitted": visualization_refitted,
+        "center_updates_since_membership_refresh": int(
+            config["center_updates_since_membership_refresh"]
+        ),
+        "membership_refreshes_since_recluster": int(
+            config["membership_refreshes_since_recluster"]
+        ),
         "total_samples": int(len(combined_embeddings)),
     }
     return updated_state, summary
@@ -603,7 +1013,7 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
     payload = {
-        "version": 1,
+        "version": 2,
         "embeddings": state.embeddings,
         "metadata": state.metadata,
         "assignments": state.assignments,
@@ -613,6 +1023,7 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
         "config": state.config,
         "visual_pca": state.visual_pca,
         "visual_reducer": state.visual_reducer,
+        "center_statistics": state.center_statistics,
     }
     with temporary_path.open("wb") as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -635,27 +1046,27 @@ def load_state(path: Path) -> IncrementalClusterState:
 
     if isinstance(payload, IncrementalClusterState):
         state = payload
-    elif isinstance(payload, dict) and payload.get("version") == 1:
-        fields = {
-            key: payload[key]
-            for key in (
-                "embeddings",
-                "metadata",
-                "assignments",
-                "coordinates",
-                "hierarchy_model",
-                "tree",
-                "config",
-                "visual_pca",
-                "visual_reducer",
-            )
-            if key in payload
-        }
-        if len(fields) != 9:
+    elif isinstance(payload, dict) and payload.get("version") in {1, 2}:
+        required_fields = (
+            "embeddings",
+            "metadata",
+            "assignments",
+            "coordinates",
+            "hierarchy_model",
+            "tree",
+            "config",
+            "visual_pca",
+            "visual_reducer",
+        )
+        if any(key not in payload for key in required_fields):
             raise ValueError(f"Invalid incremental state: {path}")
+        fields = {key: payload[key] for key in required_fields}
+        fields["center_statistics"] = payload.get("center_statistics", {})
         state = IncrementalClusterState(**fields)
     else:
         raise ValueError(f"Invalid incremental state: {path}")
+    if not hasattr(state, "center_statistics"):
+        state.center_statistics = {}
     _validate_embeddings(state.embeddings)
     _validate_metadata(state.metadata, len(state.embeddings))
     if len(state.assignments) != len(state.embeddings):
@@ -786,6 +1197,18 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         default=False,
         help="Request densMAP; it is disabled because densMAP cannot transform new points.",
     )
+    parser.add_argument(
+        "--center-updates-before-membership-refresh",
+        type=int,
+        default=DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH,
+        help="Recompute every document membership after this many batch center updates.",
+    )
+    parser.add_argument(
+        "--membership-refreshes-before-recluster",
+        type=int,
+        default=DEFAULT_MEMBERSHIP_REFRESHES_BEFORE_RECLUSTER,
+        help="Re-cluster and re-fit visualization after this many full membership refreshes.",
+    )
 
 
 def _derived_path(path: Path, suffix: str) -> Path:
@@ -821,6 +1244,12 @@ def _run_fit(args: argparse.Namespace) -> None:
         visual_metric=args.visual_metric,
         visual_spread=args.visual_spread,
         visual_densmap=args.visual_densmap,
+        center_updates_before_membership_refresh=(
+            args.center_updates_before_membership_refresh
+        ),
+        membership_refreshes_before_recluster=(
+            args.membership_refreshes_before_recluster
+        ),
     )
     save_state(state, args.state_output)
     write_outputs(
@@ -886,7 +1315,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     update_parser = subparsers.add_parser(
         "update",
-        help="Assign a new batch and re-cluster when its noise is too high.",
+        help=(
+            "Update centers and periodically refresh memberships, clustering, "
+            "and visualization."
+        ),
     )
     _add_input_args(update_parser)
     update_parser.add_argument("--state", type=Path, required=True)

@@ -30,7 +30,35 @@ python incremental_clustering.py update \
   --plot-output results_incremental/ag_news_100_scatter.png
 ```
 
-증분 시각화는 초기 PCA + UMAP 모델을 저장하고 `transform`으로 신규 점만 투영한다. 따라서 기존 점의 좌표는 움직이지 않는다. UMAP의 densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는 `densmap=False`가 사용된다.
+전체 재클러스터링 사이의 증분 시각화는 저장된 PCA + UMAP 모델의 `transform`으로
+신규 점만 투영하므로 기존 점의 좌표가 움직이지 않는다. 전체 재클러스터링이
+발생하면 시각화 모델과 모든 좌표도 다시 계산한다. UMAP의 densMAP은 신규 점
+변환을 지원하지 않으므로 증분 모드에서는 `densmap=False`가 사용된다.
+
+## Online center와 주기적 전체 갱신
+
+증분 update 한 번을 center update 한 번으로 계산한다. 신규 batch가 들어오면 각
+계층 노드에서 `membership ** m` 가중합과 가중치를 누적하고, 구면 FCM center를
+즉시 다시 정규화한다. 기본 주기는 다음과 같다.
+
+- center update 10회: 누적된 모든 문서의 membership과 거리 임계값 재계산
+- 전체 membership 재계산 3회: 누적 데이터 전체 재클러스터링
+- 전체 재클러스터링 시: 시각화 PCA와 UMAP도 다시 학습하고 모든 좌표 재계산
+- 신규 batch noise 비율이 30%를 초과하면 주기를 기다리지 않고 긴급 전체
+  재클러스터링 및 재시각화
+
+초기 fit에서 주기를 변경할 수 있다.
+
+```bash
+python incremental_clustering.py fit \
+  ... \
+  --center-updates-before-membership-refresh 10 \
+  --membership-refreshes-before-recluster 3
+```
+
+state에는 center의 fuzzy sufficient statistics와 다음 실행까지 남은 카운터가
+저장된다. 기존 version 1 state는 첫 update에서 기존 전체 임베딩으로 통계를
+복원한다.
 
 기본 재클러스터링 기준은 신규 배치 노이즈 비율 30% 초과다. `--noise-threshold 0.01`처럼 업데이트 명령에서 바꿀 수 있다.
 

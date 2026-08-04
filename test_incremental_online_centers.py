@@ -1,0 +1,268 @@
+from __future__ import annotations
+
+import pickle
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+import numpy as np
+import pandas as pd
+
+from clustering_types import HierarchicalModel, HierarchyNodeModel
+from fcm_hierarchy import fit_pca_normalized_features, spherical_fcm
+from incremental_clustering import (
+    IncrementalClusterState,
+    _build_center_statistics,
+    _rebuild_tree_counts,
+    assign_to_hierarchy,
+    load_state,
+    save_state,
+    update_incremental_state,
+)
+
+
+class _IdentityReducer:
+    def transform(self, X: np.ndarray) -> np.ndarray:
+        return np.asarray(X[:, :2], dtype=np.float64)
+
+
+def _tree_template() -> dict[str, object]:
+    def child(cluster_id: int) -> dict[str, object]:
+        return {
+            "node_id": str(cluster_id),
+            "parent_id": "root",
+            "path": str(cluster_id),
+            "depth": 1,
+            "size": 0,
+            "noise_count": 0,
+            "children": [],
+        }
+
+    return {
+        "root": {
+            "node_id": "root",
+            "parent_id": None,
+            "path": "",
+            "depth": 0,
+            "size": 0,
+            "noise_count": 0,
+            "children": [child(0), child(1)],
+        },
+        "summary": {},
+        "config": {},
+    }
+
+
+class IncrementalOnlineCenterTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.X = np.asarray(
+            [
+                [3.0, 0.2, 0.1, 0.0],
+                [2.8, 0.3, 0.0, 0.1],
+                [3.2, 0.1, 0.2, 0.0],
+                [0.1, 3.0, 0.0, 0.2],
+                [0.2, 2.9, 0.1, 0.0],
+                [0.0, 3.1, 0.2, 0.1],
+            ],
+            dtype=np.float64,
+        )
+        self.metadata = pd.DataFrame({"id": np.arange(len(self.X))})
+
+    def _make_state(
+        self,
+        *,
+        center_refresh_interval: int = 10,
+        recluster_interval: int = 3,
+    ) -> IncrementalClusterState:
+        projected, pca = fit_pca_normalized_features(
+            self.X,
+            n_components=3,
+            seed=11,
+        )
+        fcm = spherical_fcm(projected, n_clusters=2, seed=11)
+        model = HierarchicalModel(
+            pca=pca,
+            nodes={
+                "": HierarchyNodeModel(
+                    path="",
+                    depth=0,
+                    centers=fcm.centers.copy(),
+                    distance_thresholds=np.full(2, np.inf),
+                )
+            },
+            max_depth=1,
+        )
+        assignments, _ = assign_to_hierarchy(
+            self.X,
+            self.metadata,
+            model,
+            min_membership=0.0,
+        )
+        config = {
+            "max_depth": 1,
+            "min_node_size": 4,
+            "min_child_size": 2,
+            "min_clusters": 2,
+            "max_clusters": 2,
+            "min_membership": 0.0,
+            "distance_z": 3.5,
+            "selection_method": "silhouette",
+            "min_split_silhouette": -1.0,
+            "pca_components": 3,
+            "seed": 11,
+            "m": 2.0,
+            "noise_threshold": 1.0,
+            "visual_pca_components": 3,
+            "visual_cluster_target_weight": 0.0,
+            "visual_n_neighbors": 3,
+            "visual_min_dist": 0.02,
+            "visual_metric": "cosine",
+            "visual_spread": 0.85,
+            "visual_densmap": False,
+            "update_count": 0,
+            "center_updates_before_membership_refresh": center_refresh_interval,
+            "membership_refreshes_before_recluster": recluster_interval,
+            "center_updates_since_membership_refresh": 0,
+            "membership_refreshes_since_recluster": 0,
+            "total_center_updates": 0,
+            "total_membership_refreshes": 0,
+            "total_reclusters": 0,
+        }
+        tree = _rebuild_tree_counts(_tree_template(), assignments, 0)
+        reducer = _IdentityReducer()
+        coordinates = reducer.transform(projected)
+        return IncrementalClusterState(
+            embeddings=self.X.copy(),
+            metadata=self.metadata.copy(),
+            assignments=assignments,
+            coordinates=coordinates,
+            hierarchy_model=model,
+            tree=tree,
+            config=config,
+            visual_pca=pca,
+            visual_reducer=reducer,
+            center_statistics=_build_center_statistics(
+                self.X,
+                model,
+                min_membership=0.0,
+                m=2.0,
+            ),
+        )
+
+    def test_each_batch_updates_fcm_centers_without_full_refresh(self) -> None:
+        state = self._make_state(center_refresh_interval=5)
+        previous_centers = state.hierarchy_model.nodes[""].centers.copy()
+        batch = np.asarray(
+            [[3.0, 0.8, 0.4, 0.0], [2.7, 0.9, 0.2, 0.1]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+
+        updated, summary = update_incremental_state(state, batch, metadata)
+
+        self.assertTrue(summary["center_updated"])
+        self.assertFalse(summary["membership_refreshed"])
+        self.assertFalse(summary["reclustered"])
+        self.assertGreater(
+            np.max(
+                np.abs(
+                    updated.hierarchy_model.nodes[""].centers
+                    - previous_centers
+                )
+            ),
+            1e-8,
+        )
+        np.testing.assert_allclose(
+            state.hierarchy_model.nodes[""].centers,
+            previous_centers,
+        )
+
+    def test_refresh_then_recluster_and_revisualize_on_schedule(self) -> None:
+        state = self._make_state(
+            center_refresh_interval=1,
+            recluster_interval=2,
+        )
+        first_batch = np.asarray(
+            [[3.1, 0.4, 0.2, 0.0], [0.2, 3.2, 0.1, 0.0]],
+            dtype=np.float64,
+        )
+        first_metadata = pd.DataFrame({"id": [100, 101]})
+        first, first_summary = update_incremental_state(
+            state,
+            first_batch,
+            first_metadata,
+        )
+
+        self.assertTrue(first_summary["membership_refreshed"])
+        self.assertFalse(first_summary["reclustered"])
+        self.assertEqual(first.config["membership_refreshes_since_recluster"], 1)
+        self.assertEqual(len(first.assignments), len(first.embeddings))
+
+        second_batch = np.asarray(
+            [[2.9, 0.5, 0.2, 0.1], [0.3, 3.0, 0.0, 0.2]],
+            dtype=np.float64,
+        )
+        second_metadata = pd.DataFrame({"id": [102, 103]})
+        refitted_coordinates = np.full((10, 2), 7.0)
+        replacement_reducer = _IdentityReducer()
+
+        with patch(
+            "incremental_clustering._fit_visualization",
+            return_value=(
+                first.visual_pca,
+                replacement_reducer,
+                refitted_coordinates,
+            ),
+        ) as fit_visualization:
+            second, second_summary = update_incremental_state(
+                first,
+                second_batch,
+                second_metadata,
+            )
+
+        self.assertTrue(second_summary["membership_refreshed"])
+        self.assertTrue(second_summary["scheduled_recluster"])
+        self.assertTrue(second_summary["reclustered"])
+        self.assertTrue(second_summary["visualization_refitted"])
+        fit_visualization.assert_called_once()
+        np.testing.assert_array_equal(second.coordinates, refitted_coordinates)
+        self.assertEqual(second.config["membership_refreshes_since_recluster"], 0)
+        self.assertEqual(second.config["total_reclusters"], 1)
+
+    def test_version_two_state_preserves_center_statistics(self) -> None:
+        state = self._make_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.pkl"
+            save_state(state, path)
+            loaded = load_state(path)
+        self.assertEqual(loaded.center_statistics.keys(), {""})
+        np.testing.assert_allclose(
+            loaded.center_statistics[""]["weighted_sum"],
+            state.center_statistics[""]["weighted_sum"],
+        )
+
+    def test_version_one_state_loads_without_center_statistics(self) -> None:
+        state = self._make_state()
+        payload = {
+            "version": 1,
+            "embeddings": state.embeddings,
+            "metadata": state.metadata,
+            "assignments": state.assignments,
+            "coordinates": state.coordinates,
+            "hierarchy_model": state.hierarchy_model,
+            "tree": state.tree,
+            "config": state.config,
+            "visual_pca": state.visual_pca,
+            "visual_reducer": state.visual_reducer,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version-one.pkl"
+            with path.open("wb") as handle:
+                pickle.dump(payload, handle)
+            loaded = load_state(path)
+        self.assertEqual(loaded.center_statistics, {})
+
+
+if __name__ == "__main__":
+    unittest.main()
