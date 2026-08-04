@@ -21,6 +21,10 @@ from clustering_types import (
 
 DEFAULT_CLUSTERING_PCA_COMPONENTS = 256
 DEFAULT_MAX_MEMBERSHIP_GAP = 0.10
+DEFAULT_FORCED_NOISE_RATIO = 0.01
+DOCUMENT_TYPE_CORE = "core"
+DOCUMENT_TYPE_BOUNDARY = "boundary"
+DOCUMENT_TYPE_NOISE = "noise"
 
 
 def spherical_fcm(
@@ -248,13 +252,13 @@ def conditional_memberships_from_projected(
     return probabilities
 
 
-def fcm_membership_noise_mask(
+def fcm_membership_boundary_mask(
     memberships: np.ndarray,
     *,
     min_membership: float = 0.40,
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
 ) -> np.ndarray:
-    """Identify low-confidence points that also lie near a fuzzy boundary.
+    """Identify points with both low confidence and a small top-two gap.
 
     A point is marked only when its largest membership is below
     ``min_membership`` and the gap between its largest and second-largest
@@ -281,7 +285,117 @@ def fcm_membership_noise_mask(
     )
 
 
-def fcm_noise_mask(
+def classify_fcm_documents(
+    memberships: np.ndarray,
+    assigned_distances: np.ndarray,
+    distance_thresholds: np.ndarray,
+    *,
+    min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+) -> np.ndarray:
+    """Classify documents as core, boundary, or noise from three signals.
+
+    Low maximum membership and a small top-two gap form an ambiguous boundary
+    candidate. A candidate is noise only when it is also farther from its
+    assigned center than the supplied distance threshold.
+    """
+
+    values = np.asarray(memberships, dtype=np.float64)
+    distances = np.asarray(assigned_distances, dtype=np.float64)
+    thresholds = np.asarray(distance_thresholds, dtype=np.float64)
+    if distances.ndim != 1 or thresholds.ndim != 1:
+        raise ValueError("assigned distances and thresholds must be 1D arrays")
+    if distances.shape[0] != values.shape[0] or thresholds.shape[0] != values.shape[0]:
+        raise ValueError("distance arrays must align with membership rows")
+    if not np.all(np.isfinite(distances)):
+        raise ValueError("assigned distances must contain only finite values")
+    if np.any(np.isnan(thresholds)):
+        raise ValueError("distance thresholds must not contain NaN")
+
+    boundary_candidates = fcm_membership_boundary_mask(
+        values,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+    )
+    far_from_center = distances > thresholds
+    document_types = np.full(values.shape[0], DOCUMENT_TYPE_CORE, dtype=object)
+    document_types[boundary_candidates] = DOCUMENT_TYPE_BOUNDARY
+    document_types[boundary_candidates & far_from_center] = DOCUMENT_TYPE_NOISE
+    return document_types
+
+
+def fcm_noise_scores(
+    memberships: np.ndarray,
+    assigned_distances: np.ndarray,
+    assigned_labels: np.ndarray,
+) -> np.ndarray:
+    """Rank noise risk from confidence, ambiguity, and center distance."""
+
+    values = np.asarray(memberships, dtype=np.float64)
+    distances = np.asarray(assigned_distances, dtype=np.float64)
+    labels = np.asarray(assigned_labels)
+    if values.ndim != 2:
+        raise ValueError("memberships must be a 2D array")
+    if distances.ndim != 1 or labels.ndim != 1:
+        raise ValueError("assigned distances and labels must be 1D arrays")
+    if distances.shape[0] != values.shape[0] or labels.shape[0] != values.shape[0]:
+        raise ValueError("assigned arrays must align with membership rows")
+    if not np.all(np.isfinite(values)) or not np.all(np.isfinite(distances)):
+        raise ValueError("score inputs must contain only finite values")
+    if values.shape[0] == 0:
+        return np.empty(0, dtype=np.float64)
+    if values.shape[1] < 2:
+        return np.zeros(values.shape[0], dtype=np.float64)
+
+    top_two = np.partition(values, -2, axis=1)[:, -2:]
+    largest = top_two.max(axis=1)
+    membership_gap = largest - top_two.min(axis=1)
+
+    def percentile_rank(signal: np.ndarray) -> np.ndarray:
+        return pd.Series(signal).rank(method="average", pct=True).to_numpy()
+
+    low_confidence_rank = percentile_rank(1.0 - largest)
+    ambiguity_rank = percentile_rank(1.0 - membership_gap)
+    distance_rank = np.zeros(values.shape[0], dtype=np.float64)
+    for cluster_id in np.unique(labels):
+        cluster_mask = labels == cluster_id
+        distance_rank[cluster_mask] = percentile_rank(distances[cluster_mask])
+
+    return np.cbrt(low_confidence_rank * ambiguity_rank * distance_rank)
+
+
+def forced_noise_mask(
+    noise_scores: np.ndarray,
+    document_ids: np.ndarray,
+    *,
+    forced_noise_ratio: float = DEFAULT_FORCED_NOISE_RATIO,
+) -> np.ndarray:
+    """Select the highest-risk fraction, breaking equal scores by document ID."""
+
+    scores = np.asarray(noise_scores, dtype=np.float64)
+    ids = np.asarray(document_ids)
+    if scores.ndim != 1 or ids.ndim != 1 or scores.shape[0] != ids.shape[0]:
+        raise ValueError("noise scores and document IDs must be aligned 1D arrays")
+    if not np.all(np.isfinite(scores)):
+        raise ValueError("noise scores must contain only finite values")
+    if not 0.0 <= forced_noise_ratio <= 1.0:
+        raise ValueError("forced_noise_ratio must be between 0 and 1")
+
+    selected = np.zeros(scores.shape[0], dtype=bool)
+    selected_count = min(
+        scores.shape[0],
+        int(np.ceil(scores.shape[0] * forced_noise_ratio)),
+    )
+    if selected_count == 0:
+        return selected
+
+    row_indices = np.arange(scores.shape[0])
+    order = np.lexsort((row_indices, ids.astype(str), -scores))
+    selected[order[:selected_count]] = True
+    return selected
+
+
+def fcm_document_types(
     X: np.ndarray,
     result: FCMResult,
     *,
@@ -289,23 +403,18 @@ def fcm_noise_mask(
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
 ) -> np.ndarray:
-    """Identify ambiguous or outlying points in a spherical FCM result."""
+    """Classify fitted FCM samples using robust per-cluster distances."""
 
     if distance_z < 0.0:
         raise ValueError("distance_z must be non-negative")
 
     Xn = normalize(X, norm="l2")
     labels = result.labels
-    memberships = result.memberships
     distances = euclidean_distances(Xn, result.centers)
     row_indices = np.arange(Xn.shape[0])
     assigned_distances = distances[row_indices, labels]
+    assigned_thresholds = np.full(Xn.shape[0], float("inf"), dtype=np.float64)
 
-    noise = fcm_membership_noise_mask(
-        memberships,
-        min_membership=min_membership,
-        max_membership_gap=max_membership_gap,
-    )
     for cluster_id in range(result.memberships.shape[1]):
         cluster_mask = labels == cluster_id
         cluster_distances = assigned_distances[cluster_mask]
@@ -316,11 +425,34 @@ def fcm_noise_mask(
         mad = float(np.median(np.abs(cluster_distances - median)))
         if mad <= 1e-12:
             continue
-        robust_scale = 1.4826 * mad
-        threshold = median + distance_z * robust_scale
-        noise |= cluster_mask & (assigned_distances > threshold)
+        assigned_thresholds[cluster_mask] = median + distance_z * 1.4826 * mad
 
-    return noise
+    return classify_fcm_documents(
+        result.memberships,
+        assigned_distances,
+        assigned_thresholds,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+    )
+
+
+def fcm_noise_mask(
+    X: np.ndarray,
+    result: FCMResult,
+    *,
+    min_membership: float = 0.40,
+    max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+    distance_z: float = 3.5,
+) -> np.ndarray:
+    """Return documents satisfying all membership and distance noise rules."""
+
+    return fcm_document_types(
+        X,
+        result,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+        distance_z=distance_z,
+    ) == DOCUMENT_TYPE_NOISE
 
 
 def spherical_fcm_objective(
@@ -535,6 +667,7 @@ def run_hierarchical_pca_fcm(
     max_clusters: int = 8,
     min_membership: float = 0.40,
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
+    forced_noise_ratio: float = DEFAULT_FORCED_NOISE_RATIO,
     distance_z: float = 3.5,
     selection_method: str = "silhouette",
     min_split_silhouette: float = 0.05,
@@ -562,6 +695,8 @@ def run_hierarchical_pca_fcm(
         raise ValueError("min_membership must be between 0 and 1")
     if not 0.0 <= max_membership_gap <= 1.0:
         raise ValueError("max_membership_gap must be between 0 and 1")
+    if not 0.0 <= forced_noise_ratio <= 1.0:
+        raise ValueError("forced_noise_ratio must be between 0 and 1")
     if selection_method not in {"silhouette", "knee"}:
         raise ValueError("selection_method must be 'silhouette' or 'knee'")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
@@ -583,6 +718,9 @@ def run_hierarchical_pca_fcm(
         for _ in range(max_depth)
     ]
     is_noise = np.zeros(X.shape[0], dtype=bool)
+    document_types = np.full(X.shape[0], DOCUMENT_TYPE_CORE, dtype=object)
+    noise_scores = np.zeros(X.shape[0], dtype=np.float64)
+    boundary_level = np.full(X.shape[0], -1, dtype=int)
     noise_level = np.full(X.shape[0], -1, dtype=int)
     node_models: dict[str, HierarchyNodeModel] = {}
 
@@ -604,6 +742,7 @@ def run_hierarchical_pca_fcm(
             "selected_silhouette": None,
             "selected_valid_clusters": 0,
             "noise_count": 0,
+            "boundary_count": 0,
             "candidate_metrics": [],
             "stop_reason": None,
             "children": [],
@@ -671,6 +810,37 @@ def run_hierarchical_pca_fcm(
 
         current_level = depth
         local_labels = best.labels
+        local_document_types = fcm_document_types(
+            Xp[indices],
+            best.result,
+            min_membership=min_membership,
+            max_membership_gap=max_membership_gap,
+            distance_z=distance_z,
+        )
+        local_distances = euclidean_distances(
+            Xp[indices],
+            best.result.centers,
+        )[np.arange(indices.size), best.result.labels]
+        local_noise_scores = fcm_noise_scores(
+            best.result.memberships,
+            local_distances,
+            best.result.labels,
+        )
+        noise_scores[indices] = np.maximum(
+            noise_scores[indices],
+            local_noise_scores,
+        )
+        local_document_types[local_labels == -1] = DOCUMENT_TYPE_NOISE
+        boundary_rows = (
+            (local_labels >= 0)
+            & (local_document_types == DOCUMENT_TYPE_BOUNDARY)
+        )
+        first_boundary_rows = boundary_rows & (
+            document_types[indices] == DOCUMENT_TYPE_CORE
+        )
+        document_types[indices[boundary_rows]] = DOCUMENT_TYPE_BOUNDARY
+        boundary_level[indices[first_boundary_rows]] = current_level + 1
+        node["boundary_count"] = int(np.sum(boundary_rows))
 
         model_centers: list[np.ndarray] = []
         distance_thresholds: list[float] = []
@@ -725,6 +895,8 @@ def run_hierarchical_pca_fcm(
         noise_indices = indices[local_labels == -1]
         if noise_indices.size:
             is_noise[noise_indices] = True
+            document_types[noise_indices] = DOCUMENT_TYPE_NOISE
+            boundary_level[noise_indices] = -1
             noise_level[noise_indices] = current_level + 1
 
         for cluster_id, cluster_size in enumerate(best.cluster_sizes):
@@ -748,6 +920,22 @@ def run_hierarchical_pca_fcm(
             recurse(child_indices, child, depth + 1)
 
     recurse(np.arange(X.shape[0], dtype=int), root, 0)
+
+    is_natural_noise = is_noise.copy()
+    document_ids = (
+        metadata["id"].to_numpy()
+        if "id" in metadata.columns
+        else np.arange(X.shape[0])
+    )
+    is_forced_noise = forced_noise_mask(
+        noise_scores,
+        document_ids,
+        forced_noise_ratio=forced_noise_ratio,
+    )
+    is_noise |= is_forced_noise
+    forced_only = is_forced_noise & ~is_natural_noise
+    document_types[is_forced_noise] = DOCUMENT_TYPE_NOISE
+    noise_level[forced_only] = 0
 
     assigned_depth = np.sum(labels_by_level >= 0, axis=1)
     leaf_level = np.where(assigned_depth > 0, assigned_depth, -1).astype(int)
@@ -791,6 +979,12 @@ def run_hierarchical_pca_fcm(
             cluster_paths.append("/".join(path_parts) if path_parts else "root")
     assignments["cluster_path"] = cluster_paths
     assignments["is_noise"] = is_noise
+    assignments["is_natural_noise"] = is_natural_noise
+    assignments["is_forced_noise"] = is_forced_noise
+    assignments["is_boundary"] = document_types == DOCUMENT_TYPE_BOUNDARY
+    assignments["document_type"] = document_types
+    assignments["noise_score"] = noise_scores
+    assignments["boundary_level"] = boundary_level
     assignments["noise_level"] = noise_level
     assignments["leaf_level"] = leaf_level
 
@@ -812,6 +1006,13 @@ def run_hierarchical_pca_fcm(
         "node_count": int(len(non_root_nodes)),
         "leaf_count": int(sum(not node["children"] for node in nodes)),
         "noise_count": int(np.sum(is_noise)),
+        "natural_noise_count": int(np.sum(is_natural_noise)),
+        "forced_noise_count": int(np.sum(is_forced_noise)),
+        "forced_only_noise_count": int(np.sum(forced_only)),
+        "boundary_count": int(
+            np.sum(document_types == DOCUMENT_TYPE_BOUNDARY)
+        ),
+        "core_count": int(np.sum(document_types == DOCUMENT_TYPE_CORE)),
         "noise_by_level": {
             str(level): int(np.sum(noise_level == level))
             for level in range(1, max_depth + 1)
@@ -831,6 +1032,7 @@ def run_hierarchical_pca_fcm(
         "min_split_silhouette": float(min_split_silhouette),
         "min_membership": float(min_membership),
         "max_membership_gap": float(max_membership_gap),
+        "forced_noise_ratio": float(forced_noise_ratio),
         "distance_z": float(distance_z),
         "pca_components_requested": int(pca_components),
         "seed": int(seed),

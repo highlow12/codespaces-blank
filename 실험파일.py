@@ -20,6 +20,7 @@ from clustering_types import HierarchicalResult
 from embedding_data import load_embeddings_from_json, make_synthetic_embeddings
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
+    DEFAULT_FORCED_NOISE_RATIO,
     DEFAULT_MAX_MEMBERSHIP_GAP,
     run_hierarchical_pca_fcm,
 )
@@ -63,6 +64,11 @@ def main() -> None:
         "--hierarchical-max-membership-gap",
         type=float,
         default=DEFAULT_MAX_MEMBERSHIP_GAP,
+    )
+    parser.add_argument(
+        "--hierarchical-forced-noise-ratio",
+        type=float,
+        default=DEFAULT_FORCED_NOISE_RATIO,
     )
     parser.add_argument("--hierarchical-distance-z", type=float, default=3.5)
     parser.add_argument("--hierarchical-min-silhouette", type=float, default=0.05)
@@ -187,6 +193,7 @@ def main() -> None:
             max_clusters=args.hierarchical_max_clusters,
             min_membership=args.hierarchical_min_membership,
             max_membership_gap=args.hierarchical_max_membership_gap,
+            forced_noise_ratio=args.hierarchical_forced_noise_ratio,
             distance_z=args.hierarchical_distance_z,
             selection_method=args.hierarchical_k_selection,
             min_split_silhouette=args.hierarchical_min_silhouette,
