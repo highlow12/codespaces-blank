@@ -32,8 +32,8 @@ class FastFcmConfig:
     scout_max_attempts: int = 3
     scout_max_iter: int = 60
     scout_tol: float = 1e-4
-    scout_max_clusters: int = 4
-    refine_top_k: int = 1
+    scout_max_clusters: int = 8
+    refine_top_k: int = 2
     refine_n_init: int = 3
     refine_max_attempts: int = 5
     refine_max_iter: int = 100
@@ -211,10 +211,11 @@ def select_fast_fcm_cluster_count(
         seed=seed,
         config=fast,
     )
+    scout_max_clusters = min(max_clusters, fast.scout_max_clusters)
     scout_best, scout_records, scout_reason = select_fcm_cluster_count(
         scout_X,
         min_clusters=min_clusters,
-        max_clusters=min(max_clusters, fast.scout_max_clusters),
+        max_clusters=scout_max_clusters,
         min_child_size=min_child_size,
         min_membership=min_membership,
         max_membership_gap=max_membership_gap,
@@ -227,6 +228,10 @@ def select_fast_fcm_cluster_count(
         max_iter=fast.scout_max_iter,
         tol=fast.scout_tol,
         collapse_center_separation=fast.min_center_separation,
+        # The scout is already bounded by sample size, restarts, iterations,
+        # and scout_max_clusters. Evaluate its complete K range so one noisy
+        # XB worsening cannot hide a later, stronger split.
+        xb_worsening_patience=scout_max_clusters,
     )
     if scout_best is None:
         return None, [*probe_records, *scout_records], f"fast_scout:{scout_reason}"

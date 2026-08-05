@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from sklearn.preprocessing import normalize
@@ -9,6 +10,7 @@ from pca_dimension_selection import (
     select_pca_dimension,
     transform_with_selected_dimension,
 )
+from pca_dimension_search import GLOBAL_KNEE_REASON
 
 
 class PcaDimensionSelectionTests(unittest.TestCase):
@@ -89,6 +91,23 @@ class PcaDimensionSelectionTests(unittest.TestCase):
             selection.selected_features[:5],
             atol=1e-12,
         )
+
+    def test_global_knee_recovers_from_noisy_early_plateau(self) -> None:
+        with patch(
+            "pca_dimension_search.mean_neighbor_preservation",
+            side_effect=[0.50, 0.54, 0.70, 0.78],
+        ):
+            selection = select_pca_dimension(
+                self.X,
+                max_components=32,
+                min_components=8,
+                component_step=8,
+                k_values=(3,),
+                minimum_preservation_gain=0.05,
+            )
+
+        self.assertEqual(selection.selected_dimension, 24)
+        self.assertEqual(selection.selection_reason, GLOBAL_KNEE_REASON)
 
     def test_rejects_inputs_that_cannot_reach_minimum_dimension(self) -> None:
         with self.assertRaisesRegex(ValueError, "minimum PCA dimension"):

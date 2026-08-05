@@ -193,7 +193,7 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
             "selected_multi_metric_xb_worsening_patience",
         )
         self.assertIsNotNone(best)
-        self.assertEqual(best.n_clusters, 6)
+        self.assertEqual(best.n_clusters, 3)
         self.assertEqual(
             [metric["k"] for metric in metrics],
             [2, 3, 4, 5, 6],
@@ -279,6 +279,45 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertEqual(best.labels.shape[0], best.result.memberships.shape[0])
         self.assertGreater(best.m, 1.0)
         self.assertTrue(any(record.get("phase") == "refine" for record in records))
+
+    def test_fast_selector_scouts_full_k_range_and_refines_top_two(self) -> None:
+        angles = np.repeat(np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False), 20)
+        X = np.column_stack([np.cos(angles), np.sin(angles)])
+        X += np.random.default_rng(11).normal(0.0, 0.01, size=X.shape)
+
+        best, records, reason = select_fast_fcm_cluster_count(
+            X,
+            min_clusters=2,
+            max_clusters=6,
+            min_child_size=8,
+            config=FastFcmConfig(
+                sample_size=120,
+                scout_n_init=2,
+                scout_max_attempts=3,
+                scout_max_iter=40,
+                scout_max_clusters=6,
+                refine_n_init=2,
+                refine_max_attempts=3,
+                refine_max_iter=50,
+                refine_top_k=2,
+            ),
+            seed=11,
+        )
+
+        scout_ks = {
+            int(record["k"])
+            for record in records
+            if record.get("phase") not in {"m_probe", "refine"}
+        }
+        refined_ks = {
+            int(record["k"])
+            for record in records
+            if record.get("phase") == "refine"
+        }
+        self.assertEqual(reason, "selected_fast_scout_refine")
+        self.assertIsNotNone(best)
+        self.assertEqual(scout_ks, set(range(2, 7)))
+        self.assertEqual(len(refined_ks), 2)
 
     def test_default_hierarchical_path_records_automatic_pca_selection(self) -> None:
         result = run_hierarchical_pca_fcm(

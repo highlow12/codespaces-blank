@@ -882,10 +882,10 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
         "max_fcm_iter": int(config.get("max_fcm_iter", 200)),
         "fcm_tol": float(config.get("fcm_tol", 1e-6)),
         "fast_mode": bool(config.get("fast_mode", False)),
-        "fast_sample_size": int(config.get("fast_sample_size", 600)),
+        "fast_sample_size": int(config.get("fast_sample_size", 1000)),
         "fast_scout_n_init": int(config.get("fast_scout_n_init", 2)),
         "fast_refine_n_init": int(config.get("fast_refine_n_init", 3)),
-        "fast_refine_top_k": int(config.get("fast_refine_top_k", 1)),
+        "fast_refine_top_k": int(config.get("fast_refine_top_k", 2)),
         "fast_stability_target": float(
             config.get("fast_stability_target", 0.85)
         ),
@@ -1036,10 +1036,10 @@ def fit_incremental_state(
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
     fast_mode: bool = False,
-    fast_sample_size: int = 600,
+    fast_sample_size: int = 1000,
     fast_scout_n_init: int = 2,
     fast_refine_n_init: int = 3,
-    fast_refine_top_k: int = 1,
+    fast_refine_top_k: int = 2,
     fast_stability_target: float = 0.85,
     fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
     fit_visualization: bool = True,
@@ -2126,10 +2126,10 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
             "and bounded FCM iterations."
         ),
     )
-    parser.add_argument("--fast-sample-size", type=int, default=600)
+    parser.add_argument("--fast-sample-size", type=int, default=1000)
     parser.add_argument("--fast-scout-n-init", type=int, default=2)
     parser.add_argument("--fast-refine-n-init", type=int, default=3)
-    parser.add_argument("--fast-refine-top-k", type=int, default=1)
+    parser.add_argument("--fast-refine-top-k", type=int, default=2)
     parser.add_argument("--fast-stability-target", type=float, default=0.85)
     parser.add_argument(
         "--fast-m",

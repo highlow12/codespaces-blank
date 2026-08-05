@@ -20,6 +20,7 @@ DEFAULT_K_VALUES = (15, 30)
 DEFAULT_MINIMUM_PRESERVATION_GAIN = 0.05
 ALL_GAINS_REASON = "all_gains_meet_minimum_use_maximum_dimension"
 PLATEAU_REASON = "first_below_minimum_gain_use_previous_dimension"
+GLOBAL_KNEE_REASON = "global_preservation_knee_after_local_plateau"
 
 CandidatePayload = TypeVar("CandidatePayload")
 
@@ -69,6 +70,52 @@ class PcaPrefixSearchResult(Generic[CandidatePayload]):
     selection_reason: str
     evaluations: tuple[PcaPrefixEvaluation[CandidatePayload], ...]
     selected_payload: CandidatePayload
+
+
+def _global_preservation_knee(
+    evaluations: Sequence[PcaPrefixEvaluation[CandidatePayload]],
+) -> PcaPrefixEvaluation[CandidatePayload]:
+    """Return the saturation knee of the complete preservation curve.
+
+    A single noisy gain can make the local plateau rule stop too early. The
+    knee uses the complete, monotonized preservation curve and selects the
+    point with the largest distance above the line joining its endpoints.
+    Flat curves deliberately choose the smallest candidate.
+    """
+
+    if not evaluations:
+        raise ValueError("evaluations must not be empty")
+    if len(evaluations) <= 2:
+        return evaluations[0]
+
+    dimensions = np.asarray(
+        [evaluation.candidate.dimension for evaluation in evaluations],
+        dtype=np.float64,
+    )
+    preservation = np.maximum.accumulate(
+        np.asarray(
+            [
+                evaluation.candidate.mean_knn_preservation
+                for evaluation in evaluations
+            ],
+            dtype=np.float64,
+        )
+    )
+    dimension_range = float(np.ptp(dimensions))
+    preservation_range = float(np.ptp(preservation))
+    if dimension_range <= 1e-12 or preservation_range <= 1e-12:
+        return evaluations[0]
+
+    normalized_dimensions = (dimensions - dimensions[0]) / dimension_range
+    normalized_preservation = (
+        preservation - preservation[0]
+    ) / preservation_range
+    knee_strength = normalized_preservation - normalized_dimensions
+    best_strength = float(np.max(knee_strength))
+    best_indices = np.flatnonzero(
+        np.isclose(knee_strength, best_strength, rtol=1e-12, atol=1e-12)
+    )
+    return evaluations[int(best_indices[0])]
 
 
 def validate_dimension_selection_inputs(
@@ -204,7 +251,12 @@ def evaluate_pca_prefixes(
     neighbor_metric: str,
     stop_at_plateau: bool,
 ) -> PcaPrefixSearchResult[CandidatePayload]:
-    """Score PCA prefixes and select the last dimension before a plateau."""
+    """Score PCA prefixes and select a stable preservation saturation point.
+
+    Callers that stop at the plateau retain the inexpensive local rule. Full
+    searches also inspect the global preservation knee so a noisy early gain
+    cannot prematurely discard useful dimensions.
+    """
 
     evaluations: list[PcaPrefixEvaluation[CandidatePayload]] = []
     selected_evaluation: PcaPrefixEvaluation[CandidatePayload] | None = None
@@ -269,10 +321,17 @@ def evaluate_pca_prefixes(
         selection_reason = ALL_GAINS_REASON
     else:
         selection_reason = PLATEAU_REASON
+        if not stop_at_plateau:
+            knee_evaluation = _global_preservation_knee(evaluations)
+            if (
+                knee_evaluation.candidate.dimension
+                > selected_evaluation.candidate.dimension
+            ):
+                selected_evaluation = knee_evaluation
+                selection_reason = GLOBAL_KNEE_REASON
     return PcaPrefixSearchResult(
         selected_dimension=selected_evaluation.candidate.dimension,
         selection_reason=selection_reason,
         evaluations=tuple(evaluations),
         selected_payload=selected_evaluation.payload,
     )
-
