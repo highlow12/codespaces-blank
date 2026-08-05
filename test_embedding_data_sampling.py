@@ -1,9 +1,13 @@
+import gzip
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from embedding_data import sample_embedding_batch
+from embedding_data import load_embeddings_from_json, sample_embedding_batch
 
 
 class EmbeddingDataSamplingTests(unittest.TestCase):
@@ -21,6 +25,24 @@ class EmbeddingDataSamplingTests(unittest.TestCase):
                 "tag": [f"tag-{index}" for index in range(10)],
             }
         )
+
+    def test_loads_gzip_compressed_embedding_json(self) -> None:
+        records = [
+            {"id": "a", "tag": "one", "embedding": [1.0, 2.0]},
+            {"id": "b", "tag": "two", "embedding": [3.0, 4.0]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "embeddings.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                json.dump(records, handle)
+
+            embeddings, metadata = load_embeddings_from_json(path)
+
+        np.testing.assert_array_equal(
+            embeddings,
+            np.asarray([[1.0, 2.0], [3.0, 4.0]]),
+        )
+        self.assertEqual(metadata["id"].tolist(), ["a", "b"])
 
     def test_sampling_is_reproducible_and_keeps_rows_aligned(self) -> None:
         sampled_a, metadata_a = sample_embedding_batch(

@@ -6,7 +6,7 @@
 
 ```bash
 python incremental_clustering.py fit \
-  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json \
+  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json.gz \
   --state-output results/fast.state.pkl \
   --assignments-output results/fast_assignments.csv \
   --coordinates-output results/fast_coordinates.csv \
@@ -23,7 +23,7 @@ python incremental_clustering.py fit \
 
 ```bash
 python incremental_clustering.py fit \
-  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json \
+  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json.gz \
   --state-output results/fast_scout.state.pkl \
   --assignments-output results/fast_scout_assignments.csv \
   --tree-output results/fast_scout_tree.json \
@@ -43,7 +43,7 @@ python incremental_clustering.py fit \
 
 ```bash
 python incremental_clustering.py fit \
-  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json \
+  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json.gz \
   --dataset-sample-size 500 \
   --dataset-sample-seed 2026 \
   --state-output results/sample500.state.pkl \

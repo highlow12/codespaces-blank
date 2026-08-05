@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,11 @@ def load_embeddings_from_json(
     limit: int | None = None,
     id_offset: int = 0,
 ) -> tuple[np.ndarray, pd.DataFrame]:
-    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    if json_path.suffix == ".gz":
+        with gzip.open(json_path, "rt", encoding="utf-8") as handle:
+            payload = json.load(handle)
+    else:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
     records = payload.get("records") if isinstance(payload, dict) else payload
     if not isinstance(records, list) or not records:
         raise ValueError(f"No embedding records found in {json_path}")
