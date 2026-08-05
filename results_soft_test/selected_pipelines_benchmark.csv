@@ -1,3 +1,0 @@
-pipeline,umap_preset,umap_n_neighbors,umap_min_dist,umap_spread,umap_densmap,runtime_sec,clusters,noise_ratio,nmi,ari,tag_fragmentation,silhouette,xie_beni,fuzzy_silhouette,iterations
-5_pca64_gmm,,,,,,1.7208204759999717,4,0.0,0.4967454810950846,0.4137025257576253,3.75,0.06465055429721935,,,36.0
-6_pca64_hdbscan_cosine,,,,,,3.7423587069997666,2,0.39025,0.30816870299144183,0.20389709030290643,2.0,0.08770354528894189,,,
