@@ -36,3 +36,21 @@ python incremental_clustering.py fit \
 refines only the best K, and increases restart count only when stability is
 below target. `--skip-visualization` creates a clustering-only state; it must
 be refit without that flag before using incremental updates.
+
+To run the fit on a reproducible random subset of the loaded dataset, add
+`--dataset-sample-size` and optionally `--dataset-sample-seed`:
+
+```bash
+python incremental_clustering.py fit \
+  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json \
+  --dataset-sample-size 500 \
+  --dataset-sample-seed 2026 \
+  --state-output results/sample500.state.pkl \
+  --pca-components 192 \
+  --fast
+```
+
+This samples without replacement and preserves document IDs and metadata. The
+sampling seed defaults to `--seed`. This is a dataset-level sample; it is
+separate from `--fast-sample-size`, which controls per-node K scouting inside
+the fast clustering algorithm.

@@ -73,6 +73,38 @@ def load_embeddings_from_json(
     return np.vstack(embeddings), pd.DataFrame(metadata_rows)
 
 
+def sample_embedding_batch(
+    embeddings: np.ndarray,
+    metadata: pd.DataFrame,
+    *,
+    sample_size: int,
+    seed: int = 42,
+) -> tuple[np.ndarray, pd.DataFrame]:
+    """Select a reproducible random subset while keeping rows aligned.
+
+    Sampling is performed without replacement. The selected indices are sorted
+    before slicing so the sampled batch preserves the input order, which keeps
+    embeddings, document IDs, and all metadata columns synchronized.
+    """
+
+    values = np.asarray(embeddings)
+    if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
+        raise ValueError("embeddings must be a non-empty 2D array")
+    if len(metadata) != values.shape[0]:
+        raise ValueError("metadata must contain exactly one row per embedding")
+    if sample_size < 1 or sample_size > values.shape[0]:
+        raise ValueError(
+            "sample_size must be between 1 and the number of embeddings"
+        )
+
+    rng = np.random.default_rng(seed)
+    selected_indices = np.sort(
+        rng.choice(values.shape[0], size=sample_size, replace=False)
+    )
+    sampled_metadata = metadata.iloc[selected_indices].reset_index(drop=True).copy()
+    return values[selected_indices].copy(), sampled_metadata
+
+
 def make_synthetic_embeddings(
     *,
     n_samples: int,

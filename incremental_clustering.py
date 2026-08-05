@@ -31,7 +31,7 @@ from cluster_visualization import (
     transform_projection,
 )
 from clustering_types import HierarchicalModel
-from embedding_data import load_embeddings_from_json
+from embedding_data import load_embeddings_from_json, sample_embedding_batch
 from fcm_hierarchy import (
     DEFAULT_FORCED_NOISE_RATIO,
     DEFAULT_MAX_MEMBERSHIP_GAP,
@@ -2023,6 +2023,24 @@ def _add_input_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_dataset_sampling_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dataset-sample-size",
+        type=int,
+        default=None,
+        help=(
+            "Randomly select this many documents from the loaded dataset "
+            "without replacement before fitting."
+        ),
+    )
+    parser.add_argument(
+        "--dataset-sample-seed",
+        type=int,
+        default=None,
+        help="Seed for dataset sampling; defaults to --seed.",
+    )
+
+
 def _add_visual_output_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--assignments-output", type=Path, default=None)
     parser.add_argument("--coordinates-output", type=Path, default=None)
@@ -2220,6 +2238,19 @@ def _run_fit(args: argparse.Namespace) -> None:
         limit=args.limit,
         id_offset=args.id_offset,
     )
+    dataset_total_rows = len(embeddings)
+    dataset_sample_seed = (
+        args.dataset_sample_seed
+        if args.dataset_sample_seed is not None
+        else args.seed
+    )
+    if args.dataset_sample_size is not None:
+        embeddings, metadata = sample_embedding_batch(
+            embeddings,
+            metadata,
+            sample_size=args.dataset_sample_size,
+            seed=dataset_sample_seed,
+        )
     state = fit_incremental_state(
         embeddings,
         metadata,
@@ -2267,6 +2298,10 @@ def _run_fit(args: argparse.Namespace) -> None:
         fast_m_values=tuple(args.fast_m),
         fit_visualization=not args.skip_visualization,
     )
+    if args.dataset_sample_size is not None:
+        state.config["dataset_total_rows"] = int(dataset_total_rows)
+        state.config["dataset_sample_size"] = int(args.dataset_sample_size)
+        state.config["dataset_sample_seed"] = int(dataset_sample_seed)
     save_state(state, args.state_output)
     write_outputs(
         state,
@@ -2279,10 +2314,17 @@ def _run_fit(args: argparse.Namespace) -> None:
         title=args.title,
         color_by=args.color_by,
     )
+    sampling_note = ""
+    if args.dataset_sample_size is not None:
+        sampling_note = (
+            f" [random sample {len(embeddings)}/{dataset_total_rows}, "
+            f"seed={dataset_sample_seed}]"
+        )
     print(
         f"Initial state saved: {args.state_output} "
         f"({len(embeddings)} samples, "
         f"{int(state.assignments['is_noise'].sum())} noise)"
+        f"{sampling_note}"
     )
 
 
@@ -2324,6 +2366,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     fit_parser = subparsers.add_parser("fit", help="Fit the initial batch.")
     _add_input_args(fit_parser)
+    _add_dataset_sampling_args(fit_parser)
     fit_parser.add_argument("--state-output", type=Path, required=True)
     _add_visual_output_args(fit_parser)
     _add_cluster_args(fit_parser)
