@@ -347,6 +347,44 @@ def make_fixed_coordinate_plot(
     )
 
 
+def make_selected_coordinate_plot(
+    coordinates: np.ndarray,
+    metadata: pd.DataFrame,
+    output_path: Path,
+    *,
+    title: str,
+    color_by: str,
+    pca_components: int,
+    cluster_target_weight: float | None = DEFAULT_CLUSTER_TARGET_WEIGHT,
+) -> None:
+    """Render coordinates produced by an explicitly selected PCA+UMAP fit."""
+
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError("coordinates must be an N x 2 array")
+    if len(metadata) != coordinates.shape[0]:
+        raise ValueError("metadata and coordinates must have the same row count")
+
+    _, values, color_mode, hierarchical, color_map = _prepare_plot_style(
+        metadata,
+        color_by,
+    )
+    target_suffix = (
+        f" | weak cluster target, w={cluster_target_weight:.2f}"
+        if cluster_target_weight is not None and cluster_target_weight > 0.0
+        else ""
+    )
+    _save_cluster_scatter(
+        coordinates,
+        values,
+        color_map,
+        output_path,
+        title=(
+            f"{title} [Auto PCA-{pca_components} -> UMAP-2 | {color_mode}"
+            f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
+        ),
+    )
+
+
 def make_comparison_plot(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
