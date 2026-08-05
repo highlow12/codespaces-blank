@@ -66,6 +66,7 @@ from pca_projection import pca_projection_support
 DEFAULT_NOISE_THRESHOLD = 0.05
 DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
 DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
+CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
 
 
 @dataclass
@@ -84,7 +85,7 @@ class IncrementalClusterState:
     center_statistics: dict[str, dict[str, np.ndarray]] = field(
         default_factory=dict
     )
-    center_contributions: dict[Any, dict[str, dict[str, np.ndarray]]] = field(
+    center_contributions: dict[Any, dict[str, Any]] = field(
         default_factory=dict
     )
 
@@ -369,22 +370,26 @@ def _center_contributions_for_batch(
     *,
     min_membership: float,
     m: float,
-) -> dict[Any, dict[str, dict[str, np.ndarray]]]:
+) -> dict[Any, dict[str, Any]]:
     """Collect each document's fuzzy contribution to every reached node.
 
-    The aggregate center statistics are sufficient for adding documents, but
-    they are not sufficient for replacing one. Keeping the per-document
-    contributions lets an update subtract the old embedding before adding its
-    replacement without disturbing unrelated documents.
+    Each document stores its projected vector once and only the fuzzy weights
+    for hierarchy nodes it reached. The weighted outer products are rebuilt
+    only while applying a delta or doing a scheduled full refresh. This avoids
+    persisting one ``clusters x dimensions`` array per document and node.
     """
 
     values = _validate_embeddings(embeddings)
     frame = _validate_metadata(metadata, len(values))
     identifiers = frame["id"].tolist()
-    contributions: dict[Any, dict[str, dict[str, np.ndarray]]] = {
-        identifier: {} for identifier in identifiers
-    }
     projected = transform_pca_normalized_features(values, hierarchy_model.pca)
+    contributions: dict[Any, dict[str, Any]] = {
+        identifier: {
+            "projected": projected[index].copy(),
+            "weights_by_path": {},
+        }
+        for index, identifier in enumerate(identifiers)
+    }
     if hierarchy_model.fallback_single_cluster:
         return contributions
 
@@ -414,13 +419,9 @@ def _center_contributions_for_batch(
             weights = memberships**node_m
             for local_index, global_index in enumerate(indices):
                 identifier = identifiers[int(global_index)]
-                contributions[identifier][parent_path] = {
-                    "weighted_sum": np.outer(
-                        weights[local_index],
-                        projected[global_index],
-                    ),
-                    "weight": weights[local_index].copy(),
-                }
+                contributions[identifier]["weights_by_path"][parent_path] = (
+                    weights[local_index].copy()
+                )
 
             local_labels = memberships.argmax(axis=1)
             row_indices = np.arange(len(indices))
@@ -444,21 +445,121 @@ def _center_contributions_for_batch(
 
 
 def _aggregate_center_contributions(
-    contributions: dict[Any, dict[str, dict[str, np.ndarray]]],
+    contributions: dict[Any, dict[str, Any]],
 ) -> dict[str, dict[str, np.ndarray]]:
     """Sum per-document contributions into the persisted center statistics."""
 
     statistics: dict[str, dict[str, np.ndarray]] = {}
-    for document_contributions in contributions.values():
-        for path, values in document_contributions.items():
+    for contribution in contributions.values():
+        projected = np.asarray(contribution["projected"], dtype=np.float64)
+        for path, stored_weights in contribution["weights_by_path"].items():
+            weights = np.asarray(stored_weights, dtype=np.float64)
             if path not in statistics:
                 statistics[path] = {
-                    "weighted_sum": np.zeros_like(values["weighted_sum"]),
-                    "weight": np.zeros_like(values["weight"]),
+                    "weighted_sum": np.zeros(
+                        (len(weights), len(projected)),
+                        dtype=np.float64,
+                    ),
+                    "weight": np.zeros_like(weights),
                 }
-            statistics[path]["weighted_sum"] += values["weighted_sum"]
-            statistics[path]["weight"] += values["weight"]
+            statistics[path]["weighted_sum"] += np.outer(weights, projected)
+            statistics[path]["weight"] += weights
     return statistics
+
+
+def _legacy_center_contribution_to_compact(
+    contribution: dict[str, dict[str, np.ndarray]],
+) -> dict[str, Any]:
+    """Convert a pre-v4 outer-product contribution without losing precision."""
+
+    weights_by_path: dict[str, np.ndarray] = {}
+    projected: np.ndarray | None = None
+    for path, values in contribution.items():
+        weights = np.asarray(values["weight"], dtype=np.float64)
+        weighted_sum = np.asarray(values["weighted_sum"], dtype=np.float64)
+        if weighted_sum.ndim != 2 or weighted_sum.shape[0] != len(weights):
+            raise ValueError("Invalid legacy center contribution")
+        weights_by_path[path] = weights.copy()
+        if projected is None:
+            usable = np.flatnonzero(np.abs(weights) > 1e-12)
+            if usable.size:
+                projected = weighted_sum[int(usable[0])] / weights[int(usable[0])]
+            else:
+                projected = np.zeros(weighted_sum.shape[1], dtype=np.float64)
+    if projected is None:
+        projected = np.empty(0, dtype=np.float64)
+    return {
+        "projected": np.asarray(projected, dtype=np.float64).copy(),
+        "weights_by_path": weights_by_path,
+    }
+
+
+def _compact_center_contributions(
+    contributions: dict[Any, dict[str, Any]],
+) -> dict[Any, dict[str, Any]]:
+    """Normalize legacy persisted contributions to the compact v4 schema."""
+
+    compact: dict[Any, dict[str, Any]] = {}
+    for identifier, contribution in contributions.items():
+        if "projected" in contribution and "weights_by_path" in contribution:
+            compact[identifier] = contribution
+        else:
+            compact[identifier] = _legacy_center_contribution_to_compact(
+                contribution
+            )
+    return compact
+
+
+def _copy_center_statistics(
+    statistics: dict[str, dict[str, np.ndarray]],
+) -> dict[str, dict[str, np.ndarray]]:
+    """Copy only the small per-node aggregates before applying one batch."""
+
+    return {
+        path: {
+            "weighted_sum": values["weighted_sum"].copy(),
+            "weight": values["weight"].copy(),
+        }
+        for path, values in statistics.items()
+    }
+
+
+def _apply_center_contribution_delta(
+    statistics: dict[str, dict[str, np.ndarray]],
+    contribution: dict[str, Any],
+    *,
+    sign: float,
+) -> None:
+    """Add or subtract one compact document contribution in place."""
+
+    projected = np.asarray(contribution["projected"], dtype=np.float64)
+    for path, stored_weights in contribution["weights_by_path"].items():
+        weights = np.asarray(stored_weights, dtype=np.float64)
+        if path not in statistics:
+            if sign < 0.0:
+                raise ValueError(
+                    f"Center statistics are missing contribution path: {path}"
+                )
+            statistics[path] = {
+                "weighted_sum": np.zeros(
+                    (len(weights), len(projected)),
+                    dtype=np.float64,
+                ),
+                "weight": np.zeros_like(weights),
+            }
+        values = statistics[path]
+        expected_shape = (len(weights), len(projected))
+        if (
+            values["weighted_sum"].shape != expected_shape
+            or values["weight"].shape != weights.shape
+        ):
+            raise ValueError(f"Center contribution shape mismatch at node: {path}")
+        values["weighted_sum"] += sign * np.outer(weights, projected)
+        values["weight"] += sign * weights
+        values["weighted_sum"][np.abs(values["weighted_sum"]) < 1e-14] = 0.0
+        values["weight"][np.abs(values["weight"]) < 1e-14] = 0.0
+        if np.any(values["weight"] < -1e-10):
+            raise ValueError(f"Center contribution underflow at node: {path}")
 
 
 def _update_hierarchy_centers_from_statistics(
@@ -831,6 +932,7 @@ def _cluster_config(
         "total_membership_refreshes": 0,
         "total_reclusters": 0,
         "recluster_trigger_policy": "xb_and_noise_v2",
+        "center_contribution_format": CENTER_CONTRIBUTION_FORMAT,
     }
 
 
@@ -1659,24 +1761,48 @@ def update_incremental_state(
     config["noise_threshold"] = threshold
     config["update_count"] = int(config.get("update_count", 0)) + 1
 
-    center_contributions = getattr(state, "center_contributions", None)
-    if not center_contributions:
-        center_contributions = _center_contributions_for_batch(
+    stored_contributions = getattr(state, "center_contributions", None)
+    if not stored_contributions:
+        stored_contributions = _center_contributions_for_batch(
             state.embeddings,
             state.metadata,
             state.hierarchy_model,
             **_fuzzy_parameters(config),
         )
+        center_statistics = _aggregate_center_contributions(stored_contributions)
     else:
-        center_contributions = copy.deepcopy(center_contributions)
+        if config.get("center_contribution_format") != CENTER_CONTRIBUTION_FORMAT:
+            stored_contributions = _compact_center_contributions(
+                stored_contributions
+            )
+        center_statistics = (
+            _copy_center_statistics(state.center_statistics)
+            if state.center_statistics
+            else _aggregate_center_contributions(stored_contributions)
+        )
+    center_contributions = dict(stored_contributions)
     incoming_contributions = _center_contributions_for_batch(
         values,
         frame,
         state.hierarchy_model,
         **_fuzzy_parameters(config),
     )
-    center_contributions.update(incoming_contributions)
-    center_statistics = _aggregate_center_contributions(center_contributions)
+    for identifier in incoming_ids:
+        previous = center_contributions.get(identifier)
+        if previous is not None:
+            _apply_center_contribution_delta(
+                center_statistics,
+                previous,
+                sign=-1.0,
+            )
+        replacement = incoming_contributions[identifier]
+        _apply_center_contribution_delta(
+            center_statistics,
+            replacement,
+            sign=1.0,
+        )
+        center_contributions[identifier] = replacement
+    config["center_contribution_format"] = CENTER_CONTRIBUTION_FORMAT
     hierarchy_model, updated_node_count = _update_hierarchy_centers_from_statistics(
         state.hierarchy_model,
         center_statistics,
@@ -1915,19 +2041,29 @@ def coordinates_frame(state: IncrementalClusterState) -> pd.DataFrame:
 def save_state(state: IncrementalClusterState, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
+    config = dict(state.config)
+    center_contributions = getattr(state, "center_contributions", {})
+    if center_contributions and (
+        config.get("center_contribution_format")
+        != CENTER_CONTRIBUTION_FORMAT
+    ):
+        center_contributions = _compact_center_contributions(
+            center_contributions
+        )
+    config["center_contribution_format"] = CENTER_CONTRIBUTION_FORMAT
     payload = {
-        "version": 3,
+        "version": 4,
         "embeddings": state.embeddings,
         "metadata": state.metadata,
         "assignments": state.assignments,
         "coordinates": state.coordinates,
         "hierarchy_model": state.hierarchy_model,
         "tree": state.tree,
-        "config": state.config,
+        "config": config,
         "visual_pca": state.visual_pca,
         "visual_reducer": state.visual_reducer,
         "center_statistics": state.center_statistics,
-        "center_contributions": getattr(state, "center_contributions", {}),
+        "center_contributions": center_contributions,
     }
     with temporary_path.open("wb") as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -1950,7 +2086,7 @@ def load_state(path: Path) -> IncrementalClusterState:
 
     if isinstance(payload, IncrementalClusterState):
         state = payload
-    elif isinstance(payload, dict) and payload.get("version") in {1, 2, 3}:
+    elif isinstance(payload, dict) and payload.get("version") in {1, 2, 3, 4}:
         required_fields = (
             "embeddings",
             "metadata",

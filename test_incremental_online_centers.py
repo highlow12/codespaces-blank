@@ -12,10 +12,10 @@ import pandas as pd
 from clustering_types import HierarchicalModel, HierarchyNodeModel
 from fcm_hierarchy import fit_pca_normalized_features, spherical_fcm
 from incremental_clustering import (
+    CENTER_CONTRIBUTION_FORMAT,
     DEFAULT_NOISE_THRESHOLD,
     IncrementalClusterState,
     _aggregate_center_contributions,
-    _build_center_statistics,
     _center_contributions_for_batch,
     _rebuild_tree_counts,
     _update_hierarchy_centers_from_statistics,
@@ -146,6 +146,14 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         tree = _rebuild_tree_counts(_tree_template(), assignments, 0)
         reducer = _IdentityReducer()
         coordinates = reducer.transform(projected)
+        center_contributions = _center_contributions_for_batch(
+            self.X,
+            self.metadata,
+            model,
+            min_membership=0.0,
+            m=2.0,
+        )
+        config["center_contribution_format"] = CENTER_CONTRIBUTION_FORMAT
         return IncrementalClusterState(
             embeddings=self.X.copy(),
             metadata=self.metadata.copy(),
@@ -156,12 +164,10 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             config=config,
             visual_pca=pca,
             visual_reducer=reducer,
-            center_statistics=_build_center_statistics(
-                self.X,
-                model,
-                min_membership=0.0,
-                m=2.0,
+            center_statistics=_aggregate_center_contributions(
+                center_contributions
             ),
+            center_contributions=center_contributions,
         )
 
     def test_each_batch_updates_fcm_centers_without_full_refresh(self) -> None:
@@ -262,6 +268,101 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         )
         self.assertEqual(updated.tree["summary"]["samples"], len(state.embeddings))
         self.assertEqual(updated.metadata.loc[1, "text"], "updated note")
+
+    def test_compact_contributions_apply_only_batch_deltas(self) -> None:
+        state = self._make_state(center_refresh_interval=50)
+        for contribution in state.center_contributions.values():
+            self.assertEqual(
+                set(contribution),
+                {"projected", "weights_by_path"},
+            )
+            self.assertNotIn("weighted_sum", contribution)
+
+        batch = np.asarray(
+            [[3.0, 0.6, 0.2, 0.0], [0.2, 3.1, 0.1, 0.1]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+        with patch(
+            "incremental_clustering._aggregate_center_contributions",
+        ) as aggregate:
+            updated, summary = update_incremental_state(state, batch, metadata)
+
+        aggregate.assert_not_called()
+        self.assertFalse(summary["membership_refreshed"])
+        self.assertIs(
+            updated.center_contributions[0],
+            state.center_contributions[0],
+        )
+        expected = _aggregate_center_contributions(updated.center_contributions)
+        np.testing.assert_allclose(
+            updated.center_statistics[""]["weighted_sum"],
+            expected[""]["weighted_sum"],
+        )
+        np.testing.assert_allclose(
+            updated.center_statistics[""]["weight"],
+            expected[""]["weight"],
+        )
+
+    def test_compact_delta_statistics_remain_consistent_across_many_batches(self) -> None:
+        state = self._make_state(center_refresh_interval=100)
+        for index in range(20):
+            if index % 2 == 0:
+                embedding = np.asarray([[3.0, 0.4, 0.1, 0.0]])
+            else:
+                embedding = np.asarray([[0.1, 3.0, 0.2, 0.0]])
+            state, summary = update_incremental_state(
+                state,
+                embedding,
+                pd.DataFrame({"id": [100 + index]}),
+            )
+            self.assertFalse(summary["membership_refreshed"])
+
+        expected = _aggregate_center_contributions(state.center_contributions)
+        np.testing.assert_allclose(
+            state.center_statistics[""]["weighted_sum"],
+            expected[""]["weighted_sum"],
+            atol=1e-12,
+        )
+        np.testing.assert_allclose(
+            state.center_statistics[""]["weight"],
+            expected[""]["weight"],
+            atol=1e-12,
+        )
+        self.assertEqual(len(state.center_contributions), len(self.X) + 20)
+
+    def test_legacy_outer_product_contributions_migrate_on_update(self) -> None:
+        state = self._make_state(center_refresh_interval=50)
+        legacy: dict[object, dict[str, dict[str, np.ndarray]]] = {}
+        for identifier, contribution in state.center_contributions.items():
+            projected = contribution["projected"]
+            legacy[identifier] = {
+                path: {
+                    "weighted_sum": np.outer(weights, projected),
+                    "weight": weights.copy(),
+                }
+                for path, weights in contribution["weights_by_path"].items()
+            }
+        state.center_contributions = legacy
+        state.config.pop("center_contribution_format")
+
+        updated, _summary = update_incremental_state(
+            state,
+            np.asarray([[3.1, 0.4, 0.2, 0.0]]),
+            pd.DataFrame({"id": [100]}),
+        )
+
+        self.assertEqual(
+            updated.config["center_contribution_format"],
+            CENTER_CONTRIBUTION_FORMAT,
+        )
+        self.assertTrue(
+            all(
+                "projected" in contribution
+                and "weights_by_path" in contribution
+                for contribution in updated.center_contributions.values()
+            )
+        )
 
     def test_xb_degradation_reclusters_without_revisualizing(self) -> None:
         state = self._make_state(
@@ -415,13 +516,20 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             previous_coordinates,
         )
 
-    def test_version_two_state_preserves_center_statistics(self) -> None:
+    def test_version_four_state_preserves_compact_center_statistics(self) -> None:
         state = self._make_state()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.pkl"
             save_state(state, path)
+            with path.open("rb") as handle:
+                payload = pickle.load(handle)
             loaded = load_state(path)
+        self.assertEqual(payload["version"], 4)
         self.assertEqual(loaded.center_statistics.keys(), {""})
+        self.assertEqual(
+            loaded.config["center_contribution_format"],
+            CENTER_CONTRIBUTION_FORMAT,
+        )
         np.testing.assert_allclose(
             loaded.center_statistics[""]["weighted_sum"],
             state.center_statistics[""]["weighted_sum"],

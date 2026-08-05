@@ -89,6 +89,33 @@ class FullPipelineTest(unittest.TestCase):
             np.ones(20),
         )
 
+    def test_incremental_update_accepts_new_metadata_columns(self) -> None:
+        state = fit_auto_pca_sfcm(
+            self.embeddings,
+            self.metadata,
+            min_clusters=2,
+            max_clusters=2,
+            min_child_size=2,
+            seed=12,
+        )
+        update_metadata = self.metadata.iloc[:2].copy()
+        update_metadata["incremental_operation"] = "modified"
+
+        updated, summary = update_auto_pca_sfcm(
+            state,
+            self.embeddings[:2],
+            update_metadata,
+        )
+
+        self.assertEqual(summary["replaced_samples"], 2)
+        self.assertEqual(
+            updated.metadata.loc[:1, "incremental_operation"].tolist(),
+            ["modified", "modified"],
+        )
+        self.assertTrue(
+            updated.metadata.loc[2:, "incremental_operation"].isna().all()
+        )
+
     def test_fast_fit_searches_fuzzifier_and_preserves_selected_value(self) -> None:
         fast_config = FastFcmConfig(
             sample_size=20,

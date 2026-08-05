@@ -183,16 +183,16 @@ def _merge_updated_rows(
     ]
 
     columns = list(dict.fromkeys([*state.metadata.columns, *metadata.columns]))
-    merged_metadata = state.metadata.reindex(columns=columns).copy()
-    incoming_metadata = metadata.reindex(columns=columns)
+    merged_metadata = state.metadata.reindex(columns=columns).astype(object)
+    incoming_metadata = metadata.reindex(columns=columns).astype(object)
     merged_embeddings = state.embeddings.copy()
     for identifier in replaced_ids:
         merged_embeddings[existing_positions[identifier]] = embeddings[
             incoming_positions[identifier]
         ]
-        merged_metadata.iloc[existing_positions[identifier]] = incoming_metadata.iloc[
-            incoming_positions[identifier]
-        ]
+        merged_metadata.iloc[existing_positions[identifier], :] = (
+            incoming_metadata.iloc[incoming_positions[identifier]].to_numpy()
+        )
     if appended_ids:
         appended_positions = [incoming_positions[identifier] for identifier in appended_ids]
         merged_embeddings = np.vstack([merged_embeddings, embeddings[appended_positions]])
