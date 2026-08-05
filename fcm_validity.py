@@ -247,9 +247,9 @@ def _score_multi_metric_candidates(candidates: list[FCMKCandidate]) -> None:
     if not candidates:
         return
     metric_specs = (
-        ("xie_beni", False, 0.40),
-        ("silhouette", True, 0.25),
-        ("restart_stability", True, 0.25),
+        ("xie_beni", False, 0.25),
+        ("silhouette", True, 0.45),
+        ("restart_stability", True, 0.20),
         ("modified_partition_coefficient", True, 0.10),
     )
     weighted_desirabilities = []
@@ -407,7 +407,7 @@ def select_fcm_cluster_count(
     the configured minimum k upward. After XB first worsens, two additional k
     values are evaluated by default. XB, silhouette, restart stability, and
     modified partition coefficient are converted to rank desirabilities and
-    combined with weights 0.40, 0.25, 0.25, and 0.10. Partition entropy is
+    combined with weights 0.25, 0.45, 0.20, and 0.10. Partition entropy is
     retained for diagnostics but is not scored.
     """
 

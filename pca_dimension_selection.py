@@ -125,11 +125,12 @@ def select_pca_dimension(
 
     The input is L2-normalized, PCA is fitted once at up to ``max_components``,
     and every candidate is made by slicing the same projection with ``[:, :d]``.
-    Candidates increase by ``component_step``. At the first candidate whose
-    mean k-NN preservation gain is less than ``minimum_preservation_gain``, the
-    previous dimension is selected. This chooses the last dimension before the
-    improvement plateaus. If every gain meets the minimum, the largest
-    evaluated dimension is selected.
+    Candidates increase by ``component_step``. A local preservation plateau is
+    detected first, then checked against the saturation knee of the complete
+    preservation curve. The later point is selected, which avoids truncating
+    useful dimensions because of one noisy gain while retaining the compact
+    local-plateau result when the curve is already flat. If every gain meets
+    the minimum, the largest evaluated dimension is selected.
     """
 
     search = prepare_pca_prefix_search(

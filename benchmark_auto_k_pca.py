@@ -229,9 +229,9 @@ def main() -> None:
                     "max_attempts": args.max_attempts,
                     "min_center_separation": args.min_center_separation,
                     "score_weights": {
-                        "xie_beni": 0.40,
-                        "silhouette": 0.25,
-                        "restart_stability": 0.25,
+                        "xie_beni": 0.25,
+                        "silhouette": 0.45,
+                        "restart_stability": 0.20,
                         "modified_partition_coefficient": 0.10,
                     },
                 },
