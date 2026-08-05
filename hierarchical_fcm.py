@@ -37,6 +37,10 @@ from pca_dimension_selection import (
     DEFAULT_COMPONENT_STEP,
     DEFAULT_MIN_COMPONENTS,
 )
+from pca_projection import (
+    calibrate_pca_projection_support_threshold,
+    pca_projection_support,
+)
 from hierarchical_assignments import (
     DOCUMENT_TYPE_BOUNDARY,
     DOCUMENT_TYPE_CORE,
@@ -142,16 +146,27 @@ def run_hierarchical_pca_fcm(
         minimum_preservation_gain=pca_minimum_preservation_gain,
         seed=seed,
     )
+    projection_support = pca_projection_support(X, pca)
+    projection_support_threshold = calibrate_pca_projection_support_threshold(
+        X,
+        pca,
+        distance_z=distance_z,
+    )
+    projection_outliers = (
+        projection_support_threshold > 0.0
+    ) & (projection_support < projection_support_threshold)
     labels_by_level = np.full((X.shape[0], max_depth), -1, dtype=int)
     soft_memberships_by_level = [
         np.full((X.shape[0], max_clusters), np.nan, dtype=np.float64)
         for _ in range(max_depth)
     ]
-    is_noise = np.zeros(X.shape[0], dtype=bool)
+    is_noise = projection_outliers.copy()
     document_types = np.full(X.shape[0], DOCUMENT_TYPE_CORE, dtype=object)
-    noise_scores = np.zeros(X.shape[0], dtype=np.float64)
+    document_types[projection_outliers] = DOCUMENT_TYPE_NOISE
+    noise_scores = np.clip(1.0 - projection_support, 0.0, 1.0)
     boundary_level = np.full(X.shape[0], -1, dtype=int)
     noise_level = np.full(X.shape[0], -1, dtype=int)
+    noise_level[projection_outliers] = 1
     node_models: dict[str, HierarchyNodeModel] = {}
 
     def node_template(
@@ -192,8 +207,9 @@ def run_hierarchical_pca_fcm(
     )
 
     def make_root_fallback(reason: str) -> None:
-        labels_by_level[:, 0] = 0
-        soft_memberships_by_level[0][:, 0] = 1.0
+        valid_rows = ~projection_outliers
+        labels_by_level[valid_rows, 0] = 0
+        soft_memberships_by_level[0][valid_rows, 0] = 1.0
         root["stop_reason"] = reason
         root["fallback_single_cluster"] = True
         child = node_template(
@@ -201,7 +217,7 @@ def run_hierarchical_pca_fcm(
             parent_id="root",
             path="0",
             depth=1,
-            size=X.shape[0],
+            size=int(np.sum(valid_rows)),
         )
         child["stop_reason"] = f"root_not_split:{reason}"
         root["children"].append(child)
@@ -411,7 +427,11 @@ def run_hierarchical_pca_fcm(
             node["children"].append(child)
             recurse(child_indices, child, depth + 1)
 
-    recurse(np.arange(X.shape[0], dtype=int), root, 0)
+    recurse(np.flatnonzero(~projection_outliers), root, 0)
+    root["projection_outlier_count"] = int(np.sum(projection_outliers))
+    root["noise_count"] = int(root.get("noise_count", 0)) + int(
+        np.sum(projection_outliers)
+    )
 
     is_natural_noise = is_noise.copy()
     document_ids = (
@@ -440,6 +460,7 @@ def run_hierarchical_pca_fcm(
         nodes=node_models,
         max_depth=max_depth,
         fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
+        projection_support_threshold=projection_support_threshold,
     )
     conditional_memberships = conditional_memberships_from_projected(Xp, model)
     assignments = build_hierarchical_assignments(
@@ -454,6 +475,8 @@ def run_hierarchical_pca_fcm(
         noise_level,
         soft_memberships_by_level,
         conditional_memberships,
+        projection_support,
+        projection_support_threshold,
     )
 
     def collect_nodes(node: dict[str, Any]) -> list[dict[str, Any]]:
@@ -477,6 +500,8 @@ def run_hierarchical_pca_fcm(
         "natural_noise_count": int(np.sum(is_natural_noise)),
         "forced_noise_count": int(np.sum(is_forced_noise)),
         "forced_only_noise_count": int(np.sum(forced_only)),
+        "projection_outlier_count": int(np.sum(projection_outliers)),
+        "projection_support_threshold": float(projection_support_threshold),
         "boundary_count": int(
             np.sum(document_types == DOCUMENT_TYPE_BOUNDARY)
         ),
@@ -513,6 +538,7 @@ def run_hierarchical_pca_fcm(
         "max_membership_gap": float(max_membership_gap),
         "forced_noise_ratio": float(forced_noise_ratio),
         "distance_z": float(distance_z),
+        "projection_support_threshold": float(projection_support_threshold),
         "pca_components_requested": (
             "auto" if pca_components is None else int(pca_components)
         ),

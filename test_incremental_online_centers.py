@@ -25,6 +25,7 @@ from incremental_clustering import (
     save_state,
     update_incremental_state,
 )
+from pca_projection import calibrate_pca_projection_support_threshold
 
 
 class _IdentityReducer:
@@ -315,6 +316,61 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
     def test_default_noise_threshold_is_five_percent(self) -> None:
         self.assertEqual(DEFAULT_NOISE_THRESHOLD, 0.05)
 
+    def test_projection_outlier_is_natural_noise_without_forced_quota(self) -> None:
+        rng = np.random.default_rng(37)
+        training = np.zeros((40, 8), dtype=np.float64)
+        training[:, :2] = rng.normal(size=(40, 2))
+        projected, pca = fit_pca_normalized_features(
+            training,
+            n_components=2,
+            seed=11,
+        )
+        fcm = spherical_fcm(projected, n_clusters=2, seed=11)
+        model = HierarchicalModel(
+            pca=pca,
+            nodes={
+                "": HierarchyNodeModel(
+                    path="",
+                    depth=0,
+                    centers=fcm.centers.copy(),
+                    distance_thresholds=np.full(2, np.inf),
+                )
+            },
+            max_depth=1,
+            projection_support_threshold=(
+                calibrate_pca_projection_support_threshold(training, pca)
+            ),
+        )
+        orthogonal = np.zeros(8, dtype=np.float64)
+        orthogonal[-1] = 1.0
+        batch = np.vstack([training[0], orthogonal])
+
+        assignments, noise_ratio = assign_to_hierarchy(
+            batch,
+            pd.DataFrame({"id": ["known", "unknown"]}),
+            model,
+            min_membership=0.0,
+        )
+
+        known = assignments.loc[assignments["id"] == "known"].iloc[0]
+        unknown = assignments.loc[assignments["id"] == "unknown"].iloc[0]
+        self.assertFalse(bool(known["is_noise"]))
+        self.assertTrue(bool(unknown["is_projection_outlier"]))
+        self.assertTrue(bool(unknown["is_natural_noise"]))
+        self.assertFalse(bool(unknown["is_forced_noise"]))
+        self.assertEqual(unknown["cluster_path"], "noise")
+        self.assertEqual(noise_ratio, 0.5)
+
+        all_outliers, all_outlier_ratio = assign_to_hierarchy(
+            np.vstack([orthogonal, orthogonal]),
+            pd.DataFrame({"id": ["unknown-1", "unknown-2"]}),
+            model,
+            min_membership=0.0,
+        )
+        self.assertTrue(all_outliers["is_natural_noise"].all())
+        self.assertFalse(all_outliers["is_forced_noise"].any())
+        self.assertEqual(all_outlier_ratio, 1.0)
+
     def test_noise_above_five_percent_reclusters_without_revisualizing(self) -> None:
         state = self._make_state(center_refresh_interval=10)
         state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
@@ -349,7 +405,7 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
                 metadata,
             )
 
-        self.assertGreater(summary["new_noise_ratio"], 0.05)
+        self.assertGreater(summary["new_natural_noise_ratio"], 0.05)
         self.assertTrue(summary["emergency_recluster"])
         self.assertTrue(summary["reclustered"])
         self.assertFalse(summary["visualization_refitted"])

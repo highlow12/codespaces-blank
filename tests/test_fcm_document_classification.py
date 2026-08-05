@@ -3,6 +3,7 @@ import unittest
 import numpy as np
 
 from fcm_hierarchy import (
+    DEFAULT_FORCED_NOISE_RATIO,
     classify_fcm_documents,
     fcm_noise_scores,
     forced_noise_mask,
@@ -10,6 +11,9 @@ from fcm_hierarchy import (
 
 
 class FcmDocumentClassificationTest(unittest.TestCase):
+    def test_forced_noise_is_disabled_by_default(self) -> None:
+        self.assertEqual(DEFAULT_FORCED_NOISE_RATIO, 0.0)
+
     def test_classifies_noise_boundary_and_core_from_three_signals(self) -> None:
         memberships = np.array(
             [

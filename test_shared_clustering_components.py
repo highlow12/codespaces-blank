@@ -7,7 +7,9 @@ import pandas as pd
 
 from hierarchical_assignments import build_hierarchical_assignments
 from pca_projection import (
+    calibrate_pca_projection_support_threshold,
     fit_normalized_pca_projection,
+    pca_projection_support,
     transform_normalized_pca_projection,
 )
 
@@ -45,6 +47,30 @@ class SharedPcaProjectionTests(unittest.TestCase):
                 np.ones((2, 5)),
                 fitted.pca,
             )
+
+    def test_projection_support_separates_fitted_and_orthogonal_samples(self) -> None:
+        rng = np.random.default_rng(29)
+        embeddings = np.zeros((80, 12), dtype=np.float64)
+        embeddings[:, :3] = rng.normal(size=(80, 3))
+        embeddings[:, 3:] = rng.normal(scale=0.005, size=(80, 9))
+        fitted = fit_normalized_pca_projection(
+            embeddings,
+            n_components=3,
+            seed=7,
+        )
+        threshold = calibrate_pca_projection_support_threshold(
+            embeddings,
+            fitted.pca,
+        )
+
+        inlier_support = pca_projection_support(embeddings, fitted.pca)
+        orthogonal = np.zeros((4, 12), dtype=np.float64)
+        orthogonal[:, 8:] = np.eye(4)
+        outlier_support = pca_projection_support(orthogonal, fitted.pca)
+
+        self.assertGreater(threshold, 0.0)
+        self.assertGreater(float(np.min(inlier_support)), threshold)
+        self.assertLess(float(np.max(outlier_support)), threshold)
 
 
 class SharedHierarchicalAssignmentTests(unittest.TestCase):
