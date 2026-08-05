@@ -26,6 +26,7 @@ from cluster_visualization import (
 )
 from clustering_pipelines import build_soft_assignments
 from embedding_data import load_embeddings_from_json
+from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
 from fcm_core import (
     fit_clustering_pca,
     sfcm_memberships_from_centers,
@@ -57,6 +58,7 @@ class AutoPcaSfcmState:
     cluster_selection_reason: str
     cluster_selection_metrics: list[dict[str, Any]]
     m: float = 2.0
+    fast_mode: bool = False
 
 
 @dataclass(frozen=True)
@@ -110,19 +112,33 @@ def fit_auto_pca_sfcm(
     min_child_size: int = 2,
     seed: int = 42,
     m: float = 2.0,
+    fast_mode: bool = False,
+    fast_config: FastFcmConfig | None = None,
 ) -> AutoPcaSfcmState:
     """Fit Auto-PCA SFCM and select its cluster count automatically."""
 
     values, frame = _validate_data(embeddings, metadata)
     projected, pca, _selection = fit_clustering_pca(values, seed=seed)
-    best, selection_metrics, selection_reason = select_fcm_cluster_count(
-        projected,
-        min_clusters=min_clusters,
-        max_clusters=max_clusters,
-        min_child_size=min_child_size,
-        selection_method="multi_metric",
-        seed=seed,
-    )
+    if fast_mode:
+        best, selection_metrics, selection_reason = select_fast_fcm_cluster_count(
+            projected,
+            min_clusters=min_clusters,
+            max_clusters=max_clusters,
+            min_child_size=min_child_size,
+            selection_method="multi_metric",
+            seed=seed,
+            config=fast_config,
+        )
+    else:
+        best, selection_metrics, selection_reason = select_fcm_cluster_count(
+            projected,
+            min_clusters=min_clusters,
+            max_clusters=max_clusters,
+            min_child_size=min_child_size,
+            selection_method="multi_metric",
+            seed=seed,
+            m=m,
+        )
     if best is None:
         # A one-cluster result is the only valid automatic answer when the
         # data cannot support two children under the requested constraints.
@@ -142,7 +158,8 @@ def fit_auto_pca_sfcm(
         selected_clusters=selected_clusters,
         cluster_selection_reason=selection_reason,
         cluster_selection_metrics=selection_metrics,
-        m=m,
+        m=float(result.m),
+        fast_mode=fast_mode,
     )
 
 
@@ -239,6 +256,7 @@ def update_auto_pca_sfcm(
             cluster_selection_reason=state.cluster_selection_reason,
             cluster_selection_metrics=state.cluster_selection_metrics,
             m=state.m,
+            fast_mode=state.fast_mode,
         ),
         {
             "replaced_samples": replaced_count,
@@ -374,6 +392,8 @@ def run_full_pipeline(
     incremental_test: bool = False,
     incremental_ratio: float = DEFAULT_INCREMENTAL_RATIO,
     modification_noise: float = DEFAULT_MODIFICATION_NOISE,
+    fast_mode: bool = False,
+    fast_config: FastFcmConfig | None = None,
 ) -> dict[str, Any]:
     """Run the configured full workflow and return its saved artifact summary."""
 
@@ -399,6 +419,8 @@ def run_full_pipeline(
         max_clusters=max_clusters,
         min_child_size=min_child_size,
         seed=seed,
+        fast_mode=fast_mode,
+        fast_config=fast_config,
     )
     initial_assignments = output_dir / "auto_pca_sfcm_assignments.csv"
     initial_plot = output_dir / "auto_pca_sfcm_visualization.png"
@@ -415,6 +437,8 @@ def run_full_pipeline(
         "pipeline": "auto_pca_sfcm",
         "initial_samples": len(initial_state.embeddings),
         "initial_selected_clusters": initial_state.selected_clusters,
+        "selected_fuzzifier": initial_state.m,
+        "fast_mode": initial_state.fast_mode,
         "cluster_selection_reason": initial_state.cluster_selection_reason,
         "cluster_selection_metrics": initial_state.cluster_selection_metrics,
         "initial_visualization_pca_components": initial_selection.selected_dimension,
@@ -472,12 +496,45 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--incremental-test", action="store_true")
     parser.add_argument("--incremental-ratio", type=float, default=DEFAULT_INCREMENTAL_RATIO)
     parser.add_argument("--modification-noise", type=float, default=DEFAULT_MODIFICATION_NOISE)
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Use sample-based K scouting, automatic fuzzifier search, dynamic "
+            "restarts, and bounded FCM iterations."
+        ),
+    )
+    parser.add_argument("--fast-sample-size", type=int, default=1000)
+    parser.add_argument("--fast-scout-n-init", type=int, default=2)
+    parser.add_argument("--fast-refine-n-init", type=int, default=3)
+    parser.add_argument("--fast-refine-top-k", type=int, default=2)
+    parser.add_argument("--fast-stability-target", type=float, default=0.85)
+    parser.add_argument(
+        "--fast-m",
+        type=float,
+        nargs="+",
+        default=[2.0, 1.8, 1.6, 1.4],
+        help="Fuzzifier search schedule used by --fast.",
+    )
     return parser
 
 
 def main() -> None:
     args = build_parser().parse_args()
     embeddings, metadata = load_embeddings_from_json(args.input_json)
+    fast_config = FastFcmConfig(
+        sample_size=args.fast_sample_size,
+        scout_n_init=args.fast_scout_n_init,
+        scout_max_attempts=max(args.fast_scout_n_init + 1, args.fast_scout_n_init * 2),
+        refine_top_k=args.fast_refine_top_k,
+        refine_n_init=args.fast_refine_n_init,
+        refine_max_attempts=max(
+            args.fast_refine_n_init + 2,
+            args.fast_refine_n_init * 2,
+        ),
+        stability_target=args.fast_stability_target,
+        m_values=tuple(args.fast_m),
+    )
     summary = run_full_pipeline(
         embeddings,
         metadata,
@@ -489,6 +546,8 @@ def main() -> None:
         incremental_test=args.incremental_test,
         incremental_ratio=args.incremental_ratio,
         modification_noise=args.modification_noise,
+        fast_mode=args.fast,
+        fast_config=fast_config,
     )
     summary_path = args.output_dir / "full_pipeline_summary.json"
     summary_path.write_text(

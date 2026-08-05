@@ -10,11 +10,13 @@ import numpy as np
 import pandas as pd
 
 from full_pipeline import (
+    build_parser,
     fit_auto_pca_sfcm,
     make_incremental_test_split,
     run_full_pipeline,
     update_auto_pca_sfcm,
 )
+from fast_fcm import FastFcmConfig
 
 
 class FullPipelineTest(unittest.TestCase):
@@ -87,6 +89,69 @@ class FullPipelineTest(unittest.TestCase):
             np.ones(20),
         )
 
+    def test_fast_fit_searches_fuzzifier_and_preserves_selected_value(self) -> None:
+        fast_config = FastFcmConfig(
+            sample_size=20,
+            scout_n_init=1,
+            scout_max_attempts=1,
+            scout_max_iter=30,
+            refine_n_init=1,
+            refine_max_attempts=1,
+            refine_max_iter=30,
+            max_refine_n_init=1,
+            stability_target=0.0,
+            minimum_probe_stability=0.0,
+            refine_top_k=1,
+            m_values=(1.6,),
+        )
+
+        initial_metadata = self.metadata.copy()
+        initial_metadata["incremental_operation"] = "initial"
+        state = fit_auto_pca_sfcm(
+            self.embeddings,
+            initial_metadata,
+            min_clusters=2,
+            max_clusters=2,
+            min_child_size=2,
+            seed=12,
+            fast_mode=True,
+            fast_config=fast_config,
+        )
+
+        self.assertTrue(state.fast_mode)
+        self.assertEqual(state.cluster_selection_reason, "selected_fast_scout_refine")
+        self.assertAlmostEqual(state.m, 1.6)
+        self.assertTrue(
+            any(
+                metric.get("phase") == "m_probe"
+                for metric in state.cluster_selection_metrics
+            )
+        )
+        update_metadata = initial_metadata.iloc[:2].copy()
+        update_metadata["incremental_operation"] = "modified"
+        updated, _summary = update_auto_pca_sfcm(
+            state,
+            self.embeddings[:2],
+            update_metadata,
+        )
+        self.assertTrue(updated.fast_mode)
+        self.assertAlmostEqual(updated.m, 1.6)
+
+    def test_parser_exposes_fast_fuzzifier_search_options(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "--input-json",
+                "embeddings.json",
+                "--fast",
+                "--fast-m",
+                "1.9",
+                "1.5",
+            ]
+        )
+
+        self.assertTrue(args.fast)
+        self.assertEqual(args.fast_m, [1.9, 1.5])
+
     def test_full_pipeline_runs_the_updated_visualization_after_incremental_test(self) -> None:
         selections = [
             SimpleNamespace(selected_dimension=3),
@@ -110,6 +175,8 @@ class FullPipelineTest(unittest.TestCase):
             self.assertEqual(save_visualization.call_count, 2)
             self.assertEqual(summary["initial_samples"], 18)
             self.assertEqual(summary["initial_selected_clusters"], 2)
+            self.assertFalse(summary["fast_mode"])
+            self.assertEqual(summary["selected_fuzzifier"], 2.0)
             self.assertEqual(summary["incremental_test"]["new_samples"], 2)
             self.assertEqual(summary["incremental_test"]["modified_samples"], 2)
             self.assertEqual(summary["incremental_test"]["total_samples"], 20)

@@ -1,8 +1,20 @@
 # Fast FCM pipeline
 
-The `fast-fcm-pipeline` branch adds a bounded coarse-to-fine path to the
-incremental fit command. It is enabled with `--fast` and keeps the regular
-exhaustive selector as the default.
+The bounded coarse-to-fine path is available from both the incremental fit
+command and the default end-to-end pipeline. It is enabled with `--fast` and
+keeps the regular exhaustive selector as the default.
+
+```bash
+python full_pipeline.py \
+  --input-json /workspaces/codespaces-blank/dbpedia_gemini_embeddings.json \
+  --output-dir results/full_pipeline_fast \
+  --fast
+```
+
+The default fuzzifier search schedule is `m=[2.0, 1.8, 1.6, 1.4]`. Override
+it with, for example, `--fast-m 2.2 2.0 1.8 1.6`. The selected value is saved
+as `selected_fuzzifier` in `full_pipeline_summary.json` and is reused by the
+optional incremental test.
 
 ```bash
 python incremental_clustering.py fit \
