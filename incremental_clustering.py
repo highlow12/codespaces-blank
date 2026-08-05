@@ -189,11 +189,12 @@ def assign_to_hierarchy(
                 node_model = hierarchy_model.nodes.get(parent_path)
                 if node_model is None:
                     continue
+                node_m = float(getattr(node_model, "m", m))
 
                 memberships, distances = fcm_memberships_from_centers(
                     projected[indices],
                     node_model.centers,
-                    m=m,
+                    m=node_m,
                 )
                 local_labels = memberships.argmax(axis=1)
                 row_indices = np.arange(len(indices))
@@ -304,13 +305,14 @@ def _center_statistics_for_batch(
             node_model = hierarchy_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
+            node_m = float(getattr(node_model, "m", m))
 
             memberships, distances = fcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
-                m=m,
+                m=node_m,
             )
-            weights = memberships**m
+            weights = memberships**node_m
             statistics[parent_path] = {
                 "weighted_sum": weights.T @ projected[indices],
                 "weight": weights.sum(axis=0),
@@ -370,13 +372,14 @@ def _center_contributions_for_batch(
             node_model = hierarchy_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
+            node_m = float(getattr(node_model, "m", m))
 
             memberships, distances = fcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
-                m=m,
+                m=node_m,
             )
-            weights = memberships**m
+            weights = memberships**node_m
             for local_index, global_index in enumerate(indices):
                 identifier = identifiers[int(global_index)]
                 contributions[identifier][parent_path] = {
@@ -564,10 +567,11 @@ def _refresh_distance_thresholds(
             node_model = updated_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
+            node_m = float(getattr(node_model, "m", m))
             memberships, distances = fcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
-                m=m,
+                m=node_m,
             )
             local_labels = memberships.argmax(axis=1)
             thresholds = np.full(node_model.centers.shape[0], np.inf)
@@ -627,10 +631,11 @@ def hierarchy_xie_beni_index(
             node_model = hierarchy_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
+            node_m = float(getattr(node_model, "m", m))
             memberships, distances = fcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
-                m=m,
+                m=node_m,
             )
             center_differences = (
                 node_model.centers[:, None, :] - node_model.centers[None, :, :]
@@ -641,7 +646,9 @@ def hierarchy_xie_beni_index(
                 np.min(center_distances_squared)
             )
             if np.isfinite(minimum_separation_squared):
-                numerator = float(np.sum((memberships**m) * (distances**2)))
+                numerator = float(
+                    np.sum((memberships**node_m) * (distances**2))
+                )
                 node_xb = numerator / max(
                     len(indices) * minimum_separation_squared,
                     1e-12,
@@ -704,6 +711,16 @@ def _cluster_config(
     visual_densmap: bool,
     center_updates_before_membership_refresh: int,
     max_xb_relative_degradation: float,
+    fuzzifier: float,
+    max_fcm_iter: int,
+    fcm_tol: float,
+    fast_mode: bool,
+    fast_sample_size: int,
+    fast_scout_n_init: int,
+    fast_refine_n_init: int,
+    fast_refine_top_k: int,
+    fast_stability_target: float,
+    fast_m_values: tuple[float, ...],
 ) -> dict[str, Any]:
     if center_updates_before_membership_refresh < 1:
         raise ValueError(
@@ -743,7 +760,16 @@ def _cluster_config(
             pca_minimum_preservation_gain
         ),
         "seed": int(seed),
-        "m": 2.0,
+        "m": float(fuzzifier),
+        "max_fcm_iter": int(max_fcm_iter),
+        "fcm_tol": float(fcm_tol),
+        "fast_mode": bool(fast_mode),
+        "fast_sample_size": int(fast_sample_size),
+        "fast_scout_n_init": int(fast_scout_n_init),
+        "fast_refine_n_init": int(fast_refine_n_init),
+        "fast_refine_top_k": int(fast_refine_top_k),
+        "fast_stability_target": float(fast_stability_target),
+        "fast_m_values": [float(value) for value in fast_m_values],
         "noise_threshold": _validate_noise_threshold(noise_threshold),
         "visual_pca_components": (
             None
@@ -850,6 +876,23 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
         ),
         "forced_noise_ratio": float(
             config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
+        ),
+        "m": float(config.get("m", 2.0)),
+        "max_fcm_iter": int(config.get("max_fcm_iter", 200)),
+        "fcm_tol": float(config.get("fcm_tol", 1e-6)),
+        "fast_mode": bool(config.get("fast_mode", False)),
+        "fast_sample_size": int(config.get("fast_sample_size", 600)),
+        "fast_scout_n_init": int(config.get("fast_scout_n_init", 2)),
+        "fast_refine_n_init": int(config.get("fast_refine_n_init", 3)),
+        "fast_refine_top_k": int(config.get("fast_refine_top_k", 1)),
+        "fast_stability_target": float(
+            config.get("fast_stability_target", 0.85)
+        ),
+        "fast_m_values": tuple(
+            float(value)
+            for value in config.get(
+                "fast_m_values", (2.0, 1.8, 1.6, 1.4)
+            )
         ),
     }
 
@@ -988,6 +1031,17 @@ def fit_incremental_state(
         DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
     ),
     max_xb_relative_degradation: float = DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
+    fuzzifier: float = 2.0,
+    max_fcm_iter: int = 200,
+    fcm_tol: float = 1e-6,
+    fast_mode: bool = False,
+    fast_sample_size: int = 600,
+    fast_scout_n_init: int = 2,
+    fast_refine_n_init: int = 3,
+    fast_refine_top_k: int = 1,
+    fast_stability_target: float = 0.85,
+    fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
+    fit_visualization: bool = True,
 ) -> IncrementalClusterState:
     """Fit the initial batch and persist reusable clustering/visual models."""
 
@@ -1034,21 +1088,38 @@ def fit_incremental_state(
             center_updates_before_membership_refresh
         ),
         max_xb_relative_degradation=max_xb_relative_degradation,
+        fuzzifier=fuzzifier,
+        max_fcm_iter=max_fcm_iter,
+        fcm_tol=fcm_tol,
+        fast_mode=fast_mode,
+        fast_sample_size=fast_sample_size,
+        fast_scout_n_init=fast_scout_n_init,
+        fast_refine_n_init=fast_refine_n_init,
+        fast_refine_top_k=fast_refine_top_k,
+        fast_stability_target=fast_stability_target,
+        fast_m_values=fast_m_values,
     )
+    config["visualization_deferred"] = not fit_visualization
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
     baseline_xie_beni = _hierarchy_xb(values, hierarchy_model, config)
     config["baseline_xie_beni"] = baseline_xie_beni
     config["current_xie_beni"] = baseline_xie_beni
-    visual_pca, visual_reducer, coordinates = _fit_visualization(
-        values,
-        assignments,
-        config,
-    )
-    config["visual_pca_components_selected"] = int(
-        getattr(visual_pca, "n_components_", DEFAULT_VISUAL_PCA_COMPONENTS)
-    )
-    if config.get("visual_pca_components_auto", False):
-        config["visual_pca_components"] = config["visual_pca_components_selected"]
+    if fit_visualization:
+        visual_pca, visual_reducer, coordinates = _fit_visualization(
+            values,
+            assignments,
+            config,
+        )
+        config["visual_pca_components_selected"] = int(
+            getattr(visual_pca, "n_components_", DEFAULT_VISUAL_PCA_COMPONENTS)
+        )
+        if config.get("visual_pca_components_auto", False):
+            config["visual_pca_components"] = config["visual_pca_components_selected"]
+    else:
+        visual_pca = None
+        visual_reducer = None
+        coordinates = np.zeros((len(values), 2), dtype=np.float64)
+        config["visual_pca_components_selected"] = None
     center_contributions = _center_contributions_for_batch(
         values,
         frame,
@@ -1487,6 +1558,11 @@ def update_incremental_state(
     frame = _validate_metadata(metadata, len(values))
     if values.shape[1] != state.embeddings.shape[1]:
         raise ValueError("new embeddings have a different dimensionality")
+    if state.visual_pca is None or state.visual_reducer is None:
+        raise ValueError(
+            "This state deferred visualization; fit a final state without "
+            "--skip-visualization before incremental updates."
+        )
 
     existing_ids = set(state.metadata["id"].tolist())
     incoming_ids = frame["id"].tolist()
@@ -1905,6 +1981,11 @@ def write_outputs(
             encoding="utf-8",
         )
     if plot_output is not None:
+        if state.visual_pca is None or state.visual_reducer is None:
+            raise ValueError(
+                "Visualization was deferred; omit --plot-output or run a "
+                "final fit without --skip-visualization."
+            )
         configured_target_weight = state.config.get("visual_cluster_target_weight")
         configured_pca_components = state.config.get(
             "visual_pca_components",
@@ -1951,6 +2032,15 @@ def _add_visual_output_args(parser: argparse.ArgumentParser) -> None:
         "--color-by",
         choices=["auto", "cluster"],
         default="auto",
+    )
+    parser.add_argument(
+        "--skip-visualization",
+        action="store_true",
+        help=(
+            "Skip PCA+UMAP during fast iteration. The saved state is for "
+            "clustering inspection and cannot process incremental updates "
+            "until a visualization model is fitted."
+        ),
     )
 
 
@@ -2001,6 +2091,34 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
     parser.add_argument("--min-split-silhouette", type=float, default=0.05)
+    parser.add_argument(
+        "--fuzzifier",
+        type=float,
+        default=2.0,
+        help="Default FCM fuzzifier m (fast mode can adapt it per node).",
+    )
+    parser.add_argument("--max-fcm-iter", type=int, default=200)
+    parser.add_argument("--fcm-tol", type=float, default=1e-6)
+    parser.add_argument(
+        "--fast",
+        action="store_true",
+        help=(
+            "Use sample-based K scouting, adaptive m, dynamic restarts, "
+            "and bounded FCM iterations."
+        ),
+    )
+    parser.add_argument("--fast-sample-size", type=int, default=600)
+    parser.add_argument("--fast-scout-n-init", type=int, default=2)
+    parser.add_argument("--fast-refine-n-init", type=int, default=3)
+    parser.add_argument("--fast-refine-top-k", type=int, default=1)
+    parser.add_argument("--fast-stability-target", type=float, default=0.85)
+    parser.add_argument(
+        "--fast-m",
+        type=float,
+        nargs="+",
+        default=[2.0, 1.8, 1.6, 1.4],
+        help="Fuzzifier fallback schedule used by --fast.",
+    )
     parser.add_argument(
         "--pca-components",
         type=int,
@@ -2136,6 +2254,17 @@ def _run_fit(args: argparse.Namespace) -> None:
             args.center_updates_before_membership_refresh
         ),
         max_xb_relative_degradation=args.max_xb_relative_degradation,
+        fuzzifier=args.fuzzifier,
+        max_fcm_iter=args.max_fcm_iter,
+        fcm_tol=args.fcm_tol,
+        fast_mode=args.fast,
+        fast_sample_size=args.fast_sample_size,
+        fast_scout_n_init=args.fast_scout_n_init,
+        fast_refine_n_init=args.fast_refine_n_init,
+        fast_refine_top_k=args.fast_refine_top_k,
+        fast_stability_target=args.fast_stability_target,
+        fast_m_values=tuple(args.fast_m),
+        fit_visualization=not args.skip_visualization,
     )
     save_state(state, args.state_output)
     write_outputs(

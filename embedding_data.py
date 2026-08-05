@@ -46,7 +46,18 @@ def load_embeddings_from_json(
         metadata = {key: value for key, value in record.items() if key != "embedding"}
         if "id" not in metadata:
             metadata["id"] = metadata.get("resource", id_offset + index)
-        metadata.setdefault("tag", f"Document_{index}")
+        if "tag" not in metadata:
+            hierarchy = metadata.get("class_hierarchy")
+            if (
+                isinstance(hierarchy, list)
+                and hierarchy
+                and isinstance(hierarchy[0], str)
+            ):
+                metadata["tag"] = hierarchy[0]
+            elif isinstance(metadata.get("class"), str):
+                metadata["tag"] = metadata["class"]
+            else:
+                metadata["tag"] = f"Document_{index}"
         ids.append(metadata["id"])
         metadata_rows.append(metadata)
 

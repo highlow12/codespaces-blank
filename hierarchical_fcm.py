@@ -28,6 +28,7 @@ from fcm_validity import (
     _validate_fcm_selection_parameters,
     select_fcm_cluster_count,
 )
+from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
 from pca_dimension_search import (
     DEFAULT_K_VALUES,
     DEFAULT_MAX_COMPONENTS,
@@ -71,6 +72,16 @@ def run_hierarchical_pca_fcm(
     pca_k_values: tuple[int, ...] = DEFAULT_K_VALUES,
     pca_minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
+    m: float = 2.0,
+    max_fcm_iter: int = 200,
+    fcm_tol: float = 1e-6,
+    fast_mode: bool = False,
+    fast_sample_size: int = 600,
+    fast_scout_n_init: int = 2,
+    fast_refine_n_init: int = 3,
+    fast_refine_top_k: int = 1,
+    fast_stability_target: float = 0.85,
+    fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
 ) -> HierarchicalResult:
     """Recursively split a dataset with spherical PCA+FCM."""
 
@@ -92,11 +103,30 @@ def run_hierarchical_pca_fcm(
         selection_method=selection_method,
         min_xb_relative_improvement=min_xb_relative_improvement,
         xb_worsening_patience=xb_worsening_patience,
+        m=m,
+        max_iter=max_fcm_iter,
+        tol=fcm_tol,
     )
     if not 0.0 <= forced_noise_ratio <= 1.0:
         raise ValueError("forced_noise_ratio must be between 0 and 1")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
         raise ValueError("min_split_silhouette must be between -1 and 1")
+    fast_config = FastFcmConfig(
+        sample_size=fast_sample_size,
+        scout_n_init=fast_scout_n_init,
+        scout_max_attempts=max(fast_scout_n_init + 1, fast_scout_n_init * 2),
+        scout_max_iter=min(max_fcm_iter, 60),
+        scout_tol=max(fcm_tol, 1e-4),
+        refine_top_k=fast_refine_top_k,
+        refine_n_init=fast_refine_n_init,
+        refine_max_attempts=max(fast_refine_n_init + 2, fast_refine_n_init * 2),
+        refine_max_iter=min(max_fcm_iter, 60),
+        refine_tol=max(fcm_tol, 1e-4),
+        stability_target=fast_stability_target,
+        m_values=tuple(float(value) for value in fast_m_values),
+    )
+    if fast_mode:
+        fast_config.validate()
 
     if metadata is None:
         metadata = pd.DataFrame({"id": np.arange(X.shape[0])})
@@ -185,19 +215,37 @@ def run_hierarchical_pca_fcm(
             node["stop_reason"] = "node_too_small"
             return
 
-        best, candidate_metrics, reason = select_fcm_cluster_count(
-            Xp[indices],
-            min_clusters=min_clusters,
-            max_clusters=max_clusters,
-            min_child_size=min_child_size,
-            min_membership=min_membership,
-            max_membership_gap=max_membership_gap,
-            distance_z=distance_z,
-            selection_method=selection_method,
-            min_xb_relative_improvement=min_xb_relative_improvement,
-            xb_worsening_patience=xb_worsening_patience,
-            seed=seed + depth * 100_003 + indices.size,
-        )
+        selection_seed = seed + depth * 100_003 + indices.size
+        if fast_mode:
+            best, candidate_metrics, reason = select_fast_fcm_cluster_count(
+                Xp[indices],
+                min_clusters=min_clusters,
+                max_clusters=max_clusters,
+                min_child_size=min_child_size,
+                min_membership=min_membership,
+                max_membership_gap=max_membership_gap,
+                distance_z=distance_z,
+                selection_method=selection_method,
+                seed=selection_seed,
+                config=fast_config,
+            )
+        else:
+            best, candidate_metrics, reason = select_fcm_cluster_count(
+                Xp[indices],
+                min_clusters=min_clusters,
+                max_clusters=max_clusters,
+                min_child_size=min_child_size,
+                min_membership=min_membership,
+                max_membership_gap=max_membership_gap,
+                distance_z=distance_z,
+                selection_method=selection_method,
+                min_xb_relative_improvement=min_xb_relative_improvement,
+                xb_worsening_patience=xb_worsening_patience,
+                seed=selection_seed,
+                m=m,
+                max_iter=max_fcm_iter,
+                tol=fcm_tol,
+            )
         node["candidate_metrics"] = candidate_metrics
         node["selection_reason"] = reason
         if best is None:
@@ -329,6 +377,7 @@ def run_hierarchical_pca_fcm(
             depth=current_level,
             centers=np.vstack(model_centers),
             distance_thresholds=np.asarray(distance_thresholds, dtype=np.float64),
+            m=float(best.result.m),
         )
 
         noise_indices = indices[local_labels == -1]
@@ -447,9 +496,10 @@ def run_hierarchical_pca_fcm(
         "min_xb_relative_improvement": float(min_xb_relative_improvement),
         "xb_worsening_patience": int(xb_worsening_patience),
         "multi_metric_weights": {
-            "xie_beni": 0.50,
-            "modified_partition_coefficient": 0.25,
-            "normalized_partition_entropy": 0.25,
+            "xie_beni": 0.40,
+            "silhouette": 0.25,
+            "restart_stability": 0.25,
+            "modified_partition_coefficient": 0.10,
         },
         "multi_metric_normalization": "rank_average_ties",
         "multi_metric_candidate_metrics_include_all_samples": True,
@@ -467,6 +517,16 @@ def run_hierarchical_pca_fcm(
             None if pca_selection is None else pca_selection.to_dict()
         ),
         "seed": int(seed),
+        "fuzzifier": float(m),
+        "max_fcm_iter": int(max_fcm_iter),
+        "fcm_tol": float(fcm_tol),
+        "fast_mode": bool(fast_mode),
+        "fast_sample_size": int(fast_sample_size),
+        "fast_scout_n_init": int(fast_scout_n_init),
+        "fast_refine_n_init": int(fast_refine_n_init),
+        "fast_refine_top_k": int(fast_refine_top_k),
+        "fast_stability_target": float(fast_stability_target),
+        "fast_m_values": [float(value) for value in fast_m_values],
     }
     tree = {"config": config, "summary": summary, "root": root}
     return HierarchicalResult(

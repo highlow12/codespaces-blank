@@ -13,6 +13,13 @@ class FCMResult:
     memberships: np.ndarray
     centers: np.ndarray
     iterations: int
+    objective: float | None = None
+    m: float = 2.0
+    n_init: int = 1
+    attempts: int = 1
+    valid_restarts: int = 1
+    restart_stability: float = 1.0
+    minimum_center_distance: float | None = None
 
 
 @dataclass
@@ -40,6 +47,11 @@ class FCMKCandidate:
     objective: float
     noise_count: int
     cluster_sizes: list[int]
+    m: float = 2.0
+    restart_stability: float = 1.0
+    valid_restarts: int = 1
+    attempts: int = 1
+    minimum_center_distance: float | None = None
 
 
 @dataclass
@@ -60,6 +72,7 @@ class HierarchyNodeModel:
     depth: int
     centers: np.ndarray
     distance_thresholds: np.ndarray
+    m: float = 2.0
 
 
 @dataclass
