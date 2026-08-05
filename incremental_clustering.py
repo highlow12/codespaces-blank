@@ -41,6 +41,7 @@ from fcm_hierarchy import (
     classify_fcm_documents,
     conditional_memberships_from_projected,
     fcm_memberships_from_centers,
+    sfcm_memberships_from_centers,
     fcm_noise_scores,
     forced_noise_mask,
     merge_forced_noise,
@@ -191,7 +192,7 @@ def assign_to_hierarchy(
                     continue
                 node_m = float(getattr(node_model, "m", m))
 
-                memberships, distances = fcm_memberships_from_centers(
+                memberships, distances = sfcm_memberships_from_centers(
                     projected[indices],
                     node_model.centers,
                     m=node_m,
@@ -307,7 +308,7 @@ def _center_statistics_for_batch(
                 continue
             node_m = float(getattr(node_model, "m", m))
 
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=node_m,
@@ -374,7 +375,7 @@ def _center_contributions_for_batch(
                 continue
             node_m = float(getattr(node_model, "m", m))
 
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=node_m,

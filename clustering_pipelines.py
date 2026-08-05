@@ -6,16 +6,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import adjusted_rand_score, normalized_mutual_info_score
-from sklearn.metrics import silhouette_score
 
 from clustering_types import PipelineResult
+from extract_clustering_metrics import extract_metrics_from_frame
 from fcm_hierarchy import (
     DEFAULT_CLUSTERING_PCA_COMPONENTS,
     fit_clustering_pca,
-    fuzzy_silhouette_proxy,
     spherical_fcm,
-    xie_beni_index,
 )
 
 
@@ -30,50 +27,15 @@ def evaluate_clustering(
     y_pred: np.ndarray,
     X_for_silhouette: np.ndarray,
 ) -> dict[str, Any]:
-    labels = np.unique(y_pred)
-    non_noise = y_pred != -1
-    cluster_count = int(np.sum(labels != -1))
-    noise_ratio = float(np.mean(~non_noise))
-
-    nmi = np.nan
-    ari = np.nan
+    assignments = pd.DataFrame({"cluster": np.asarray(y_pred)})
     if y_true is not None:
-        nmi = float(normalized_mutual_info_score(y_true, y_pred))
-        ari = float(adjusted_rand_score(y_true, y_pred))
-
-    fragmentation = np.nan
-    if y_true is not None:
-        fragmentation_scores: list[float] = []
-        for true_label in np.unique(y_true):
-            mask = y_true == true_label
-            assigned_clusters = y_pred[mask]
-            assigned_clusters = assigned_clusters[assigned_clusters != -1]
-            if assigned_clusters.size == 0:
-                continue
-            fragmentation_scores.append(
-                float(pd.Series(assigned_clusters).nunique())
-            )
-        if fragmentation_scores:
-            fragmentation = float(np.mean(fragmentation_scores))
-
-    metrics: dict[str, Any] = {
-        "nmi": nmi,
-        "ari": ari,
-        "clusters": cluster_count,
-        "noise_ratio": noise_ratio,
-        "tag_fragmentation": fragmentation,
-    }
-
-    if cluster_count >= 2 and np.sum(non_noise) >= 3:
-        try:
-            metrics["silhouette"] = float(
-                silhouette_score(X_for_silhouette[non_noise], y_pred[non_noise])
-            )
-        except Exception:
-            metrics["silhouette"] = np.nan
-    else:
-        metrics["silhouette"] = np.nan
-    return metrics
+        assignments["class"] = np.asarray(y_true)
+    return extract_metrics_from_frame(
+        assignments,
+        source="<pipeline>",
+        features=X_for_silhouette,
+        feature_source="pipeline_features",
+    )
 
 
 def run_pipeline_2(
@@ -92,6 +54,18 @@ def run_pipeline_2(
     )
     result = spherical_fcm(Xn, n_clusters=n_clusters, seed=42)
     elapsed = time.perf_counter() - start
+    assignments = pd.DataFrame({"cluster": result.labels})
+    if y is not None:
+        assignments["class"] = np.asarray(y)
+    for index in range(result.memberships.shape[1]):
+        assignments[f"membership_{index}"] = result.memberships[:, index]
+    extracted_metrics = extract_metrics_from_frame(
+        assignments,
+        source=pipeline_name,
+        features=Xn,
+        feature_source="post_pca_features",
+        centers=result.centers,
+    )
     metrics = {
         "pipeline": pipeline_name,
         "pca_components_requested": (
@@ -102,9 +76,7 @@ def run_pipeline_2(
             None if pca_selection is None else pca_selection.to_dict()
         ),
         "runtime_sec": elapsed,
-        **evaluate_clustering(y, result.labels, Xn),
-        "xie_beni": xie_beni_index(Xn, result),
-        "fuzzy_silhouette": fuzzy_silhouette_proxy(Xn, result),
+        **extracted_metrics,
         "iterations": result.iterations,
     }
     return PipelineResult(

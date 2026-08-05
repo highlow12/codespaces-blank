@@ -4,10 +4,9 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import euclidean_distances
-from sklearn.preprocessing import normalize
 
 from clustering_types import FCMResult
+from fcm_core import sfcm_memberships_from_centers
 from hierarchical_assignments import (
     DOCUMENT_TYPE_BOUNDARY,
     DOCUMENT_TYPE_CORE,
@@ -209,12 +208,11 @@ def fcm_document_types(
     if distance_z < 0.0:
         raise ValueError("distance_z must be non-negative")
 
-    Xn = normalize(X, norm="l2")
     labels = result.labels
-    distances = euclidean_distances(Xn, result.centers)
-    row_indices = np.arange(Xn.shape[0])
+    _, distances = sfcm_memberships_from_centers(X, result.centers)
+    row_indices = np.arange(X.shape[0])
     assigned_distances = distances[row_indices, labels]
-    assigned_thresholds = np.full(Xn.shape[0], float("inf"), dtype=np.float64)
+    assigned_thresholds = np.full(X.shape[0], float("inf"), dtype=np.float64)
 
     for cluster_id in range(result.memberships.shape[1]):
         cluster_mask = labels == cluster_id

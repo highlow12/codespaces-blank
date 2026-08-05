@@ -7,13 +7,12 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics.pairwise import euclidean_distances
 
 from clustering_types import HierarchicalModel, HierarchicalResult, HierarchyNodeModel
 from fcm_core import (
     conditional_memberships_from_projected,
-    fcm_memberships_from_centers,
     fit_clustering_pca,
+    sfcm_memberships_from_centers,
 )
 from fcm_document_classification import (
     DEFAULT_FORCED_NOISE_RATIO,
@@ -304,10 +303,14 @@ def run_hierarchical_pca_fcm(
             max_membership_gap=max_membership_gap,
             distance_z=distance_z,
         )
-        local_distances = euclidean_distances(
+        _, local_distance_matrix = sfcm_memberships_from_centers(
             Xp[indices],
             best.result.centers,
-        )[np.arange(indices.size), best.result.labels]
+        )
+        local_distances = local_distance_matrix[
+            np.arange(indices.size),
+            best.result.labels,
+        ]
         local_noise_scores = fcm_noise_scores(
             best.result.memberships,
             local_distances,
@@ -343,10 +346,11 @@ def run_hierarchical_pca_fcm(
             center = best.result.centers[source_label]
             model_centers.append(center.copy())
 
-            cluster_distances = euclidean_distances(
+            _, cluster_distance_matrix = sfcm_memberships_from_centers(
                 node_features[cluster_mask],
                 center.reshape(1, -1),
-            ).ravel()
+            )
+            cluster_distances = cluster_distance_matrix.ravel()
             if cluster_distances.size < 4:
                 distance_thresholds.append(float("inf"))
             else:

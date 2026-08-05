@@ -1,2 +1,0 @@
-pipeline,umap_preset,umap_n_neighbors,umap_min_dist,umap_spread,umap_densmap,runtime_sec,clusters,noise_ratio,nmi,ari,tag_fragmentation,silhouette,xie_beni,fuzzy_silhouette,iterations
-5_pca256_gmm,,,,,,3.533015435001289,4,0.0,0.31567438947752513,0.20697945085614045,3.5,0.017101934463014768,,,44

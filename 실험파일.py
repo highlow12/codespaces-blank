@@ -202,6 +202,10 @@ def main() -> None:
         "tag_fragmentation",
         "silhouette",
         "xie_beni",
+        "partition_coefficient",
+        "modified_partition_coefficient",
+        "partition_entropy",
+        "normalized_partition_entropy",
         "fuzzy_silhouette",
         "iterations",
     ]
