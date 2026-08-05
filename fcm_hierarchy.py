@@ -8,6 +8,7 @@ from fcm_core import (
     fit_pca_normalized_features,
     pca_normalized_features,
     spherical_fcm,
+    sfcm_memberships_from_centers,
     transform_pca_normalized_features,
 )
 from fcm_document_classification import (
@@ -71,6 +72,7 @@ __all__ = [
     "run_hierarchical_pca_fcm",
     "select_fcm_cluster_count",
     "spherical_fcm",
+    "sfcm_memberships_from_centers",
     "spherical_fcm_objective",
     "transform_pca_normalized_features",
     "xie_beni_index",

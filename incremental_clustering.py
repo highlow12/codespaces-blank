@@ -40,7 +40,7 @@ from fcm_hierarchy import (
     DOCUMENT_TYPE_NOISE,
     classify_fcm_documents,
     conditional_memberships_from_projected,
-    fcm_memberships_from_centers,
+    sfcm_memberships_from_centers,
     fcm_noise_scores,
     forced_noise_mask,
     merge_forced_noise,
@@ -190,7 +190,7 @@ def assign_to_hierarchy(
                 if node_model is None:
                     continue
 
-                memberships, distances = fcm_memberships_from_centers(
+                memberships, distances = sfcm_memberships_from_centers(
                     projected[indices],
                     node_model.centers,
                     m=m,
@@ -305,7 +305,7 @@ def _center_statistics_for_batch(
             if node_model is None or indices.size == 0:
                 continue
 
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=m,
@@ -371,7 +371,7 @@ def _center_contributions_for_batch(
             if node_model is None or indices.size == 0:
                 continue
 
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=m,
@@ -564,7 +564,7 @@ def _refresh_distance_thresholds(
             node_model = updated_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=m,
@@ -627,7 +627,7 @@ def hierarchy_xie_beni_index(
             node_model = hierarchy_model.nodes.get(parent_path)
             if node_model is None or indices.size == 0:
                 continue
-            memberships, distances = fcm_memberships_from_centers(
+            memberships, distances = sfcm_memberships_from_centers(
                 projected[indices],
                 node_model.centers,
                 m=m,
