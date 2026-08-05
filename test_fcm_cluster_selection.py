@@ -7,6 +7,7 @@ import numpy as np
 
 from clustering_types import FCMResult
 from clustering_pipelines import run_pipeline_by_name
+from fcm_core import spherical_fcm
 from fcm_hierarchy import (
     modified_partition_coefficient,
     normalized_partition_entropy,
@@ -15,6 +16,7 @@ from fcm_hierarchy import (
     run_hierarchical_pca_fcm,
     select_fcm_cluster_count,
 )
+from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
 
 
 class XieBeniClusterSelectionTest(unittest.TestCase):
@@ -119,6 +121,66 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertAlmostEqual(partition_entropy(result), np.log(2.0) / 2.0)
         self.assertAlmostEqual(normalized_partition_entropy(result), 0.50)
 
+    def test_multistart_retries_collapse_and_selects_best_valid_objective(
+        self,
+    ) -> None:
+        X = np.asarray(
+            [
+                [1.0, 0.0],
+                [0.9, 0.1],
+                [0.8, 0.2],
+                [0.0, 1.0],
+                [0.1, 0.9],
+                [0.2, 0.8],
+            ],
+            dtype=np.float64,
+        )
+        collapsed = FCMResult(
+            labels=np.zeros(6, dtype=int),
+            memberships=np.tile([0.5, 0.5], (6, 1)),
+            centers=np.tile([1.0, 0.0], (2, 1)),
+            iterations=2,
+            objective=0.01,
+            minimum_center_distance=0.0,
+        )
+        valid_labels = np.asarray([0, 0, 0, 1, 1, 1])
+        valid_memberships = np.eye(2)[valid_labels]
+        valid_slow = FCMResult(
+            labels=valid_labels,
+            memberships=valid_memberships,
+            centers=np.eye(2),
+            iterations=4,
+            objective=0.50,
+            minimum_center_distance=np.sqrt(2.0),
+        )
+        valid_best = FCMResult(
+            labels=1 - valid_labels,
+            memberships=np.eye(2)[1 - valid_labels],
+            centers=np.flipud(np.eye(2)),
+            iterations=3,
+            objective=0.30,
+            minimum_center_distance=np.sqrt(2.0),
+        )
+
+        with patch(
+            "fcm_core._spherical_fcm_once",
+            side_effect=[collapsed, valid_slow, valid_best],
+        ):
+            result = spherical_fcm(
+                X,
+                n_clusters=2,
+                n_init=2,
+                max_attempts=3,
+                min_cluster_size=2,
+                min_center_separation=0.01,
+            )
+
+        self.assertEqual(result.attempts, 3)
+        self.assertEqual(result.valid_restarts, 2)
+        self.assertAlmostEqual(result.objective, 0.30)
+        self.assertAlmostEqual(result.restart_stability, 1.0)
+        np.testing.assert_array_equal(result.labels, valid_best.labels)
+
     def test_multi_metric_checks_two_more_k_values_after_xb_worsens(self) -> None:
         best, metrics, reason = self._select(
             [0.50, 0.30, 0.31, 0.25, 0.20, 0.10],
@@ -184,6 +246,39 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
 
         self.assertIsNotNone(result.model)
         self.assertEqual(len(result.assignments), len(self.features))
+
+    def test_fast_selector_returns_full_data_candidate_and_adaptive_m(self) -> None:
+        angles = np.repeat(
+            np.asarray([0.0, 2.0 * np.pi / 3.0, 4.0 * np.pi / 3.0]),
+            24,
+        )
+        X = np.column_stack([np.cos(angles), np.sin(angles)])
+        X += np.random.default_rng(7).normal(0.0, 0.02, size=X.shape)
+
+        best, records, reason = select_fast_fcm_cluster_count(
+            X,
+            min_clusters=2,
+            max_clusters=4,
+            min_child_size=10,
+            config=FastFcmConfig(
+                sample_size=36,
+                scout_n_init=2,
+                scout_max_attempts=3,
+                scout_max_iter=40,
+                refine_n_init=2,
+                refine_max_attempts=3,
+                refine_max_iter=50,
+                refine_top_k=1,
+            ),
+            seed=7,
+        )
+
+        self.assertEqual(reason, "selected_fast_scout_refine")
+        self.assertIsNotNone(best)
+        self.assertEqual(len(best.labels), len(X))
+        self.assertEqual(best.labels.shape[0], best.result.memberships.shape[0])
+        self.assertGreater(best.m, 1.0)
+        self.assertTrue(any(record.get("phase") == "refine" for record in records))
 
     def test_default_hierarchical_path_records_automatic_pca_selection(self) -> None:
         result = run_hierarchical_pca_fcm(

@@ -9,7 +9,11 @@ from sklearn.metrics import silhouette_score
 from sklearn.preprocessing import normalize
 
 from clustering_types import FCMKCandidate, FCMResult
-from fcm_core import spherical_fcm
+from fcm_core import (
+    DEFAULT_FCM_MIN_CENTER_SEPARATION,
+    DEFAULT_FCM_N_INIT,
+    spherical_fcm,
+)
 from fcm_document_classification import (
     DEFAULT_MAX_MEMBERSHIP_GAP,
     fcm_noise_mask,
@@ -41,7 +45,9 @@ def _sfcm_metric_inputs(
 
 def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
     memberships, centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
-    numerator = np.sum((memberships**2) * squared_dissimilarities)
+    numerator = np.sum(
+        (memberships ** float(result.m)) * squared_dissimilarities
+    )
     center_dissimilarities = SphericalGeometry().squared_dissimilarities(
         centers,
         centers,
@@ -111,13 +117,14 @@ def spherical_fcm_objective(
     X: np.ndarray,
     result: FCMResult,
     *,
-    m: float = 2.0,
+    m: float | None = None,
 ) -> float:
     """Return the cosine-equivalent fuzzy compactness on the unit sphere."""
 
     memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
+    exponent = float(result.m if m is None else m)
     return float(
-        np.sum((memberships**m) * squared_dissimilarities)
+        np.sum((memberships**exponent) * squared_dissimilarities)
         / squared_dissimilarities.shape[0]
     )
 
@@ -186,7 +193,16 @@ def _candidate_to_record(candidate: FCMKCandidate) -> dict[str, Any]:
             if candidate.selection_score is not None
             else None
         ),
+        "restart_stability": finite_or_none(candidate.restart_stability),
+        "valid_restarts": int(candidate.valid_restarts),
+        "attempts": int(candidate.attempts),
+        "minimum_center_distance": (
+            finite_or_none(candidate.minimum_center_distance)
+            if candidate.minimum_center_distance is not None
+            else None
+        ),
         "objective": finite_or_none(candidate.objective),
+        "m": float(candidate.m),
         "valid_clusters": int(len(candidate.cluster_sizes)),
         "noise_count": int(candidate.noise_count),
         "cluster_sizes": [int(size) for size in candidate.cluster_sizes],
@@ -226,14 +242,15 @@ def _rank_desirability(
 
 
 def _score_multi_metric_candidates(candidates: list[FCMKCandidate]) -> None:
-    """Set an equal-weight validity score across three fuzzy metrics."""
+    """Score compactness, separation, restart stability, and fuzziness."""
 
     if not candidates:
         return
     metric_specs = (
-        ("xie_beni", False, 0.50),
-        ("modified_partition_coefficient", True, 0.25),
-        ("normalized_partition_entropy", False, 0.25),
+        ("xie_beni", False, 0.40),
+        ("silhouette", True, 0.25),
+        ("restart_stability", True, 0.25),
+        ("modified_partition_coefficient", True, 0.10),
     )
     weighted_desirabilities = []
     for attribute, higher_is_better, weight in metric_specs:
@@ -295,6 +312,12 @@ def _validate_fcm_selection_parameters(
     selection_method: str,
     min_xb_relative_improvement: float,
     xb_worsening_patience: int,
+    n_init: int = DEFAULT_FCM_N_INIT,
+    max_attempts: int | None = None,
+    min_center_separation: float = DEFAULT_FCM_MIN_CENTER_SEPARATION,
+    m: float = 2.0,
+    max_iter: int = 200,
+    tol: float = 1e-6,
 ) -> None:
     if not 0.0 <= min_membership <= 1.0:
         raise ValueError("min_membership must be between 0 and 1")
@@ -315,6 +338,46 @@ def _validate_fcm_selection_parameters(
         raise ValueError("min_xb_relative_improvement must be between 0 and 1")
     if xb_worsening_patience < 0:
         raise ValueError("xb_worsening_patience must be non-negative")
+    if n_init < 1:
+        raise ValueError("n_init must be at least 1")
+    if max_attempts is not None and max_attempts < n_init:
+        raise ValueError("max_attempts must be at least n_init")
+    if min_center_separation < 0.0:
+        raise ValueError("min_center_separation must be non-negative")
+    if m <= 1.0:
+        raise ValueError("m must be greater than 1")
+    if max_iter < 1:
+        raise ValueError("max_iter must be at least 1")
+    if tol <= 0.0:
+        raise ValueError("tol must be positive")
+
+
+def _candidate_is_valid(
+    candidate: FCMKCandidate,
+    *,
+    min_child_size: int,
+    min_center_separation: float,
+    selection_method: str,
+) -> bool:
+    if (
+        len(candidate.cluster_sizes) < 2
+        or min(candidate.cluster_sizes) < min_child_size
+        or candidate.valid_restarts < 1
+        or not np.isfinite(candidate.xie_beni)
+        or not np.isfinite(candidate.silhouette)
+    ):
+        return False
+    if (
+        candidate.minimum_center_distance is not None
+        and candidate.minimum_center_distance < min_center_separation
+    ):
+        return False
+    if selection_method == "multi_metric":
+        return bool(
+            np.isfinite(candidate.modified_partition_coefficient)
+            and np.isfinite(candidate.restart_stability)
+        )
+    return True
 
 
 def select_fcm_cluster_count(
@@ -330,16 +393,22 @@ def select_fcm_cluster_count(
     min_xb_relative_improvement: float = 0.05,
     xb_worsening_patience: int = 2,
     seed: int = 42,
+    n_init: int = DEFAULT_FCM_N_INIT,
+    max_attempts: int | None = None,
+    min_center_separation: float = DEFAULT_FCM_MIN_CENTER_SEPARATION,
+    m: float = 2.0,
+    max_iter: int = 200,
+    tol: float = 1e-6,
+    collapse_center_separation: float | None = None,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
     """Evaluate increasing k values and return the best FCM split.
 
     With ``selection_method="multi_metric"``, candidates are evaluated from
     the configured minimum k upward. After XB first worsens, two additional k
-    values are evaluated by default. XB, modified partition coefficient, and
-    normalized partition entropy are converted to rank desirabilities. They
-    are combined with weights 0.50, 0.25, and 0.25 respectively. Silhouette is
-    retained only for diagnostics and legacy selection methods. Raw PC and PE
-    are retained for reporting.
+    values are evaluated by default. XB, silhouette, restart stability, and
+    modified partition coefficient are converted to rank desirabilities and
+    combined with weights 0.40, 0.25, 0.25, and 0.10. Partition entropy is
+    retained for diagnostics but is not scored.
     """
 
     _validate_fcm_selection_parameters(
@@ -351,6 +420,12 @@ def select_fcm_cluster_count(
         selection_method=selection_method,
         min_xb_relative_improvement=min_xb_relative_improvement,
         xb_worsening_patience=xb_worsening_patience,
+        n_init=n_init,
+        max_attempts=max_attempts,
+        min_center_separation=min_center_separation,
+        m=m,
+        max_iter=max_iter,
+        tol=tol,
     )
 
     Xn = normalize(X, norm="l2")
@@ -367,6 +442,14 @@ def select_fcm_cluster_count(
             Xn,
             n_clusters=candidate_k,
             seed=seed + candidate_k * 1009,
+            n_init=n_init,
+            max_attempts=max_attempts,
+            min_cluster_size=min_child_size,
+            min_center_separation=min_center_separation,
+            m=m,
+            max_iter=max_iter,
+            tol=tol,
+            collapse_center_separation=collapse_center_separation,
         )
         if selection_method == "multi_metric":
             labels = result.memberships.argmax(axis=1)
@@ -424,31 +507,36 @@ def select_fcm_cluster_count(
             partition_entropy=partition_entropy(result),
             normalized_partition_entropy=normalized_partition_entropy(result),
             selection_score=None,
-            objective=spherical_fcm_objective(Xn, result),
+            objective=(
+                result.objective
+                if result.objective is not None
+                else spherical_fcm_objective(Xn, result, m=m)
+            ),
             noise_count=int(np.sum(~non_noise)),
             cluster_sizes=cluster_sizes,
+            m=result.m,
+            restart_stability=result.restart_stability,
+            valid_restarts=result.valid_restarts,
+            attempts=result.attempts,
+            minimum_center_distance=result.minimum_center_distance,
         )
         candidates.append(candidate)
 
         previous_candidate = candidates[-2] if len(candidates) >= 2 else None
-        current_is_valid = (
-            len(candidate.cluster_sizes) >= 2
-            and min(candidate.cluster_sizes) >= min_child_size
-            and (
-                selection_method == "multi_metric"
-                or np.isfinite(candidate.silhouette)
-            )
-            and np.isfinite(candidate.xie_beni)
+        current_is_valid = _candidate_is_valid(
+            candidate,
+            min_child_size=min_child_size,
+            min_center_separation=min_center_separation,
+            selection_method=selection_method,
         )
         previous_is_valid = (
             previous_candidate is not None
-            and len(previous_candidate.cluster_sizes) >= 2
-            and min(previous_candidate.cluster_sizes) >= min_child_size
-            and (
-                selection_method == "multi_metric"
-                or np.isfinite(previous_candidate.silhouette)
+            and _candidate_is_valid(
+                previous_candidate,
+                min_child_size=min_child_size,
+                min_center_separation=min_center_separation,
+                selection_method=selection_method,
             )
-            and np.isfinite(previous_candidate.xie_beni)
         )
         if (
             selection_method in {"xie_beni", "multi_metric"}
@@ -470,10 +558,12 @@ def select_fcm_cluster_count(
                 eligible = [
                     evaluated
                     for evaluated in candidates[:-1]
-                    if len(evaluated.cluster_sizes) >= 2
-                    and min(evaluated.cluster_sizes) >= min_child_size
-                    and np.isfinite(evaluated.silhouette)
-                    and np.isfinite(evaluated.xie_beni)
+                    if _candidate_is_valid(
+                        evaluated,
+                        min_child_size=min_child_size,
+                        min_center_separation=min_center_separation,
+                        selection_method=selection_method,
+                    )
                 ]
                 xb_stop_candidate = min(
                     eligible,
@@ -499,22 +589,11 @@ def select_fcm_cluster_count(
     valid_candidates = [
         candidate
         for candidate in candidates
-        if len(candidate.cluster_sizes) >= 2
-        and min(candidate.cluster_sizes) >= min_child_size
-        and (
-            selection_method == "multi_metric"
-            or np.isfinite(candidate.silhouette)
-        )
-        and (
-            selection_method not in {"xie_beni", "multi_metric"}
-            or np.isfinite(candidate.xie_beni)
-        )
-        and (
-            selection_method != "multi_metric"
-            or (
-                np.isfinite(candidate.modified_partition_coefficient)
-                and np.isfinite(candidate.normalized_partition_entropy)
-            )
+        if _candidate_is_valid(
+            candidate,
+            min_child_size=min_child_size,
+            min_center_separation=min_center_separation,
+            selection_method=selection_method,
         )
     ]
     if not valid_candidates:
@@ -549,8 +628,9 @@ def select_fcm_cluster_count(
             key=lambda candidate: (
                 candidate.selection_score,
                 -candidate.xie_beni,
+                candidate.restart_stability,
+                candidate.silhouette,
                 candidate.modified_partition_coefficient,
-                -candidate.normalized_partition_entropy,
                 -candidate.n_clusters,
             ),
         )

@@ -227,10 +227,12 @@ def main() -> None:
             "pipeline": pipeline_selection_name,
             "pipelines": selected_pipeline_names,
             "input_normalized": True,
-            "samples": args.samples,
+            "samples": int(X.shape[0]),
             "clusters": args.clusters,
-            "latent_dim": args.latent_dim,
-            "embedding_dim": args.embedding_dim,
+            "latent_dim": (
+                args.latent_dim if args.input_json is None else None
+            ),
+            "embedding_dim": int(X.shape[1]),
             "cluster_std": args.cluster_std,
             "seed": args.seed,
         },
