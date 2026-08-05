@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 from sklearn.metrics import silhouette_score
-from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.preprocessing import normalize
 
 from clustering_types import FCMKCandidate, FCMResult
@@ -15,6 +14,7 @@ from fcm_document_classification import (
     DEFAULT_MAX_MEMBERSHIP_GAP,
     fcm_noise_mask,
 )
+from fuzzy_cmeans import SphericalGeometry
 
 
 FCM_SELECTION_METHODS = frozenset(
@@ -24,23 +24,30 @@ FCM_SELECTION_METHODS = frozenset(
 
 
 
-def _fcm_metric_inputs(
+def _sfcm_metric_inputs(
     X: np.ndarray,
     result: FCMResult,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    normalized = normalize(X, norm="l2")
+    geometry = SphericalGeometry()
+    normalized = geometry.prepare_samples(X)
     memberships = _validated_memberships(result)
-    centers = np.asarray(result.centers, dtype=np.float64)
-    distances = euclidean_distances(normalized, centers)
-    return memberships, centers, distances
+    centers = geometry.prepare_samples(result.centers)
+    squared_dissimilarities = geometry.squared_dissimilarities(
+        normalized,
+        centers,
+    )
+    return memberships, centers, squared_dissimilarities
 
 
 def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
-    memberships, centers, distances = _fcm_metric_inputs(X, result)
-    numerator = np.sum((memberships**2) * (distances**2))
-    center_distances = euclidean_distances(centers, centers)
-    np.fill_diagonal(center_distances, np.inf)
-    denominator = X.shape[0] * np.min(center_distances) ** 2
+    memberships, centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
+    numerator = np.sum((memberships**2) * squared_dissimilarities)
+    center_dissimilarities = SphericalGeometry().squared_dissimilarities(
+        centers,
+        centers,
+    )
+    np.fill_diagonal(center_dissimilarities, np.inf)
+    denominator = X.shape[0] * np.min(center_dissimilarities)
     return float(numerator / max(denominator, 1e-12))
 
 
@@ -92,7 +99,8 @@ def fuzzy_silhouette_proxy(
     *,
     m: float = 2.0,
 ) -> float:
-    memberships, _centers, distances = _fcm_metric_inputs(X, result)
+    memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
+    distances = np.sqrt(squared_dissimilarities)
     weights = memberships**m
     a = np.sum(weights * distances, axis=1) / np.sum(weights, axis=1)
     b = np.partition(distances, 1, axis=1)[:, 1]
@@ -105,11 +113,13 @@ def spherical_fcm_objective(
     *,
     m: float = 2.0,
 ) -> float:
-    """Return the Euclidean fuzzy compactness objective on the unit sphere."""
+    """Return the cosine-equivalent fuzzy compactness on the unit sphere."""
 
-    Xn = normalize(X, norm="l2")
-    distances = euclidean_distances(Xn, result.centers)
-    return float(np.sum((result.memberships**m) * (distances**2)) / Xn.shape[0])
+    memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
+    return float(
+        np.sum((memberships**m) * squared_dissimilarities)
+        / squared_dissimilarities.shape[0]
+    )
 
 
 def _filter_fcm_labels(

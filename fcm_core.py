@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import numpy as np
 from sklearn.decomposition import PCA
-from sklearn.metrics.pairwise import euclidean_distances
-from sklearn.preprocessing import normalize
 
 from clustering_types import FCMResult, HierarchicalModel
+from fuzzy_cmeans import (
+    SphericalFuzzyCMeans,
+    SphericalGeometry,
+    memberships_from_squared_dissimilarities,
+)
 from pca_dimension_search import (
     DEFAULT_K_VALUES,
     DEFAULT_MAX_COMPONENTS,
@@ -40,60 +43,17 @@ def spherical_fcm(
     tol: float = 1e-6,
     seed: int = 42,
 ) -> FCMResult:
-    """Run FCM on the unit sphere using Euclidean distances.
+    """Run spherical FCM with cosine dissimilarity on unit vectors.
 
-    Every invocation re-normalizes its input. The weighted FCM centers are
-    projected back to unit length after each update, so both samples and
-    centers remain on the same sphere while the distance calculation stays
-    ordinary Euclidean distance.
+    This compatibility function delegates to the reusable SFCM optimizer.
     """
 
-    if n_clusters < 1:
-        raise ValueError("n_clusters must be at least 1")
-    if m <= 1.0:
-        raise ValueError("m must be greater than 1")
-
-    X = normalize(X, norm="l2")
-    rng = np.random.default_rng(seed)
-    memberships = rng.random((X.shape[0], n_clusters))
-    memberships /= memberships.sum(axis=1, keepdims=True)
-
-    epsilon = 1e-12
-    centers = np.zeros((n_clusters, X.shape[1]), dtype=np.float64)
-    for iteration in range(1, max_iter + 1):
-        previous = memberships.copy()
-        weights = memberships**m
-        centers = weights.T @ X
-        centers_norm = np.linalg.norm(centers, axis=1, keepdims=True)
-        zero_center_mask = centers_norm[:, 0] < epsilon
-        if np.any(zero_center_mask):
-            replacement_indices = rng.integers(
-                0,
-                X.shape[0],
-                size=int(np.sum(zero_center_mask)),
-            )
-            centers[zero_center_mask] = X[replacement_indices]
-            centers_norm = np.linalg.norm(centers, axis=1, keepdims=True)
-        centers = centers / np.maximum(centers_norm, epsilon)
-
-        distances = euclidean_distances(X, centers)
-        distances = np.maximum(distances, epsilon)
-
-        exponent = 2.0 / (m - 1.0)
-        ratios = (distances[:, :, None] / distances[:, None, :]) ** exponent
-        memberships = 1.0 / ratios.sum(axis=2)
-
-        change = np.max(np.abs(memberships - previous))
-        if change < tol:
-            break
-
-    labels = memberships.argmax(axis=1)
-    return FCMResult(
-        labels=labels,
-        memberships=memberships,
-        centers=centers,
-        iterations=iteration,
-    )
+    return SphericalFuzzyCMeans(
+        m=m,
+        max_iter=max_iter,
+        tol=tol,
+        seed=seed,
+    ).fit(X, n_clusters)
 
 
 def pca_normalized_features(
@@ -182,29 +142,44 @@ def transform_pca_normalized_features(X: np.ndarray, pca: PCA) -> np.ndarray:
     return transform_normalized_pca_projection(X, pca)
 
 
+def sfcm_memberships_from_centers(
+    X: np.ndarray,
+    centers: np.ndarray,
+    *,
+    m: float = 2.0,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Calculate spherical-FCM memberships from fixed unit prototypes."""
+
+    values = np.asarray(X, dtype=np.float64)
+    prototypes = np.asarray(centers, dtype=np.float64)
+    if values.ndim != 2 or prototypes.ndim != 2:
+        raise ValueError("X and centers must be 2D arrays")
+    if prototypes.shape[0] < 1 or values.shape[1] != prototypes.shape[1]:
+        raise ValueError("X and centers have incompatible shapes")
+
+    geometry = SphericalGeometry()
+    normalized_X = geometry.prepare_samples(values)
+    normalized_centers = geometry.prepare_samples(prototypes)
+    squared_dissimilarities = geometry.squared_dissimilarities(
+        normalized_X,
+        normalized_centers,
+    )
+    memberships = memberships_from_squared_dissimilarities(
+        squared_dissimilarities,
+        m=m,
+    )
+    return memberships, np.sqrt(squared_dissimilarities)
+
+
 def fcm_memberships_from_centers(
     X: np.ndarray,
     centers: np.ndarray,
     *,
     m: float = 2.0,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Calculate FCM memberships for new points using fixed centers."""
+    """Backward-compatible alias for :func:`sfcm_memberships_from_centers`."""
 
-    if m <= 1.0:
-        raise ValueError("m must be greater than 1")
-    if X.ndim != 2 or centers.ndim != 2:
-        raise ValueError("X and centers must be 2D arrays")
-    if centers.shape[0] < 1 or X.shape[1] != centers.shape[1]:
-        raise ValueError("X and centers have incompatible shapes")
-
-    normalized_X = normalize(X, norm="l2")
-    normalized_centers = normalize(centers, norm="l2")
-    distances = euclidean_distances(normalized_X, normalized_centers)
-    distances = np.maximum(distances, 1e-12)
-    exponent = 2.0 / (m - 1.0)
-    ratios = (distances[:, :, None] / distances[:, None, :]) ** exponent
-    memberships = 1.0 / ratios.sum(axis=2)
-    return memberships, distances
+    return sfcm_memberships_from_centers(X, centers, m=m)
 
 
 def conditional_memberships_from_projected(
@@ -237,7 +212,7 @@ def conditional_memberships_from_projected(
         parent_probability = probabilities.get(parent_path)
         if parent_probability is None:
             continue
-        local_memberships, _ = fcm_memberships_from_centers(
+        local_memberships, _ = sfcm_memberships_from_centers(
             projected,
             node_model.centers,
             m=m,

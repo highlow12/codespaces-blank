@@ -8,6 +8,7 @@ from cluster_plotting import (
     make_cluster_plot,
     make_comparison_plot,
     make_fixed_coordinate_plot,
+    make_selected_coordinate_plot,
 )
 from umap_projection import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -41,6 +42,7 @@ __all__ = [
     "make_cluster_plot",
     "make_comparison_plot",
     "make_fixed_coordinate_plot",
+    "make_selected_coordinate_plot",
     "prepare_visual_assignments",
     "project_embeddings",
     "transform_projection",
