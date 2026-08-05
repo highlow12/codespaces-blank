@@ -30,6 +30,8 @@ def build_hierarchical_assignments(
     noise_level: np.ndarray,
     soft_memberships_by_level: list[np.ndarray] | None = None,
     conditional_memberships: dict[str, np.ndarray] | None = None,
+    projection_support: np.ndarray | None = None,
+    projection_support_threshold: float = 0.0,
 ) -> pd.DataFrame:
     """Build the canonical flat assignment table for a hierarchy result."""
 
@@ -76,4 +78,15 @@ def build_hierarchical_assignments(
     assignments["boundary_level"] = boundary_level.astype(int)
     assignments["noise_level"] = noise_level.astype(int)
     assignments["leaf_level"] = leaf_level
+    if projection_support is not None:
+        support = np.asarray(projection_support, dtype=np.float64)
+        if support.shape != (len(assignments),):
+            raise ValueError("projection_support must align with assignments")
+        assignments["projection_support"] = support
+        assignments["projection_support_threshold"] = float(
+            projection_support_threshold
+        )
+        assignments["is_projection_outlier"] = (
+            projection_support_threshold > 0.0
+        ) & (support < projection_support_threshold)
     return assignments

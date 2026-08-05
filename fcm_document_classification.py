@@ -15,7 +15,7 @@ from hierarchical_assignments import (
 
 
 DEFAULT_MAX_MEMBERSHIP_GAP = 0.10
-DEFAULT_FORCED_NOISE_RATIO = 0.01
+DEFAULT_FORCED_NOISE_RATIO = 0.0
 
 
 

@@ -7,6 +7,9 @@ from sklearn.decomposition import PCA
 from sklearn.preprocessing import normalize
 
 
+DEFAULT_PROJECTION_SUPPORT_GAP_FRACTION = 0.40
+
+
 @dataclass(frozen=True)
 class FittedPcaProjection:
     """A single normalized PCA fit and its full-width training projection."""
@@ -50,6 +53,14 @@ class PcaPrefixTransformer:
 
     def transform(self, values: np.ndarray) -> np.ndarray:
         return np.asarray(self.base_pca.transform(values))[:, : self.dimension]
+
+
+def _base_pca_and_dimension(
+    pca: PCA | PcaPrefixTransformer,
+) -> tuple[PCA, int]:
+    if isinstance(pca, PcaPrefixTransformer):
+        return pca.base_pca, int(pca.dimension)
+    return pca, int(pca.n_components_)
 
 
 def validate_embedding_matrix(
@@ -119,3 +130,68 @@ def transform_normalized_pca_projection(
     if dimension is not None:
         projected = projected[:, :dimension]
     return normalize(projected, norm="l2")
+
+
+def pca_projection_support(
+    values: np.ndarray,
+    pca: PCA | PcaPrefixTransformer,
+    *,
+    name: str = "X",
+) -> np.ndarray:
+    """Measure how much centered input energy lies in the selected PCA space.
+
+    The clustering projection is normalized after PCA, which intentionally
+    discards projection magnitude.  That magnitude is nevertheless useful for
+    OOD detection: an unrelated embedding can point somewhere in the PCA space
+    after normalization while having very little support in that space.
+    """
+
+    base_pca, dimension = _base_pca_and_dimension(pca)
+    matrix = validate_embedding_matrix(
+        values,
+        name=name,
+        expected_features=int(base_pca.n_features_in_),
+    )
+    normalized_input = normalize(matrix, norm="l2")
+    centered_input = normalized_input - np.asarray(base_pca.mean_)
+    projected = np.asarray(base_pca.transform(normalized_input))[:, :dimension]
+    support = np.linalg.norm(projected, axis=1) / np.maximum(
+        np.linalg.norm(centered_input, axis=1),
+        1e-12,
+    )
+    return np.clip(support, 0.0, 1.0)
+
+
+def calibrate_pca_projection_support_threshold(
+    values: np.ndarray,
+    pca: PCA | PcaPrefixTransformer,
+    *,
+    distance_z: float = 3.5,
+    gap_fraction: float = DEFAULT_PROJECTION_SUPPORT_GAP_FRACTION,
+) -> float:
+    """Calibrate a conservative natural-OOD threshold without a fixed quota.
+
+    The threshold sits partway between the expected support of an isotropic
+    random direction and a robust lower fence of the fitted data.  If those
+    references are not separated, projection-support rejection is disabled.
+    """
+
+    if distance_z < 0.0:
+        raise ValueError("distance_z must be non-negative")
+    if not 0.0 <= gap_fraction <= 1.0:
+        raise ValueError("gap_fraction must be between 0 and 1")
+
+    support = pca_projection_support(values, pca)
+    median = float(np.median(support))
+    mad = float(np.median(np.abs(support - median)))
+    robust_lower = max(0.0, median - distance_z * 1.4826 * mad)
+    base_pca, dimension = _base_pca_and_dimension(pca)
+    isotropic_support = float(
+        np.sqrt(dimension / int(base_pca.n_features_in_))
+    )
+    if robust_lower <= isotropic_support + 1e-12:
+        return 0.0
+    return float(
+        isotropic_support
+        + gap_fraction * (robust_lower - isotropic_support)
+    )

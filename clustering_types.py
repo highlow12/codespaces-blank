@@ -83,3 +83,4 @@ class HierarchicalModel:
     nodes: dict[str, HierarchyNodeModel]
     max_depth: int
     fallback_single_cluster: bool = False
+    projection_support_threshold: float = 0.0

@@ -60,6 +60,7 @@ from pca_dimension_selection import (
     DEFAULT_COMPONENT_STEP,
     DEFAULT_MIN_COMPONENTS,
 )
+from pca_projection import pca_projection_support
 
 
 DEFAULT_NOISE_THRESHOLD = 0.05
@@ -145,6 +146,13 @@ def assign_to_hierarchy(
         raise ValueError("max_membership_gap must be between 0 and 1")
     if not 0.0 <= forced_noise_ratio <= 1.0:
         raise ValueError("forced_noise_ratio must be between 0 and 1")
+    projection_support = pca_projection_support(values, hierarchy_model.pca)
+    projection_support_threshold = float(
+        getattr(hierarchy_model, "projection_support_threshold", 0.0)
+    )
+    projection_outliers = (
+        projection_support_threshold > 0.0
+    ) & (projection_support < projection_support_threshold)
     projected = transform_pca_normalized_features(values, hierarchy_model.pca)
     conditional_memberships = conditional_memberships_from_projected(
         projected,
@@ -156,11 +164,13 @@ def assign_to_hierarchy(
         -1,
         dtype=int,
     )
-    is_noise = np.zeros(len(values), dtype=bool)
+    is_noise = projection_outliers.copy()
     document_types = np.full(len(values), DOCUMENT_TYPE_CORE, dtype=object)
-    noise_scores = np.zeros(len(values), dtype=np.float64)
+    document_types[projection_outliers] = DOCUMENT_TYPE_NOISE
+    noise_scores = np.clip(1.0 - projection_support, 0.0, 1.0)
     boundary_level = np.full(len(values), -1, dtype=int)
     noise_level = np.full(len(values), -1, dtype=int)
+    noise_level[projection_outliers] = 1
     max_cluster_count = max(
         (
             int(node_model.centers.shape[0])
@@ -178,17 +188,18 @@ def assign_to_hierarchy(
     ]
 
     if hierarchy_model.fallback_single_cluster:
-        labels_by_level[:, 0] = 0
-        soft_memberships_by_level[0][:, 0] = 1.0
+        valid_rows = ~projection_outliers
+        labels_by_level[valid_rows, 0] = 0
+        soft_memberships_by_level[0][valid_rows, 0] = 1.0
     else:
         active: dict[str, np.ndarray] = {
-            "": np.arange(len(values), dtype=int)
+            "": np.flatnonzero(~projection_outliers)
         }
         for depth in range(hierarchy_model.max_depth):
             next_active: dict[str, np.ndarray] = {}
             for parent_path, indices in active.items():
                 node_model = hierarchy_model.nodes.get(parent_path)
-                if node_model is None:
+                if node_model is None or indices.size == 0:
                     continue
                 node_m = float(getattr(node_model, "m", m))
 
@@ -280,6 +291,8 @@ def assign_to_hierarchy(
         noise_level,
         soft_memberships_by_level,
         conditional_memberships,
+        projection_support,
+        projection_support_threshold,
     )
     return assignments, float(np.mean(is_noise))
 
@@ -299,7 +312,16 @@ def _center_statistics_for_batch(
     if hierarchy_model.fallback_single_cluster:
         return statistics
 
-    active: dict[str, np.ndarray] = {"": np.arange(len(values), dtype=int)}
+    projection_support = pca_projection_support(values, hierarchy_model.pca)
+    support_threshold = float(
+        getattr(hierarchy_model, "projection_support_threshold", 0.0)
+    )
+    active: dict[str, np.ndarray] = {
+        "": np.flatnonzero(
+            (support_threshold <= 0.0)
+            | (projection_support >= support_threshold)
+        )
+    }
     for _depth in range(hierarchy_model.max_depth):
         next_active: dict[str, np.ndarray] = {}
         for parent_path, indices in active.items():
@@ -366,7 +388,16 @@ def _center_contributions_for_batch(
     if hierarchy_model.fallback_single_cluster:
         return contributions
 
-    active: dict[str, np.ndarray] = {"": np.arange(len(values), dtype=int)}
+    projection_support = pca_projection_support(values, hierarchy_model.pca)
+    support_threshold = float(
+        getattr(hierarchy_model, "projection_support_threshold", 0.0)
+    )
+    active: dict[str, np.ndarray] = {
+        "": np.flatnonzero(
+            (support_threshold <= 0.0)
+            | (projection_support >= support_threshold)
+        )
+    }
     for _depth in range(hierarchy_model.max_depth):
         next_active: dict[str, np.ndarray] = {}
         for parent_path, indices in active.items():
@@ -2083,7 +2114,10 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         "--forced-noise-ratio",
         type=float,
         default=DEFAULT_FORCED_NOISE_RATIO,
-        help="Force the highest-risk fraction to noise (default: 0.01).",
+        help=(
+            "Legacy forced-noise quota; defaults to 0 so only natural "
+            "membership, distance, and PCA-support evidence is used."
+        ),
     )
     parser.add_argument("--distance-z", type=float, default=3.5)
     parser.add_argument(
