@@ -4,8 +4,16 @@ import unittest
 
 import numpy as np
 
-from fcm_core import sfcm_memberships_from_centers, spherical_fcm
-from fuzzy_cmeans import FuzzyCMeans, SphericalGeometry
+from fcm_core import (
+    _memberships_from_distances,
+    sfcm_memberships_from_centers,
+    spherical_fcm,
+)
+from fuzzy_cmeans import (
+    FuzzyCMeans,
+    SphericalGeometry,
+    memberships_from_squared_dissimilarities,
+)
 
 
 class SphericalFuzzyCMeansTest(unittest.TestCase):
@@ -48,6 +56,43 @@ class SphericalFuzzyCMeansTest(unittest.TestCase):
         )
 
         np.testing.assert_allclose(memberships, np.asarray([[0.5, 0.5]]))
+
+    def test_linear_membership_formula_matches_pairwise_distance_ratios(self) -> None:
+        rng = np.random.default_rng(2026)
+        distances = rng.uniform(0.01, 2.0, size=(64, 5))
+
+        for fuzzifier in (1.4, 2.0, 2.5):
+            exponent = 2.0 / (fuzzifier - 1.0)
+            ratios = (
+                distances[:, :, None] / distances[:, None, :]
+            ) ** exponent
+            expected = 1.0 / ratios.sum(axis=2)
+
+            actual = _memberships_from_distances(
+                distances,
+                m=fuzzifier,
+            )
+
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+    def test_linear_squared_formula_matches_pairwise_ratios(self) -> None:
+        rng = np.random.default_rng(2027)
+        squared_dissimilarities = rng.uniform(0.001, 4.0, size=(64, 5))
+
+        for fuzzifier in (1.4, 2.0, 2.5):
+            exponent = 1.0 / (fuzzifier - 1.0)
+            ratios = (
+                squared_dissimilarities[:, :, None]
+                / squared_dissimilarities[:, None, :]
+            ) ** exponent
+            expected = 1.0 / ratios.sum(axis=2)
+
+            actual = memberships_from_squared_dissimilarities(
+                squared_dissimilarities,
+                m=fuzzifier,
+            )
+
+            np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
 
     def test_zero_length_sample_is_not_a_point_on_the_sphere(self) -> None:
         with self.assertRaisesRegex(ValueError, "zero-length"):

@@ -1,23 +1,26 @@
-# JavaScript 이식 성능 최적화 계획
+# Python 알고리즘 최적화 및 JavaScript 이식 계획
 
 ## 1. 목표와 전제
 
-이 계획은 Python 구현을 줄 단위로 JavaScript로 옮기는 계획이 아니다. Node.js와
-브라우저 Worker에서 공유할 수 있는 TypeScript 코어를 만들되, 이식 과정에서 데이터
-배치와 알고리즘 실행 구조를 바꿔 실제 처리 시간과 메모리를 줄이는 것이 목표다.
+먼저 Python 기준 구현에서 알고리즘과 출력 계약을 고정한다. 결과를 바꾸지 않는
+시간복잡도 개선을 Python에 적용하고, 필요한 알고리즘 변경은 품질 기준을 통과한 뒤
+명시적으로 확정한다. 그 다음 Node.js와 브라우저 Worker에서 공유할 수 있는 TypeScript
+코어에 같은 수식, 실행 단계, seed 규칙을 최대한 그대로 이식한다.
 
 NumPy와 scikit-learn의 수치 커널은 이미 네이티브 코드이므로 순수 JavaScript로
-옮긴다는 이유만으로 빨라지지는 않는다. 성능 향상은 다음 다섯 가지에서 만든다.
+옮긴다는 이유만으로 빨라지지는 않는다. Python에서 먼저 다음 개선을 검증하고 확정한
+뒤 JS가 동일한 구조를 구현한다.
 
-1. 객체 배열과 전체 JSON 파싱을 평면 바이너리/TypedArray 경로로 교체
-2. FCM 소속도 계산의 임시 `n × k × k` 배열을 없애고 `O(nk)`로 계산
-3. 후보 K, 재시작, 형제 노드를 고정 Worker pool에서 병렬 실행
-4. 후보 평가 중 이미 계산한 거리·소속도·라벨을 후속 단계에서 재사용
-5. 증분 업데이트에서 영향받은 문서와 노드만 다시 계산
+1. FCM 소속도 계산의 임시 `n × k × k` 배열을 없애고 `O(nk)`로 계산
+2. 후보 평가 중 이미 계산한 거리·소속도·라벨을 후속 단계에서 재사용
+3. 증분 업데이트에서 영향받은 문서와 노드만 다시 계산
+4. 고정된 Python 데이터 계약을 평면 바이너리/TypedArray로 대응
+5. 독립 후보 K, 재시작, 형제 노드를 고정 Worker pool에서 병렬 실행
 
-첫 대상은 Node.js CLI다. 수치 코어는 DOM과 Node 전용 API에 의존하지 않게 만들고,
+Python 단계에서는 각 최적화 전후의 수치 동등성과 품질을 fixture로 고정한다. JS의 첫
+대상은 Node.js CLI이며 수치 코어는 DOM과 Node 전용 API에 의존하지 않게 만든다.
 브라우저에서는 동일 코어를 Web Worker로 실행한다. WebGPU와 WASM은 첫 구현의 전제가
-아니며, TypeScript 기준선이 목표를 못 맞춘 커널에만 후속 적용한다.
+아니며, 동일 알고리즘의 TypeScript 구현이 목표를 못 맞춘 커널에만 후속 적용한다.
 
 ## 2. 현재 기준선
 
@@ -48,13 +51,41 @@ python -m cProfile -o /tmp/codespaces_perf_main.prof \
 | 입력 로드 | 6.13초 | 전체 gzip JSON materialization |
 | JSON decode 자체 | 4.14초 | 표본 추출 전 전체 파싱 |
 
-따라서 첫 최적화 대상은 FCM 커널과 입력 형식이다. UMAP이나 렌더링을 먼저
-최적화하지 않는다.
+따라서 Python의 첫 최적화 대상은 FCM 커널과 후보 평가다. 입력 형식은 알고리즘
+계약을 동결한 뒤 JS 이식 단계에서 다루며, UMAP이나 렌더링을 먼저 최적화하지 않는다.
+
+### 2.1 진행 순서
+
+최적화와 이식은 다음 네 단계로 분리한다.
+
+1. **Python exact 최적화**: 수학적으로 같은 결과를 내면서 시간·공간복잡도를 낮춘다.
+2. **Python 알고리즘 확정**: 표본 silhouette처럼 결과에 영향을 줄 수 있는 변경은
+   품질 게이트를 통과한 뒤 기본 알고리즘으로 채택한다.
+3. **계약 동결**: 입력, 정규화, seed 파생, 중간 fixture, 출력 schema를 버전화한다.
+4. **JS 이식**: 동결된 Python 수식과 단계를 TypedArray/Worker 구조로 옮긴다.
+
+JS 단계에서는 알고리즘을 다시 설계하지 않는다. 성능이 부족하면 같은 계산의 메모리
+배치, 병렬 실행, WASM SIMD 여부만 바꾸고 Python과의 품질 계약은 유지한다.
+
+### 2.2 첫 exact 최적화 결과
+
+FCM 소속도 정규화를 pairwise ratio 방식에서 정규화된 역거듭제곱 방식으로 바꿨다.
+두 수식은 대수적으로 동일하며 테스트에서 `m=1.4, 2.0, 2.5` 결과가 `1e-12`
+허용오차 안에서 일치한다.
+
+```text
+기존: n × k × k ratio tensor, O(nk²) 시간/공간
+현재: n × k inverse powers, O(nk) 시간/공간
+```
+
+`100,000 × 8`, `m=2`, 11회 중앙값 기준으로 61.2ms에서 31.5ms로 약 1.95배
+단축됐다. 핵심 임시 배열의 이론상 크기는 Float64 기준 51.2MB에서 6.4MB로
+줄었다. 작은 계층 노드에서는 기존 전체 함수와 비슷한 실행 시간을 유지한다.
 
 ## 3. 측정 규약
 
-구현 전에 `bench/`에 Python 기준선과 JS 기준선을 같은 manifest로 실행하는
-하네스를 만든다. 모든 결과에는 commit, runtime, CPU 수, 입력 hash, 설정, seed를
+먼저 Python 단계별 기준선을 만들고, 계약 동결 뒤 같은 manifest를 JS 하네스가
+읽도록 확장한다. 모든 결과에는 commit, runtime, CPU 수, 입력 hash, 설정, seed를
 기록한다.
 
 측정 시나리오는 다음과 같다.
@@ -84,7 +115,7 @@ serialize
 Worker 수를 기록한다. Worker를 사용한 결과는 동일 입력의 단일 Worker 결과와 같이
 남긴다.
 
-## 4. 우선순위 P0: 정확성 기준선과 평면 데이터 모델
+## 4. 우선순위 P0: Python 정확성 기준선
 
 ### 4.1 수치 동등성 fixture
 
@@ -102,7 +133,7 @@ PRNG 차이 때문에 seed만 같게 두고 결과 벡터의 완전 일치를 �
 변경이 들어간 fast 모드는 Python 결과 대비 ARI `0.98` 이상 또는 NMI 차이 `0.02`
 이하를 통과 기준으로 삼는다.
 
-### 4.2 메모리 레이아웃
+### 4.2 JS 이식용 메모리 계약
 
 핫 경로에서는 `number[][]`, 문서별 객체, 문자열 cluster path를 사용하지 않는다.
 
@@ -129,7 +160,7 @@ type NodeSlice = {
 
 정확도 fixture를 통과하지 못하는 구간만 Float64 저장으로 올린다.
 
-## 5. 우선순위 P1: 입력과 상태 형식
+## 5. JS 단계 P1: 입력과 상태 형식
 
 현재 gzip JSON은 부분 표본을 쓰더라도 전체 3,000개와 모든 숫자를 객체로 만든다.
 호환 loader는 유지하되 hot path는 한 번 변환한 바이너리를 사용한다.
@@ -156,7 +187,7 @@ Node에서는 `Buffer`가 소유한 `ArrayBuffer` 위에 `Float32Array` view를 
 - 3,000개 중 300개 표본 실행에서 선택 행만 materialize
 - Python/JS 양방향 fixture converter 제공
 
-## 6. 우선순위 P1: FCM 커널 재설계
+## 6. Python 단계 P0: FCM 커널 복잡도
 
 ### 6.1 구면 거리
 
@@ -208,7 +239,7 @@ row-major 순회 중 `Float64Array(k * d)`에 누적하고 마지막에 정규�
 - 반복 중 할당량이 입력 크기에 비례해 계속 증가하지 않음
 - 최종 목적 함수와 수렴 iteration 수 기록
 
-## 7. 우선순위 P1: 고정 Worker pool
+## 7. JS 단계 P1: 고정 Worker pool
 
 병렬화 단위는 안쪽 dot-product가 아니라 독립 작업이다.
 
@@ -238,7 +269,7 @@ seed = hash(globalSeed, nodeId, candidateK, restartIndex, phase)
 - Worker 수 증가에 따라 peak RSS가 원본 행렬 크기만큼 반복 증가하지 않음
 - Worker 수 1과 N에서 동일 seed의 선택 결과가 같음
 
-## 8. 우선순위 P2: 탐색량과 중복 계산 줄이기
+## 8. Python 단계 P1: 탐색량과 중복 계산 줄이기
 
 ### 8.1 두 단계 K 선택
 
@@ -277,7 +308,7 @@ WebGPU는 `n × d`가 충분히 큰 PCA/dot-product batch에서만 별도 실험
 - exact 모드 대비 3,000개 warm fit p50 2배 이상 향상
 - 선택 K가 달라진 실행에는 scout 근거와 exact 재검증 결과가 남음
 
-## 9. 우선순위 P2: 증분 업데이트
+## 9. Python 단계 P1: 증분 업데이트
 
 전체 문서의 소속도를 고정 주기마다 다시 계산하는 대신 중심 이동량으로 영향 범위를
 결정한다.
@@ -303,14 +334,16 @@ cluster, weight를 평면 sparse buffer로 저장한다.
 
 | 단계 | 산출물 | 다음 단계 진입 조건 |
 |---|---|---|
-| 1 | Python/JS benchmark harness, 수치 fixture | phase별 기준선과 품질 지표 재현 |
-| 2 | binary converter/loader, 평면 타입 | load/RSS 목표 통과 |
-| 3 | 단일 Worker TypedArray FCM | 정확도와 2배 kernel 목표 통과 |
-| 4 | K/restart Worker pool | 결정성 및 1.5배 scaling 통과 |
-| 5 | metric artifact 재사용, fast K 탐색 | 품질 및 exact 대비 2배 목표 통과 |
-| 6 | 계층/증분 선택적 재계산 | assignment/통계 fixture 통과 |
-| 7 | PCA/UMAP 및 브라우저 통합 | Node 기준선 회귀 없음 |
-| 8 | 필요 시 WASM SIMD/WebGPU spike | TS가 전체 목표를 못 맞춘 커널만 채택 |
+| 1 | Python benchmark와 수치 fixture | phase별 기준선과 품질 지표 재현 |
+| 2 | Python `O(nk)` membership | 수치 동등성 및 메모리 목표 통과 (완료) |
+| 3 | Python 거리/metric artifact 재사용 | exact 결과 유지, 전체 fit 회귀 없음 |
+| 4 | Python fast K·silhouette 알고리즘 확정 | 품질 및 exact 대비 목표 통과 |
+| 5 | Python 계층/증분 선택적 재계산 | assignment/통계 fixture 통과 |
+| 6 | 알고리즘·입출력 계약 v1 동결 | Python fixture와 schema 버전 확정 |
+| 7 | JS binary loader와 TypedArray 단일 Worker | Python fixture 정확도 통과 |
+| 8 | JS K/restart Worker pool | 결정성 및 1.5배 scaling 통과 |
+| 9 | PCA/UMAP 및 브라우저 통합 | Node 기준선 회귀 없음 |
+| 10 | 필요 시 WASM SIMD/WebGPU spike | JS가 전체 목표를 못 맞춘 커널만 채택 |
 
 각 단계는 직전 단계 benchmark JSON을 보존하고 같은 입력으로 비교한다. 목표를 못 맞춘
 최적화는 복잡도를 더하기 전에 allocation profile, Worker overhead, 캐시 miss 여부를
@@ -340,4 +373,3 @@ SIMD 후보로 올린다. WebGPU는 30,000개 scale benchmark에서 CPU Worker p
 - 전체 JSON 상태에 embeddings/memberships를 숫자 배열로 저장
 - 측정 전에 WebGPU, WASM, GPU 라이브러리부터 도입
 - Python과 JS의 cold import/startup 시간을 warm kernel 시간과 섞어 비교
-

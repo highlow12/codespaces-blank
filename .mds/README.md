@@ -15,7 +15,7 @@
 - `PCA_DIMENSION_SELECTION.md`: 고정 PCA 후보 평가와 자동 선택 근거
 - `TAG_EMBEDDING_EXPERIMENT.md`: 태그 임베딩 실험
 - `hierarchical_clustering_js_plan.md`: JavaScript/TypeScript 이식 기획
-- `JS_PERFORMANCE_OPTIMIZATION_PLAN.md`: JS 이식 시 성능 최적화와 측정 계획
+- `JS_PERFORMANCE_OPTIMIZATION_PLAN.md`: Python 알고리즘 최적화 후 JS 이식 계획
 - `incremental_clustering.md`: 증분 사용법의 초기 문서
 - `FAST_FCM.md`: 빠른 FCM 탐색의 초기 사용 예
 - `METRIC_EXTRACTOR.md`: 지표 전용 평가 도구 설명

@@ -20,6 +20,21 @@ from clustering_types import FCMResult
 DEFAULT_EPSILON = 1e-12
 
 
+def _normalized_inverse_powers(
+    values: np.ndarray,
+    *,
+    exponent: float,
+) -> np.ndarray:
+    """Normalize inverse powers of positive row values in O(rows * columns)."""
+
+    scaled = values / values.min(axis=1, keepdims=True)
+    if exponent == 1.0:
+        inverse_powers = np.reciprocal(scaled)
+    else:
+        inverse_powers = scaled ** (-exponent)
+    return inverse_powers / inverse_powers.sum(axis=1, keepdims=True)
+
+
 class FuzzyCMeansGeometry(Protocol):
     """Operations that specialize FCM for a feature geometry."""
 
@@ -76,9 +91,10 @@ def memberships_from_squared_dissimilarities(
     regular_rows = ~exact_rows
     if np.any(regular_rows):
         regular = values[regular_rows]
-        exponent = 1.0 / (m - 1.0)
-        ratios = (regular[:, :, None] / regular[:, None, :]) ** exponent
-        memberships[regular_rows] = 1.0 / ratios.sum(axis=2)
+        memberships[regular_rows] = _normalized_inverse_powers(
+            regular,
+            exponent=1.0 / (m - 1.0),
+        )
     return memberships
 
 

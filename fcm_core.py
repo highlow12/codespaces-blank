@@ -13,6 +13,7 @@ from clustering_types import FCMResult, HierarchicalModel
 from fuzzy_cmeans import (
     SphericalFuzzyCMeans,
     SphericalGeometry,
+    _normalized_inverse_powers,
     memberships_from_squared_dissimilarities,
 )
 from pca_dimension_search import (
@@ -44,23 +45,18 @@ def _memberships_from_distances(
     m: float,
 ) -> np.ndarray:
     epsilon = 1e-12
-    zero_rows = np.any(distances <= epsilon, axis=1)
-    memberships = np.empty_like(distances, dtype=np.float64)
+    exact_matches = distances <= epsilon
+    exact_rows = exact_matches.any(axis=1)
+    memberships = np.zeros_like(distances, dtype=np.float64)
+    if np.any(exact_rows):
+        ties = exact_matches[exact_rows]
+        memberships[exact_rows] = ties / ties.sum(axis=1, keepdims=True)
 
-    regular_distances = np.maximum(distances[~zero_rows], epsilon)
-    if regular_distances.size:
-        exponent = 2.0 / (m - 1.0)
-        ratios = (
-            regular_distances[:, :, None]
-            / regular_distances[:, None, :]
-        ) ** exponent
-        memberships[~zero_rows] = 1.0 / ratios.sum(axis=2)
-
-    if np.any(zero_rows):
-        exact_matches = distances[zero_rows] <= epsilon
-        memberships[zero_rows] = exact_matches / exact_matches.sum(
-            axis=1,
-            keepdims=True,
+    regular_rows = ~exact_rows
+    if np.any(regular_rows):
+        memberships[regular_rows] = _normalized_inverse_powers(
+            distances[regular_rows],
+            exponent=2.0 / (m - 1.0),
         )
     return memberships
 
