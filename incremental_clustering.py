@@ -69,7 +69,7 @@ DEFAULT_DRIFT_EWMA_ALPHA = 0.30
 DEFAULT_NOISE_RELEASE_RATIO = 0.50
 DEFAULT_RECLUSTER_COOLDOWN_UPDATES = 3
 DEFAULT_MEMBERSHIP_REFRESH_MIN_CENTER_MOVEMENT = 0.01
-DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE = 0.0025
+DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE = 0.05
 DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
 DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
 CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
@@ -1349,7 +1349,7 @@ def _select_center_affected_ids(
             )
         moved = movements >= float(min_center_movement)
         if np.any(moved):
-            moved_by_path[path] = movements
+            moved_by_path[path] = np.where(moved, movements, 0.0)
             moved_cluster_count += int(np.sum(moved))
 
     selected: list[Any] = []
@@ -1369,8 +1369,10 @@ def _select_center_affected_ids(
             if weights.shape != movements.shape:
                 selected.append(identifier)
                 break
-            finite_movements = np.where(np.isfinite(movements), movements, np.inf)
-            influence = float(np.max(weights * finite_movements))
+            if np.any(~np.isfinite(movements)):
+                selected.append(identifier)
+                break
+            influence = float(np.max(weights * movements))
             if influence >= float(min_influence):
                 selected.append(identifier)
                 break
@@ -2872,6 +2874,9 @@ def load_state(path: Path) -> IncrementalClusterState:
         state.membership_reference_centers = _snapshot_hierarchy_centers(
             state.hierarchy_model
         )
+    if "selective_membership_refresh" not in state.config:
+        # Every state written before v6 used an all-document refresh.
+        state.config["selective_membership_refresh"] = False
     state.config = _initialize_update_config(state.config)
     _validate_embeddings(state.embeddings)
     _validate_metadata(state.metadata, len(state.embeddings))
@@ -3170,7 +3175,26 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         "--center-updates-before-membership-refresh",
         type=int,
         default=DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH,
-        help="Recompute every document membership after this many batch center updates.",
+        help="Run a selective membership refresh after this many center updates.",
+    )
+    parser.add_argument(
+        "--full-membership-refresh",
+        action="store_false",
+        dest="selective_membership_refresh",
+        default=True,
+        help="Use the legacy all-document membership refresh.",
+    )
+    parser.add_argument(
+        "--membership-refresh-min-center-movement",
+        type=float,
+        default=DEFAULT_MEMBERSHIP_REFRESH_MIN_CENTER_MOVEMENT,
+        help="Ignore hierarchy centers that moved less than this distance.",
+    )
+    parser.add_argument(
+        "--membership-refresh-min-influence",
+        type=float,
+        default=DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE,
+        help="Refresh notes whose center movement times fuzzy weight exceeds this value.",
     )
     parser.add_argument(
         "--max-xb-relative-degradation",
@@ -3241,6 +3265,13 @@ def _run_fit(args: argparse.Namespace) -> None:
         visual_densmap=args.visual_densmap,
         center_updates_before_membership_refresh=(
             args.center_updates_before_membership_refresh
+        ),
+        selective_membership_refresh=args.selective_membership_refresh,
+        membership_refresh_min_center_movement=(
+            args.membership_refresh_min_center_movement
+        ),
+        membership_refresh_min_influence=(
+            args.membership_refresh_min_influence
         ),
         max_xb_relative_degradation=args.max_xb_relative_degradation,
         fuzzifier=args.fuzzifier,

@@ -50,15 +50,20 @@ python incremental_clustering.py update \
 densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는 `densmap=False`가
 사용된다.
 
-## 온라인 중심과 주기적 전체 갱신
+## 온라인 중심과 선택적 membership 갱신
 
 증분 `update` 한 번을 중심 업데이트 한 번으로 계산한다. 신규 배치가 들어오면 각
 계층 노드에서 `membership ** m` 가중합과 가중치를 누적하고, 구면 FCM 중심을
 즉시 다시 정규화한다. 기본 주기는 다음과 같다.
 
-- 중심 업데이트 10회: 누적된 모든 문서의 소속도와 거리 임계값 재계산
-- 전체 소속도 재계산 시: 마지막 전체 재클러스터링 직후보다 계층 가중
-  Xie-Beni 지수가 5% 이상 악화되면 누적 데이터 전체 재클러스터링
+- 중심 업데이트 10회: 마지막 갱신 이후 충분히 이동한 중심을 찾고, 해당 중심의
+  저장 fuzzy weight가 큰 문서와 신규·교체 문서만 membership 재계산
+- 선택 문서의 compact contribution만 delta로 교체하고 나머지 문서의
+  contribution과 assignment는 그대로 공유
+- 거리 임계값과 계층 Xie-Beni 지수는 저장된 PCA 투영값과 fuzzy weight로
+  계산하므로 전 문서 membership을 다시 만들지 않음
+- 선택 갱신 시 마지막 전체 재클러스터링 직후보다 계층 가중 Xie-Beni 지수가
+  5% 이상 악화되면 누적 데이터 전체 재클러스터링
 - 전체 재클러스터링 시: 시각화 PCA·UMAP과 좌표는 유지
 - 신규 natural-noise 표본을 20개 이상 모으면 배치 비율의 EWMA를 갱신
 - EWMA가 5%를 초과하면 주기를 기다리지 않고 긴급 전체 재클러스터링
@@ -71,6 +76,8 @@ densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는
 python incremental_clustering.py fit \
   ... \
   --center-updates-before-membership-refresh 10 \
+  --membership-refresh-min-center-movement 0.01 \
+  --membership-refresh-min-influence 0.05 \
   --max-xb-relative-degradation 0.05 \
   --drift-min-samples 20 \
   --drift-ewma-alpha 0.30 \
@@ -79,15 +86,24 @@ python incremental_clustering.py fit \
   --recluster-cooldown-updates 3
 ```
 
+영향도는 `마지막 membership 갱신 이후 중심 이동량 × membership ** m`으로
+계산한다. 기본적으로 중심 이동이 `0.01` 미만인 클러스터는 무시하고, 영향도가
+`0.05` 이상인 문서만 다시 계산한다. 신규·교체 문서는 항상 선택된다. 기존
+상태의 전 문서 갱신 동작이 필요하면 초기 적합 시 `--full-membership-refresh`를
+지정한다.
+
 상태 파일에는 중심의 퍼지 충분통계량, 문서별 기여도, 다음 실행까지 남은
-카운터와 EWMA·경보·cooldown 상태가 저장된다. 상태 버전은 6이다. 기존 버전
+카운터, 마지막 membership 갱신 중심 스냅샷과 EWMA·경보·cooldown 상태가
+저장된다. 상태 버전은 6이다. 기존 버전
 1~5 상태 파일은 기존 즉시 판정 동작(`min_samples=1`, `alpha=1`, cooldown 없음)을
 유지하도록 마이그레이션하며, 첫 `update`에서 필요한 문서별 기여도를 복원한다.
 
 각 업데이트 요약에는 `center_movement_mean/max`,
 `cluster_occupancy_change`, `assignment_change_rate`가 포함된다. 작은 배치는
 `drift_pending_samples`에 누적되며, 실제 판정 여부와 EWMA 값은
-`drift_evaluated`, `drift_smoothed_noise_ratio`로 확인한다.
+`drift_evaluated`, `drift_smoothed_noise_ratio`로 확인한다. 선택 갱신 범위는
+`membership_refresh_scope`, `membership_refresh_sample_count`,
+`membership_refresh_skipped_count`로 확인한다.
 
 ## 변경된 노트 교체
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import pickle
 import tempfile
 import unittest
@@ -20,8 +21,11 @@ from incremental_clustering import (
     _aggregate_center_contributions,
     _center_contributions_for_batch,
     _evaluate_noise_drift,
+    _hierarchy_xb_from_contributions,
     _initialize_update_config,
     _rebuild_tree_counts,
+    _select_center_affected_ids,
+    _snapshot_hierarchy_centers,
     _update_hierarchy_centers_from_statistics,
     assign_to_hierarchy,
     hierarchy_xie_beni_index,
@@ -389,6 +393,10 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         )
 
         self.assertTrue(first_summary["membership_refreshed"])
+        self.assertEqual(
+            first_summary["membership_refresh_scope"],
+            "full_legacy",
+        )
         self.assertFalse(first_summary["reclustered"])
         self.assertEqual(first.config["membership_refreshes_since_recluster"], 1)
         self.assertEqual(len(first.assignments), len(first.embeddings))
@@ -421,6 +429,103 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self.assertIs(second.visual_reducer, first.visual_reducer)
         self.assertEqual(second.config["membership_refreshes_since_recluster"], 0)
         self.assertEqual(second.config["total_reclusters"], 1)
+
+    def test_center_influence_selects_only_nearby_weighted_notes(self) -> None:
+        state = self._make_state()
+        current_model = copy.deepcopy(state.hierarchy_model)
+        reference_centers = _snapshot_hierarchy_centers(current_model)
+        moved = current_model.nodes[""].centers[0].copy()
+        moved[0] += 0.25
+        moved /= np.linalg.norm(moved)
+        current_model.nodes[""].centers[0] = moved
+        movement = float(
+            np.linalg.norm(moved - reference_centers[""][0])
+        )
+        contributions = {
+            "near": {
+                "projected": np.zeros(3),
+                "weights_by_path": {"": np.asarray([0.81, 0.01])},
+            },
+            "far": {
+                "projected": np.zeros(3),
+                "weights_by_path": {"": np.asarray([0.01, 0.81])},
+            },
+        }
+
+        selected, affected_paths, diagnostics = _select_center_affected_ids(
+            ["near", "far", "incoming"],
+            contributions,
+            reference_centers,
+            current_model,
+            always_include={"incoming"},
+            min_center_movement=movement * 0.5,
+            min_influence=movement * 0.5,
+        )
+
+        self.assertEqual(selected, ["near", "incoming"])
+        self.assertEqual(affected_paths, {""})
+        self.assertEqual(diagnostics["affected_center_cluster_count"], 1)
+
+    def test_selective_refresh_never_recomputes_all_note_memberships(self) -> None:
+        state = self._make_state(
+            center_refresh_interval=1,
+            max_xb_relative_degradation=1e12,
+        )
+        state.config.update(
+            {
+                "selective_membership_refresh": True,
+                "membership_refresh_min_center_movement": 1.0,
+                "membership_refresh_min_influence": 1.0,
+            }
+        )
+        state.membership_reference_centers = _snapshot_hierarchy_centers(
+            state.hierarchy_model
+        )
+        batch = np.asarray(
+            [[3.1, 0.4, 0.2, 0.0], [0.2, 3.2, 0.1, 0.0]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+
+        with (
+            patch(
+                "incremental_clustering.assign_to_hierarchy",
+                wraps=assign_to_hierarchy,
+            ) as assign,
+            patch(
+                "incremental_clustering._refresh_distance_thresholds",
+            ) as full_threshold_refresh,
+        ):
+            updated, summary = update_incremental_state(
+                state,
+                batch,
+                metadata,
+            )
+
+        membership_batch_sizes = [len(call.args[0]) for call in assign.call_args_list]
+        self.assertEqual(membership_batch_sizes, [2, 2])
+        full_threshold_refresh.assert_not_called()
+        self.assertEqual(summary["membership_refresh_scope"], "selective")
+        self.assertEqual(summary["membership_refresh_sample_count"], 2)
+        self.assertEqual(summary["membership_refresh_skipped_count"], len(self.X))
+        self.assertIs(
+            updated.center_contributions[0],
+            state.center_contributions[0],
+        )
+
+    def test_contribution_xb_matches_exact_xb_for_fresh_weights(self) -> None:
+        state = self._make_state()
+        approximate = _hierarchy_xb_from_contributions(
+            state.hierarchy_model,
+            state.center_contributions,
+        )
+        exact = hierarchy_xie_beni_index(
+            state.embeddings,
+            state.hierarchy_model,
+            min_membership=0.0,
+            m=2.0,
+        )
+        self.assertAlmostEqual(approximate, exact, places=12)
 
     def test_default_noise_threshold_is_five_percent(self) -> None:
         self.assertEqual(DEFAULT_NOISE_THRESHOLD, 0.05)
@@ -665,6 +770,7 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             loaded.center_statistics[""]["weighted_sum"],
             state.center_statistics[""]["weighted_sum"],
         )
+        self.assertEqual(loaded.membership_reference_centers.keys(), {""})
 
     def test_version_one_state_loads_without_center_statistics(self) -> None:
         state = self._make_state()
@@ -690,10 +796,40 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self.assertEqual(loaded.config["drift_min_samples"], 1)
         self.assertEqual(loaded.config["drift_ewma_alpha"], 1.0)
         self.assertEqual(loaded.config["recluster_cooldown_updates"], 0)
+        self.assertFalse(loaded.config["selective_membership_refresh"])
+        self.assertEqual(loaded.membership_reference_centers.keys(), {""})
         self.assertEqual(
             loaded.config["recluster_trigger_policy"],
             RECLUSTER_TRIGGER_POLICY,
         )
+
+    def test_version_five_state_keeps_full_membership_refresh(self) -> None:
+        state = self._make_state()
+        legacy_config = dict(state.config)
+        legacy_config["recluster_trigger_policy"] = RECLUSTER_TRIGGER_POLICY
+        legacy_config.pop("selective_membership_refresh", None)
+        payload = {
+            "version": 5,
+            "embeddings": state.embeddings,
+            "metadata": state.metadata,
+            "assignments": state.assignments,
+            "coordinates": state.coordinates,
+            "hierarchy_model": state.hierarchy_model,
+            "tree": state.tree,
+            "config": legacy_config,
+            "visual_pca": state.visual_pca,
+            "visual_reducer": state.visual_reducer,
+            "center_statistics": state.center_statistics,
+            "center_contributions": state.center_contributions,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "version-five.pkl"
+            with path.open("wb") as handle:
+                pickle.dump(payload, handle)
+            loaded = load_state(path)
+
+        self.assertFalse(loaded.config["selective_membership_refresh"])
+        self.assertEqual(loaded.membership_reference_centers.keys(), {""})
 
 
 if __name__ == "__main__":
