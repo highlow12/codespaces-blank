@@ -5,8 +5,9 @@
 
 `incremental_clustering.py`는 자동 선택된 클러스터링 PCA + 구면 FCM과
 자동 선택된 시각화 PCA + UMAP 모델을 상태 파일로 저장하고, 이후 임베딩을
-기존 클러스터에 배정한다. 신규 배치의 노이즈 비율이 `--noise-threshold`를
-초과하면 누적 전체 데이터로 자동 재클러스터링한다.
+기존 클러스터에 배정한다. 신규 배치의 natural-noise 비율은 최소 표본 수 단위로
+누적한 뒤 EWMA로 평활화한다. 평활 비율이 `--noise-threshold`를 초과하면 누적
+전체 데이터로 자동 재클러스터링한다.
 
 초기 `fit` 명령의 기본 동작은 클러스터링 PCA 후보(32부터)와 시각화 PCA 후보(16부터)를
 각각 k-NN 보존율로 선택하는 것이다. 선택된 실제 차원은 상태 파일의
@@ -21,6 +22,8 @@ AG News 검증에서는 라벨별 1,000개가 묶여 있는 원본 특성을 고
 python incremental_clustering.py fit \
   --input-json results_test/ag_news_embeddings_4x1000.json \
   --start 0 --limit 3600 \
+  --dataset-sample-size 800 \
+  --fast \
   --state-output results_incremental/ag_news_90.state.pkl \
   --assignments-output results_incremental/ag_news_90_assignments.csv \
   --coordinates-output results_incremental/ag_news_90_coordinates.csv \
@@ -57,8 +60,10 @@ densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는
 - 전체 소속도 재계산 시: 마지막 전체 재클러스터링 직후보다 계층 가중
   Xie-Beni 지수가 5% 이상 악화되면 누적 데이터 전체 재클러스터링
 - 전체 재클러스터링 시: 시각화 PCA·UMAP과 좌표는 유지
-- 신규 배치 노이즈 비율이 5%를 초과하면 주기를 기다리지 않고 긴급 전체
-  재클러스터링
+- 신규 natural-noise 표본을 20개 이상 모으면 배치 비율의 EWMA를 갱신
+- EWMA가 5%를 초과하면 주기를 기다리지 않고 긴급 전체 재클러스터링
+- EWMA가 2.5% 이하로 내려가야 드리프트 경보를 해제하는 hysteresis 적용
+- 전체 재클러스터링 후 3회 업데이트 동안 noise/XB 재클러스터링을 억제
 
 초기 `fit` 명령에서 주기를 변경할 수 있다.
 
@@ -66,12 +71,23 @@ densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는
 python incremental_clustering.py fit \
   ... \
   --center-updates-before-membership-refresh 10 \
-  --max-xb-relative-degradation 0.05
+  --max-xb-relative-degradation 0.05 \
+  --drift-min-samples 20 \
+  --drift-ewma-alpha 0.30 \
+  --noise-threshold 0.05 \
+  --noise-release-threshold 0.025 \
+  --recluster-cooldown-updates 3
 ```
 
 상태 파일에는 중심의 퍼지 충분통계량, 문서별 기여도, 다음 실행까지 남은
-카운터가 저장된다. 기존 버전 1·2 상태 파일은 첫 `update`에서 현재 모델
-기준으로 문서별 기여도를 복원한다.
+카운터와 EWMA·경보·cooldown 상태가 저장된다. 상태 버전은 6이다. 기존 버전
+1~5 상태 파일은 기존 즉시 판정 동작(`min_samples=1`, `alpha=1`, cooldown 없음)을
+유지하도록 마이그레이션하며, 첫 `update`에서 필요한 문서별 기여도를 복원한다.
+
+각 업데이트 요약에는 `center_movement_mean/max`,
+`cluster_occupancy_change`, `assignment_change_rate`가 포함된다. 작은 배치는
+`drift_pending_samples`에 누적되며, 실제 판정 여부와 EWMA 값은
+`drift_evaluated`, `drift_smoothed_noise_ratio`로 확인한다.
 
 ## 변경된 노트 교체
 
@@ -84,8 +100,9 @@ ID와 새 ID가 섞여 있어도 같은 규칙이 각각 적용된다.
 실제로 새 문서를 추가하는 경우에만 `--id-offset`으로 생성 인덱스 ID가 기존
 ID와 겹치지 않도록 한다.
 
-기본 긴급 재클러스터링 기준은 신규 배치 노이즈 비율 5% 초과다.
-`--noise-threshold 0.01`처럼 업데이트 명령에서 바꿀 수 있다.
+기본 긴급 재클러스터링 진입 기준은 평활 natural-noise 비율 5% 초과다.
+`--noise-threshold 0.01 --noise-release-threshold 0.005`처럼 업데이트 명령에서
+진입·해제 기준을 함께 바꿀 수 있다.
 
 ## FCM 클러스터 개수 자동 선택
 

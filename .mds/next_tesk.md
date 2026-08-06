@@ -1,5 +1,47 @@
 # 다음 작업
 
+## 2026-08-06 드리프트 판정 안정화 완료
+
+우선순위 1의 드리프트 판정 안정화를 구현했다.
+
+- 작은 배치는 natural-noise 개수와 표본 수를 누적하고, 기본 20개부터 판정한다.
+- 판정 비율에 기본 `alpha=0.30` EWMA를 적용한다.
+- 기본 진입 5%, 해제 2.5%의 hysteresis를 적용한다.
+- 재클러스터링 직후 기본 3회 업데이트 cooldown을 적용하며 noise와 XB 트리거를
+  함께 억제한다.
+- 중심 이동 평균/최대, 클러스터 점유율 총변동거리, 기존 ID assignment 변경률을
+  업데이트 요약과 상태에 저장한다.
+- 상태 버전을 6으로 올렸다. v1~v5 상태는 기존 즉시 판정 동작을 유지하도록
+  명시적으로 마이그레이션한다.
+- 급격한 소규모 배치 누적, 점진적 EWMA 상승, hysteresis 해제, 반복 트리거
+  cooldown 테스트를 추가했다.
+
+검증 결과:
+
+- 루트 테스트 49개 통과
+- `tests/` 테스트 20개 중 19개 통과
+- 남은 zero-length spherical FCM 테스트는 이 브랜치가 갈라진 뒤 `main`의
+  `1075ae7`에서 수정된 항목이므로 브랜치 동기화 시 반영한다.
+- `dbpedia_gemini_embeddings.json` 문서 3,000개 중 100개를 고정 시드로 추출한
+  `--fast --skip-visualization` 적합 통과
+
+빠른 검증은 전체 데이터 대신 고정 시드 축소 표본과 `--fast`를 사용한다.
+
+```bash
+./.venv/bin/python incremental_clustering.py fit \
+  --input-json dbpedia_gemini_embeddings.json \
+  --dataset-sample-size 100 \
+  --dataset-sample-seed 42 \
+  --fast \
+  --pca-components 32 \
+  --max-depth 2 \
+  --min-node-size 30 \
+  --min-child-size 10 \
+  --max-clusters 4 \
+  --state-output /tmp/incremental-drift-fast-smoke.pkl \
+  --skip-visualization
+```
+
 ## 2026-08-05 완료 상태
 
 작업 브랜치는 `refactor/incremental-delta-updates`, 워크트리는
@@ -37,10 +79,9 @@
 
 ## 다음 작업 우선순위
 
-### 1. 드리프트 판정 안정화
+### 1. 드리프트 판정 안정화 (완료)
 
-현재 새 배치의 natural noise 비율이 임계값을 넘으면 즉시 재클러스터링한다.
-작은 배치 하나에 지나치게 민감할 수 있으므로 다음을 추가한다.
+다음 항목을 완료했다.
 
 - 최소 판정 표본 수
 - 최근 배치 natural-noise 비율의 이동 창 또는 EWMA
@@ -49,8 +90,8 @@
 - 중심 이동량, 클러스터 점유율 변화, assignment 변경률 진단값
 - 급격한 드리프트와 점진적 드리프트에 대한 시계열 테스트
 
-기존 `noise_threshold`, XB degradation 정책과 상태 호환성을 유지해야 한다.
-새 설정에는 명시적인 기본값과 상태 마이그레이션을 둔다.
+기존 `noise_threshold`, XB degradation 정책과 상태 호환성을 유지했고 새 설정의
+기본값과 상태 마이그레이션을 추가했다.
 
 ### 2. 두 증분 엔진 통합
 
@@ -87,10 +128,9 @@ compact 형식과 과거 outer-product 형식의 메모리 비교 결과도 기�
 ## 재개 시 확인 명령
 
 ```bash
-cd /tmp/codespaces-blank-incremental-delta
+cd /workspaces/codespaces-blank
 git status --short --branch
-python -m unittest discover -v
-python -m unittest discover -s tests -v
+./.venv/bin/python -m unittest discover -s . -p 'test_*.py'
 ```
 
 두 번째 테스트 명령의 spherical zero-vector 선행 실패 여부는 `main`과 비교해서

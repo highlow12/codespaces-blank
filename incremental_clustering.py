@@ -64,9 +64,17 @@ from pca_projection import pca_projection_support
 
 
 DEFAULT_NOISE_THRESHOLD = 0.05
+DEFAULT_DRIFT_MIN_SAMPLES = 20
+DEFAULT_DRIFT_EWMA_ALPHA = 0.30
+DEFAULT_NOISE_RELEASE_RATIO = 0.50
+DEFAULT_RECLUSTER_COOLDOWN_UPDATES = 3
+DEFAULT_MEMBERSHIP_REFRESH_MIN_CENTER_MOVEMENT = 0.01
+DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE = 0.0025
 DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
 DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
 CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
+RECLUSTER_TRIGGER_POLICY = "xb_and_noise_stable_v3"
+STATE_VERSION = 6
 
 
 @dataclass
@@ -86,6 +94,9 @@ class IncrementalClusterState:
         default_factory=dict
     )
     center_contributions: dict[Any, dict[str, Any]] = field(
+        default_factory=dict
+    )
+    membership_reference_centers: dict[str, np.ndarray] = field(
         default_factory=dict
     )
 
@@ -121,6 +132,38 @@ def _validate_noise_threshold(value: float) -> float:
     if not 0.0 <= threshold <= 1.0:
         raise ValueError("noise_threshold must be between 0 and 1")
     return threshold
+
+
+def _validate_drift_settings(
+    *,
+    noise_threshold: float,
+    noise_release_threshold: float,
+    drift_min_samples: int,
+    drift_ewma_alpha: float,
+    recluster_cooldown_updates: int,
+) -> tuple[float, float, int, float, int]:
+    enter_threshold = _validate_noise_threshold(noise_threshold)
+    release_threshold = _validate_noise_threshold(noise_release_threshold)
+    if release_threshold > enter_threshold:
+        raise ValueError(
+            "noise_release_threshold must not exceed noise_threshold"
+        )
+    minimum_samples = int(drift_min_samples)
+    if minimum_samples < 1:
+        raise ValueError("drift_min_samples must be at least 1")
+    alpha = float(drift_ewma_alpha)
+    if not 0.0 < alpha <= 1.0:
+        raise ValueError("drift_ewma_alpha must be between 0 (exclusive) and 1")
+    cooldown = int(recluster_cooldown_updates)
+    if cooldown < 0:
+        raise ValueError("recluster_cooldown_updates must be non-negative")
+    return (
+        enter_threshold,
+        release_threshold,
+        minimum_samples,
+        alpha,
+        cooldown,
+    )
 
 
 def _path_for_cluster(parent_path: str, cluster_id: int) -> str:
@@ -835,6 +878,10 @@ def _cluster_config(
     pca_minimum_preservation_gain: float,
     seed: int,
     noise_threshold: float,
+    noise_release_threshold: float | None,
+    drift_min_samples: int,
+    drift_ewma_alpha: float,
+    recluster_cooldown_updates: int,
     visual_pca_components: int | None,
     visual_cluster_target_weight: float,
     visual_n_neighbors: int,
@@ -843,6 +890,9 @@ def _cluster_config(
     visual_spread: float,
     visual_densmap: bool,
     center_updates_before_membership_refresh: int,
+    selective_membership_refresh: bool,
+    membership_refresh_min_center_movement: float,
+    membership_refresh_min_influence: float,
     max_xb_relative_degradation: float,
     fuzzifier: float,
     max_fcm_iter: int,
@@ -860,10 +910,44 @@ def _cluster_config(
             "center_updates_before_membership_refresh must be at least 1"
         )
     if (
+        not np.isfinite(membership_refresh_min_center_movement)
+        or membership_refresh_min_center_movement < 0.0
+    ):
+        raise ValueError(
+            "membership_refresh_min_center_movement must be non-negative"
+        )
+    if (
+        not np.isfinite(membership_refresh_min_influence)
+        or membership_refresh_min_influence < 0.0
+    ):
+        raise ValueError(
+            "membership_refresh_min_influence must be non-negative"
+        )
+    if (
         not np.isfinite(max_xb_relative_degradation)
         or max_xb_relative_degradation < 0.0
     ):
         raise ValueError("max_xb_relative_degradation must be non-negative")
+    enter_threshold = _validate_noise_threshold(noise_threshold)
+    release_threshold_auto = noise_release_threshold is None
+    resolved_release_threshold = (
+        enter_threshold * DEFAULT_NOISE_RELEASE_RATIO
+        if noise_release_threshold is None
+        else noise_release_threshold
+    )
+    (
+        enter_threshold,
+        resolved_release_threshold,
+        drift_min_samples,
+        drift_ewma_alpha,
+        recluster_cooldown_updates,
+    ) = _validate_drift_settings(
+        noise_threshold=enter_threshold,
+        noise_release_threshold=resolved_release_threshold,
+        drift_min_samples=drift_min_samples,
+        drift_ewma_alpha=drift_ewma_alpha,
+        recluster_cooldown_updates=recluster_cooldown_updates,
+    )
     return {
         "max_depth": int(max_depth),
         "min_node_size": int(min_node_size),
@@ -903,7 +987,17 @@ def _cluster_config(
         "fast_refine_top_k": int(fast_refine_top_k),
         "fast_stability_target": float(fast_stability_target),
         "fast_m_values": [float(value) for value in fast_m_values],
-        "noise_threshold": _validate_noise_threshold(noise_threshold),
+        "noise_threshold": enter_threshold,
+        "noise_release_threshold": resolved_release_threshold,
+        "noise_release_threshold_auto": release_threshold_auto,
+        "drift_min_samples": drift_min_samples,
+        "drift_ewma_alpha": drift_ewma_alpha,
+        "drift_pending_samples": 0,
+        "drift_pending_natural_noise": 0,
+        "drift_ewma_noise_ratio": None,
+        "drift_alarm_active": False,
+        "recluster_cooldown_updates": recluster_cooldown_updates,
+        "recluster_cooldown_remaining": 0,
         "visual_pca_components": (
             None
             if visual_pca_components is None
@@ -925,13 +1019,20 @@ def _cluster_config(
         "center_updates_before_membership_refresh": int(
             center_updates_before_membership_refresh
         ),
+        "selective_membership_refresh": bool(selective_membership_refresh),
+        "membership_refresh_min_center_movement": float(
+            membership_refresh_min_center_movement
+        ),
+        "membership_refresh_min_influence": float(
+            membership_refresh_min_influence
+        ),
         "max_xb_relative_degradation": float(max_xb_relative_degradation),
         "center_updates_since_membership_refresh": 0,
         "membership_refreshes_since_recluster": 0,
         "total_center_updates": 0,
         "total_membership_refreshes": 0,
         "total_reclusters": 0,
-        "recluster_trigger_policy": "xb_and_noise_v2",
+        "recluster_trigger_policy": RECLUSTER_TRIGGER_POLICY,
         "center_contribution_format": CENTER_CONTRIBUTION_FORMAT,
     }
 
@@ -1056,6 +1157,36 @@ def _visualization_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
 
 def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
     initialized = dict(config)
+    legacy_policy = (
+        initialized.get("recluster_trigger_policy")
+        != RECLUSTER_TRIGGER_POLICY
+    )
+    threshold = _validate_noise_threshold(
+        initialized.get("noise_threshold", DEFAULT_NOISE_THRESHOLD)
+    )
+    initialized["noise_threshold"] = threshold
+    if legacy_policy:
+        # Preserve the immediate per-batch behavior of v1-v4 states. Newly
+        # fitted states use the stabilized defaults from _cluster_config.
+        initialized.setdefault("noise_release_threshold", threshold)
+        initialized.setdefault("noise_release_threshold_auto", False)
+        initialized.setdefault("drift_min_samples", 1)
+        initialized.setdefault("drift_ewma_alpha", 1.0)
+        initialized.setdefault("recluster_cooldown_updates", 0)
+        initialized.setdefault("selective_membership_refresh", False)
+    else:
+        initialized.setdefault(
+            "noise_release_threshold",
+            threshold * DEFAULT_NOISE_RELEASE_RATIO,
+        )
+        initialized.setdefault("noise_release_threshold_auto", True)
+        initialized.setdefault("drift_min_samples", DEFAULT_DRIFT_MIN_SAMPLES)
+        initialized.setdefault("drift_ewma_alpha", DEFAULT_DRIFT_EWMA_ALPHA)
+        initialized.setdefault(
+            "recluster_cooldown_updates",
+            DEFAULT_RECLUSTER_COOLDOWN_UPDATES,
+        )
+        initialized.setdefault("selective_membership_refresh", True)
     defaults = {
         "center_updates_before_membership_refresh": (
             DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
@@ -1066,10 +1197,361 @@ def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
         "total_center_updates": 0,
         "total_membership_refreshes": 0,
         "total_reclusters": 0,
+        "drift_pending_samples": 0,
+        "drift_pending_natural_noise": 0,
+        "drift_ewma_noise_ratio": None,
+        "drift_alarm_active": False,
+        "recluster_cooldown_remaining": 0,
+        "membership_refresh_min_center_movement": (
+            DEFAULT_MEMBERSHIP_REFRESH_MIN_CENTER_MOVEMENT
+        ),
+        "membership_refresh_min_influence": (
+            DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE
+        ),
     }
     for key, value in defaults.items():
         initialized.setdefault(key, value)
+    (
+        initialized["noise_threshold"],
+        initialized["noise_release_threshold"],
+        initialized["drift_min_samples"],
+        initialized["drift_ewma_alpha"],
+        initialized["recluster_cooldown_updates"],
+    ) = _validate_drift_settings(
+        noise_threshold=initialized["noise_threshold"],
+        noise_release_threshold=initialized["noise_release_threshold"],
+        drift_min_samples=initialized["drift_min_samples"],
+        drift_ewma_alpha=initialized["drift_ewma_alpha"],
+        recluster_cooldown_updates=initialized[
+            "recluster_cooldown_updates"
+        ],
+    )
+    initialized["recluster_trigger_policy"] = RECLUSTER_TRIGGER_POLICY
     return initialized
+
+
+def _evaluate_noise_drift(
+    config: dict[str, Any],
+    *,
+    natural_noise_count: int,
+    sample_count: int,
+) -> dict[str, Any]:
+    """Accumulate small batches and update the persisted EWMA alarm state."""
+
+    pending_samples = int(config["drift_pending_samples"]) + int(sample_count)
+    pending_noise = int(config["drift_pending_natural_noise"]) + int(
+        natural_noise_count
+    )
+    config["drift_pending_samples"] = pending_samples
+    config["drift_pending_natural_noise"] = pending_noise
+    evaluated = pending_samples >= int(config["drift_min_samples"])
+    observed_ratio: float | None = None
+    if evaluated:
+        observed_ratio = float(pending_noise / pending_samples)
+        previous_ewma = config.get("drift_ewma_noise_ratio")
+        if previous_ewma is None or not np.isfinite(float(previous_ewma)):
+            smoothed_ratio = observed_ratio
+        else:
+            alpha = float(config["drift_ewma_alpha"])
+            smoothed_ratio = (
+                alpha * observed_ratio
+                + (1.0 - alpha) * float(previous_ewma)
+            )
+        alarm_active = bool(config["drift_alarm_active"])
+        if alarm_active:
+            if smoothed_ratio <= float(config["noise_release_threshold"]):
+                alarm_active = False
+        elif smoothed_ratio > float(config["noise_threshold"]):
+            alarm_active = True
+        config["drift_ewma_noise_ratio"] = float(smoothed_ratio)
+        config["drift_alarm_active"] = alarm_active
+        config["drift_pending_samples"] = 0
+        config["drift_pending_natural_noise"] = 0
+    else:
+        previous_ewma = config.get("drift_ewma_noise_ratio")
+        smoothed_ratio = (
+            None
+            if previous_ewma is None
+            else float(previous_ewma)
+        )
+        alarm_active = bool(config["drift_alarm_active"])
+    return {
+        "evaluated": evaluated,
+        "evaluation_samples": pending_samples if evaluated else 0,
+        "observed_ratio": observed_ratio,
+        "smoothed_ratio": smoothed_ratio,
+        "alarm_active": alarm_active,
+        "pending_samples": int(config["drift_pending_samples"]),
+    }
+
+
+def _center_movement_diagnostics(
+    previous: HierarchicalModel,
+    current: HierarchicalModel,
+) -> dict[str, float | int]:
+    movements: list[np.ndarray] = []
+    for path, previous_node in previous.nodes.items():
+        current_node = current.nodes.get(path)
+        if current_node is None or current_node.centers.shape != previous_node.centers.shape:
+            continue
+        movements.append(
+            np.linalg.norm(current_node.centers - previous_node.centers, axis=1)
+        )
+    if not movements:
+        return {
+            "center_movement_mean": 0.0,
+            "center_movement_max": 0.0,
+            "center_movement_cluster_count": 0,
+        }
+    combined = np.concatenate(movements)
+    return {
+        "center_movement_mean": float(np.mean(combined)),
+        "center_movement_max": float(np.max(combined)),
+        "center_movement_cluster_count": int(len(combined)),
+    }
+
+
+def _snapshot_hierarchy_centers(
+    hierarchy_model: HierarchicalModel,
+) -> dict[str, np.ndarray]:
+    return {
+        path: node.centers.copy()
+        for path, node in hierarchy_model.nodes.items()
+    }
+
+
+def _select_center_affected_ids(
+    identifiers: list[Any],
+    center_contributions: dict[Any, dict[str, Any]],
+    reference_centers: dict[str, np.ndarray],
+    hierarchy_model: HierarchicalModel,
+    *,
+    always_include: set[Any],
+    min_center_movement: float,
+    min_influence: float,
+) -> tuple[list[Any], set[str], dict[str, Any]]:
+    """Select notes whose stored fuzzy weights amplify moved centers."""
+
+    moved_by_path: dict[str, np.ndarray] = {}
+    moved_cluster_count = 0
+    maximum_reference_movement = 0.0
+    for path, node in hierarchy_model.nodes.items():
+        reference = reference_centers.get(path)
+        if reference is None or reference.shape != node.centers.shape:
+            movements = np.full(node.centers.shape[0], np.inf)
+        else:
+            movements = np.linalg.norm(node.centers - reference, axis=1)
+        finite_movements = movements[np.isfinite(movements)]
+        if finite_movements.size:
+            maximum_reference_movement = max(
+                maximum_reference_movement,
+                float(np.max(finite_movements)),
+            )
+        moved = movements >= float(min_center_movement)
+        if np.any(moved):
+            moved_by_path[path] = movements
+            moved_cluster_count += int(np.sum(moved))
+
+    selected: list[Any] = []
+    for identifier in identifiers:
+        if identifier in always_include:
+            selected.append(identifier)
+            continue
+        contribution = center_contributions.get(identifier)
+        if contribution is None:
+            selected.append(identifier)
+            continue
+        for path, movements in moved_by_path.items():
+            stored_weights = contribution["weights_by_path"].get(path)
+            if stored_weights is None:
+                continue
+            weights = np.asarray(stored_weights, dtype=np.float64)
+            if weights.shape != movements.shape:
+                selected.append(identifier)
+                break
+            finite_movements = np.where(np.isfinite(movements), movements, np.inf)
+            influence = float(np.max(weights * finite_movements))
+            if influence >= float(min_influence):
+                selected.append(identifier)
+                break
+
+    return selected, set(moved_by_path), {
+        "affected_center_node_count": int(len(moved_by_path)),
+        "affected_center_cluster_count": int(moved_cluster_count),
+        "max_center_movement_since_membership_refresh": float(
+            maximum_reference_movement
+        ),
+    }
+
+
+def _select_embedding_rows_by_ids(
+    embeddings: np.ndarray,
+    metadata: pd.DataFrame,
+    identifiers: list[Any],
+) -> tuple[np.ndarray, pd.DataFrame]:
+    positions = {
+        identifier: index
+        for index, identifier in enumerate(metadata["id"].tolist())
+    }
+    try:
+        selected = [positions[identifier] for identifier in identifiers]
+    except KeyError as error:
+        raise ValueError("Metadata does not contain every selected ID") from error
+    return (
+        np.asarray(embeddings, dtype=np.float64)[selected].copy(),
+        metadata.iloc[selected].reset_index(drop=True).copy(),
+    )
+
+
+def _refresh_distance_thresholds_from_contributions(
+    hierarchy_model: HierarchicalModel,
+    center_contributions: dict[Any, dict[str, Any]],
+    affected_paths: set[str],
+    *,
+    distance_z: float,
+) -> HierarchicalModel:
+    """Refresh moved-node cutoffs without recomputing any memberships."""
+
+    updated_model = copy.deepcopy(hierarchy_model)
+    for path in affected_paths:
+        node = updated_model.nodes.get(path)
+        if node is None:
+            continue
+        projected_rows: list[np.ndarray] = []
+        stored_weight_rows: list[np.ndarray] = []
+        for contribution in center_contributions.values():
+            stored_weights = contribution["weights_by_path"].get(path)
+            if stored_weights is None:
+                continue
+            projected_rows.append(
+                np.asarray(contribution["projected"], dtype=np.float64)
+            )
+            stored_weight_rows.append(
+                np.asarray(stored_weights, dtype=np.float64)
+            )
+        if not projected_rows:
+            continue
+        projected = np.vstack(projected_rows)
+        weights = np.vstack(stored_weight_rows)
+        if weights.shape[1] != node.centers.shape[0]:
+            raise ValueError(
+                f"Center contribution shape mismatch at node: {path}"
+            )
+        labels = weights.argmax(axis=1)
+        distances = np.linalg.norm(
+            projected[:, None, :] - node.centers[None, :, :],
+            axis=2,
+        )
+        thresholds = node.distance_thresholds.copy()
+        for cluster_id in range(node.centers.shape[0]):
+            cluster_distances = distances[
+                labels == cluster_id,
+                cluster_id,
+            ]
+            if cluster_distances.size < 4:
+                continue
+            median = float(np.median(cluster_distances))
+            mad = float(np.median(np.abs(cluster_distances - median)))
+            thresholds[cluster_id] = (
+                np.inf
+                if mad <= 1e-12
+                else median + distance_z * 1.4826 * mad
+            )
+        node.distance_thresholds = thresholds
+    return updated_model
+
+
+def _hierarchy_xb_from_contributions(
+    hierarchy_model: HierarchicalModel,
+    center_contributions: dict[Any, dict[str, Any]],
+) -> float:
+    """Estimate hierarchy XB from persisted weights, without membership work."""
+
+    weighted_xb_sum = 0.0
+    evaluated_samples = 0
+    for path, node in hierarchy_model.nodes.items():
+        projected_rows: list[np.ndarray] = []
+        stored_weight_rows: list[np.ndarray] = []
+        for contribution in center_contributions.values():
+            stored_weights = contribution["weights_by_path"].get(path)
+            if stored_weights is None:
+                continue
+            projected_rows.append(
+                np.asarray(contribution["projected"], dtype=np.float64)
+            )
+            stored_weight_rows.append(
+                np.asarray(stored_weights, dtype=np.float64)
+            )
+        if not projected_rows or node.centers.shape[0] < 2:
+            continue
+        projected = np.vstack(projected_rows)
+        weights = np.vstack(stored_weight_rows)
+        if weights.shape[1] != node.centers.shape[0]:
+            raise ValueError(
+                f"Center contribution shape mismatch at node: {path}"
+            )
+        distances = np.linalg.norm(
+            projected[:, None, :] - node.centers[None, :, :],
+            axis=2,
+        )
+        center_differences = (
+            node.centers[:, None, :] - node.centers[None, :, :]
+        )
+        separation_squared = np.sum(center_differences**2, axis=2)
+        np.fill_diagonal(separation_squared, np.inf)
+        minimum_separation_squared = float(np.min(separation_squared))
+        if not np.isfinite(minimum_separation_squared):
+            continue
+        sample_count = len(projected)
+        numerator = float(np.sum(weights * (distances**2)))
+        node_xb = numerator / max(
+            sample_count * minimum_separation_squared,
+            1e-12,
+        )
+        weighted_xb_sum += node_xb * sample_count
+        evaluated_samples += sample_count
+    if evaluated_samples == 0:
+        return float("nan")
+    return float(weighted_xb_sum / evaluated_samples)
+
+
+def _cluster_occupancy_change(
+    previous: pd.DataFrame,
+    current: pd.DataFrame,
+) -> float:
+    previous_distribution = previous["cluster_path"].fillna("noise").value_counts(
+        normalize=True
+    )
+    current_distribution = current["cluster_path"].fillna("noise").value_counts(
+        normalize=True
+    )
+    labels = previous_distribution.index.union(current_distribution.index)
+    return float(
+        0.5
+        * np.abs(
+            previous_distribution.reindex(labels, fill_value=0.0)
+            - current_distribution.reindex(labels, fill_value=0.0)
+        ).sum()
+    )
+
+
+def _assignment_change_rate(
+    previous: pd.DataFrame,
+    current: pd.DataFrame,
+) -> tuple[float, int]:
+    previous_by_id = previous.set_index("id")
+    current_by_id = current.set_index("id")
+    shared_ids = previous_by_id.index.intersection(current_by_id.index)
+    if len(shared_ids) == 0:
+        return 0.0, 0
+    previous_paths = previous_by_id.loc[shared_ids, "cluster_path"].fillna("noise")
+    current_paths = current_by_id.loc[shared_ids, "cluster_path"].fillna("noise")
+    previous_noise = previous_by_id.loc[shared_ids, "is_noise"].astype(bool)
+    current_noise = current_by_id.loc[shared_ids, "is_noise"].astype(bool)
+    changed = (previous_paths.to_numpy() != current_paths.to_numpy()) | (
+        previous_noise.to_numpy() != current_noise.to_numpy()
+    )
+    return float(np.mean(changed)), int(len(shared_ids))
 
 
 def _hierarchy_xb(
@@ -1154,6 +1636,10 @@ def fit_incremental_state(
     pca_minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
     noise_threshold: float = DEFAULT_NOISE_THRESHOLD,
+    noise_release_threshold: float | None = None,
+    drift_min_samples: int = DEFAULT_DRIFT_MIN_SAMPLES,
+    drift_ewma_alpha: float = DEFAULT_DRIFT_EWMA_ALPHA,
+    recluster_cooldown_updates: int = DEFAULT_RECLUSTER_COOLDOWN_UPDATES,
     visual_pca_components: int | None = None,
     visual_cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
     visual_n_neighbors: int = 15,
@@ -1163,6 +1649,13 @@ def fit_incremental_state(
     visual_densmap: bool = False,
     center_updates_before_membership_refresh: int = (
         DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
+    ),
+    selective_membership_refresh: bool = True,
+    membership_refresh_min_center_movement: float = (
+        DEFAULT_MEMBERSHIP_REFRESH_MIN_CENTER_MOVEMENT
+    ),
+    membership_refresh_min_influence: float = (
+        DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE
     ),
     max_xb_relative_degradation: float = DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
     fuzzifier: float = 2.0,
@@ -1211,6 +1704,10 @@ def fit_incremental_state(
         pca_minimum_preservation_gain=pca_minimum_preservation_gain,
         seed=seed,
         noise_threshold=noise_threshold,
+        noise_release_threshold=noise_release_threshold,
+        drift_min_samples=drift_min_samples,
+        drift_ewma_alpha=drift_ewma_alpha,
+        recluster_cooldown_updates=recluster_cooldown_updates,
         visual_pca_components=visual_pca_components,
         visual_cluster_target_weight=visual_cluster_target_weight,
         visual_n_neighbors=visual_n_neighbors,
@@ -1221,6 +1718,11 @@ def fit_incremental_state(
         center_updates_before_membership_refresh=(
             center_updates_before_membership_refresh
         ),
+        selective_membership_refresh=selective_membership_refresh,
+        membership_refresh_min_center_movement=(
+            membership_refresh_min_center_movement
+        ),
+        membership_refresh_min_influence=membership_refresh_min_influence,
         max_xb_relative_degradation=max_xb_relative_degradation,
         fuzzifier=fuzzifier,
         max_fcm_iter=max_fcm_iter,
@@ -1272,6 +1774,9 @@ def fit_incremental_state(
         visual_reducer=visual_reducer,
         center_statistics=_aggregate_center_contributions(center_contributions),
         center_contributions=center_contributions,
+        membership_reference_centers=_snapshot_hierarchy_centers(
+            hierarchy_model
+        ),
     )
 
 
@@ -1685,6 +2190,7 @@ def update_incremental_state(
     metadata: pd.DataFrame,
     *,
     noise_threshold: float | None = None,
+    noise_release_threshold: float | None = None,
 ) -> tuple[IncrementalClusterState, dict[str, Any]]:
     """Update centers, memberships, and models on independent schedules."""
 
@@ -1707,12 +2213,40 @@ def update_incremental_state(
         identifier for identifier in incoming_ids if identifier not in existing_ids
     ]
 
-    threshold = _validate_noise_threshold(
-        state.config["noise_threshold"]
-        if noise_threshold is None
-        else noise_threshold
-    )
     config = _initialize_update_config(state.config)
+    threshold = _validate_noise_threshold(
+        config["noise_threshold"] if noise_threshold is None else noise_threshold
+    )
+    if noise_release_threshold is not None:
+        release_threshold = _validate_noise_threshold(
+            noise_release_threshold
+        )
+        config["noise_release_threshold_auto"] = False
+    elif bool(config.get("noise_release_threshold_auto", False)):
+        release_threshold = threshold * DEFAULT_NOISE_RELEASE_RATIO
+    else:
+        release_threshold = min(
+            float(config["noise_release_threshold"]),
+            threshold,
+        )
+    _validate_drift_settings(
+        noise_threshold=threshold,
+        noise_release_threshold=release_threshold,
+        drift_min_samples=config["drift_min_samples"],
+        drift_ewma_alpha=config["drift_ewma_alpha"],
+        recluster_cooldown_updates=config["recluster_cooldown_updates"],
+    )
+    config["noise_threshold"] = threshold
+    config["noise_release_threshold"] = release_threshold
+    membership_reference_centers = getattr(
+        state,
+        "membership_reference_centers",
+        None,
+    )
+    if not membership_reference_centers:
+        membership_reference_centers = _snapshot_hierarchy_centers(
+            state.hierarchy_model
+        )
     baseline_xie_beni = float(config.get("baseline_xie_beni", np.nan))
     if not np.isfinite(baseline_xie_beni):
         baseline_xie_beni = _hierarchy_xb(
@@ -1732,7 +2266,20 @@ def update_incremental_state(
         state.hierarchy_model,
         **_assignment_parameters(config, forced_noise_ratio=0.0),
     )
-    emergency_recluster = natural_noise_ratio > threshold
+    natural_noise_count = int(new_assignments["is_natural_noise"].sum())
+    drift = _evaluate_noise_drift(
+        config,
+        natural_noise_count=natural_noise_count,
+        sample_count=len(values),
+    )
+    cooldown_remaining_before_update = int(
+        config["recluster_cooldown_remaining"]
+    )
+    cooldown_active = cooldown_remaining_before_update > 0
+    emergency_recluster_requested = bool(
+        drift["evaluated"] and drift["alarm_active"]
+    )
+    emergency_recluster = emergency_recluster_requested and not cooldown_active
     new_coordinates = transform_projection(
         values,
         pca=state.visual_pca,
@@ -1758,7 +2305,6 @@ def update_incremental_state(
         or _merged_appended_ids != appended_ids
     ):
         raise RuntimeError("State row merge did not preserve incoming ID order")
-    config["noise_threshold"] = threshold
     config["update_count"] = int(config.get("update_count", 0)) + 1
 
     stored_contributions = getattr(state, "center_contributions", None)
@@ -1807,6 +2353,10 @@ def update_incremental_state(
         state.hierarchy_model,
         center_statistics,
     )
+    center_movement = _center_movement_diagnostics(
+        state.hierarchy_model,
+        hierarchy_model,
+    )
     config["center_updates_since_membership_refresh"] = (
         int(config["center_updates_since_membership_refresh"]) + 1
     )
@@ -1827,41 +2377,145 @@ def update_incremental_state(
 
     refreshed_assignments: pd.DataFrame | None = None
     refreshed_tree: dict[str, Any] | None = None
+    membership_refresh_scope = "none"
+    membership_refresh_sample_count = 0
+    membership_refresh_skipped_count = int(len(combined_embeddings))
+    membership_selection_diagnostics = {
+        "affected_center_node_count": 0,
+        "affected_center_cluster_count": 0,
+        "max_center_movement_since_membership_refresh": 0.0,
+    }
     current_xie_beni = float(config["current_xie_beni"])
     xb_relative_degradation: float | None = None
-    xb_degradation_recluster = False
+    xb_degradation_detected = False
     if membership_refreshed:
-        hierarchy_model = _refresh_distance_thresholds(
-            combined_embeddings,
-            hierarchy_model,
-            distance_z=float(config["distance_z"]),
-            **_fuzzy_parameters(config),
-        )
-        refreshed_assignments, _ = assign_to_hierarchy(
-            combined_embeddings,
-            combined_metadata,
-            hierarchy_model,
-            **_assignment_parameters(
-                config,
+        if bool(config["selective_membership_refresh"]):
+            membership_refresh_scope = "selective"
+            combined_ids = combined_metadata["id"].tolist()
+            (
+                refresh_ids,
+                affected_paths,
+                membership_selection_diagnostics,
+            ) = _select_center_affected_ids(
+                combined_ids,
+                center_contributions,
+                membership_reference_centers,
+                hierarchy_model,
+                always_include=set(incoming_ids),
+                min_center_movement=float(
+                    config["membership_refresh_min_center_movement"]
+                ),
+                min_influence=float(
+                    config["membership_refresh_min_influence"]
+                ),
+            )
+            membership_refresh_sample_count = len(refresh_ids)
+            membership_refresh_skipped_count = (
+                len(combined_embeddings) - len(refresh_ids)
+            )
+            hierarchy_model = _refresh_distance_thresholds_from_contributions(
+                hierarchy_model,
+                center_contributions,
+                affected_paths,
+                distance_z=float(config["distance_z"]),
+            )
+            refresh_embeddings, refresh_metadata = _select_embedding_rows_by_ids(
+                combined_embeddings,
+                combined_metadata,
+                refresh_ids,
+            )
+            refreshed_subset, _ = assign_to_hierarchy(
+                refresh_embeddings,
+                refresh_metadata,
+                hierarchy_model,
+                **_assignment_parameters(
+                    config,
+                    forced_noise_ratio=0.0,
+                ),
+            )
+            refreshed_assignments = _merge_assignments_by_id(
+                state.assignments,
+                new_assignments,
+            )
+            refreshed_assignments = _merge_assignments_by_id(
+                refreshed_assignments,
+                refreshed_subset,
+            )
+            refreshed_assignments = _apply_global_forced_noise(
+                refreshed_assignments,
                 forced_noise_ratio=forced_noise_ratio,
-            ),
-        )
+            )
+            refreshed_contributions = _center_contributions_for_batch(
+                refresh_embeddings,
+                refresh_metadata,
+                hierarchy_model,
+                **_fuzzy_parameters(config),
+            )
+            for identifier in refresh_ids:
+                previous = center_contributions.get(identifier)
+                if previous is not None:
+                    _apply_center_contribution_delta(
+                        center_statistics,
+                        previous,
+                        sign=-1.0,
+                    )
+                replacement = refreshed_contributions[identifier]
+                _apply_center_contribution_delta(
+                    center_statistics,
+                    replacement,
+                    sign=1.0,
+                )
+                center_contributions[identifier] = replacement
+            hierarchy_model, _ = _update_hierarchy_centers_from_statistics(
+                hierarchy_model,
+                center_statistics,
+            )
+            current_xie_beni = _hierarchy_xb_from_contributions(
+                hierarchy_model,
+                center_contributions,
+            )
+        else:
+            membership_refresh_scope = "full_legacy"
+            membership_refresh_sample_count = len(combined_embeddings)
+            membership_refresh_skipped_count = 0
+            hierarchy_model = _refresh_distance_thresholds(
+                combined_embeddings,
+                hierarchy_model,
+                distance_z=float(config["distance_z"]),
+                **_fuzzy_parameters(config),
+            )
+            refreshed_assignments, _ = assign_to_hierarchy(
+                combined_embeddings,
+                combined_metadata,
+                hierarchy_model,
+                **_assignment_parameters(
+                    config,
+                    forced_noise_ratio=forced_noise_ratio,
+                ),
+            )
+            center_contributions = _center_contributions_for_batch(
+                combined_embeddings,
+                combined_metadata,
+                hierarchy_model,
+                **_fuzzy_parameters(config),
+            )
+            center_statistics = _aggregate_center_contributions(
+                center_contributions
+            )
+            current_xie_beni = _hierarchy_xb(
+                combined_embeddings,
+                hierarchy_model,
+                config,
+            )
+        if refreshed_assignments is None:
+            raise RuntimeError("Membership refresh results are unavailable")
         refreshed_tree = _rebuild_tree_counts(
             state.tree,
             refreshed_assignments,
             int(config["update_count"]),
         )
-        center_contributions = _center_contributions_for_batch(
-            combined_embeddings,
-            combined_metadata,
-            hierarchy_model,
-            **_fuzzy_parameters(config),
-        )
-        center_statistics = _aggregate_center_contributions(center_contributions)
-        current_xie_beni = _hierarchy_xb(
-            combined_embeddings,
-            hierarchy_model,
-            config,
+        membership_reference_centers = _snapshot_hierarchy_centers(
+            hierarchy_model
         )
         config["current_xie_beni"] = current_xie_beni
         if np.isfinite(baseline_xie_beni) and np.isfinite(current_xie_beni):
@@ -1869,11 +2523,18 @@ def update_incremental_state(
                 (current_xie_beni - baseline_xie_beni)
                 / max(abs(baseline_xie_beni), 1e-12)
             )
-            xb_degradation_recluster = (
+            xb_degradation_detected = (
                 xb_relative_degradation
                 >= float(config["max_xb_relative_degradation"])
             )
 
+    xb_degradation_recluster = (
+        xb_degradation_detected and not cooldown_active
+    )
+    recluster_suppressed_by_cooldown = bool(
+        cooldown_active
+        and (emergency_recluster_requested or xb_degradation_detected)
+    )
     should_recluster = emergency_recluster or xb_degradation_recluster
 
     visualization_refitted = False
@@ -1903,6 +2564,12 @@ def update_incremental_state(
         current_xie_beni = baseline_xie_beni
         config["baseline_xie_beni"] = baseline_xie_beni
         config["current_xie_beni"] = current_xie_beni
+        config["recluster_cooldown_remaining"] = int(
+            config["recluster_cooldown_updates"]
+        )
+        membership_reference_centers = _snapshot_hierarchy_centers(
+            hierarchy_model
+        )
         reclustered = True
     elif membership_refreshed:
         if refreshed_assignments is None or refreshed_tree is None:
@@ -1935,11 +2602,25 @@ def update_incremental_state(
             )
         reclustered = False
 
+    if not should_recluster and cooldown_active:
+        config["recluster_cooldown_remaining"] = max(
+            cooldown_remaining_before_update - 1,
+            0,
+        )
+
     effective_new_assignments = _select_assignments_by_ids(
         assignments,
         incoming_ids,
     )
     new_noise_ratio = float(effective_new_assignments["is_noise"].mean())
+    occupancy_change = _cluster_occupancy_change(
+        state.assignments,
+        assignments,
+    )
+    assignment_change_rate, compared_assignment_count = _assignment_change_rate(
+        state.assignments,
+        assignments,
+    )
     config["last_update_noise_ratio"] = float(new_noise_ratio)
     config["last_update_natural_noise_ratio"] = float(natural_noise_ratio)
     config["last_update_reclustered"] = reclustered
@@ -1947,6 +2628,23 @@ def update_incremental_state(
     config["last_update_visualization_refitted"] = visualization_refitted
     config["last_xb_relative_degradation"] = xb_relative_degradation
     config["last_update_xb_degradation_recluster"] = xb_degradation_recluster
+    config["last_update_drift_evaluated"] = bool(drift["evaluated"])
+    config["last_update_emergency_recluster"] = emergency_recluster
+    config["last_center_movement_mean"] = center_movement[
+        "center_movement_mean"
+    ]
+    config["last_center_movement_max"] = center_movement[
+        "center_movement_max"
+    ]
+    config["last_cluster_occupancy_change"] = occupancy_change
+    config["last_assignment_change_rate"] = assignment_change_rate
+    config["last_membership_refresh_scope"] = membership_refresh_scope
+    config["last_membership_refresh_sample_count"] = int(
+        membership_refresh_sample_count
+    )
+    config["last_membership_refresh_skipped_count"] = int(
+        membership_refresh_skipped_count
+    )
     tree.setdefault("config", {}).update(
         {
             "center_updates_before_membership_refresh": int(
@@ -1961,8 +2659,21 @@ def update_incremental_state(
             "membership_refreshes_since_recluster": int(
                 config["membership_refreshes_since_recluster"]
             ),
+            "membership_refresh_scope": membership_refresh_scope,
+            "membership_refresh_sample_count": int(
+                membership_refresh_sample_count
+            ),
             "baseline_xie_beni": float(config["baseline_xie_beni"]),
             "current_xie_beni": float(config["current_xie_beni"]),
+            "noise_threshold": float(config["noise_threshold"]),
+            "noise_release_threshold": float(
+                config["noise_release_threshold"]
+            ),
+            "drift_ewma_noise_ratio": config["drift_ewma_noise_ratio"],
+            "drift_alarm_active": bool(config["drift_alarm_active"]),
+            "recluster_cooldown_remaining": int(
+                config["recluster_cooldown_remaining"]
+            ),
         }
     )
     tree.setdefault("summary", {}).update(
@@ -1986,6 +2697,7 @@ def update_incremental_state(
         visual_reducer=visual_reducer,
         center_statistics=center_statistics,
         center_contributions=center_contributions,
+        membership_reference_centers=membership_reference_centers,
     )
     summary = {
         "new_samples": int(len(values)),
@@ -2008,13 +2720,37 @@ def update_incremental_state(
         "new_noise_ratio": float(new_noise_ratio),
         "new_natural_noise_ratio": float(natural_noise_ratio),
         "noise_threshold": float(threshold),
+        "noise_release_threshold": float(release_threshold),
+        "drift_evaluated": bool(drift["evaluated"]),
+        "drift_evaluation_samples": int(drift["evaluation_samples"]),
+        "drift_observed_noise_ratio": drift["observed_ratio"],
+        "drift_smoothed_noise_ratio": drift["smoothed_ratio"],
+        "drift_alarm_active": bool(drift["alarm_active"]),
+        "drift_pending_samples": int(drift["pending_samples"]),
         "center_updated": updated_node_count > 0,
         "updated_center_nodes": int(updated_node_count),
+        **center_movement,
+        "cluster_occupancy_change": occupancy_change,
+        "assignment_change_rate": assignment_change_rate,
+        "compared_assignment_count": compared_assignment_count,
         "membership_refreshed": membership_refreshed,
+        "membership_refresh_scope": membership_refresh_scope,
+        "membership_refresh_sample_count": int(
+            membership_refresh_sample_count
+        ),
+        "membership_refresh_skipped_count": int(
+            membership_refresh_skipped_count
+        ),
+        **membership_selection_diagnostics,
         "xie_beni": float(current_xie_beni),
         "xb_relative_degradation": xb_relative_degradation,
         "xb_degradation_recluster": xb_degradation_recluster,
+        "xb_degradation_detected": xb_degradation_detected,
+        "emergency_recluster_requested": emergency_recluster_requested,
         "emergency_recluster": emergency_recluster,
+        "recluster_suppressed_by_cooldown": (
+            recluster_suppressed_by_cooldown
+        ),
         "reclustered": reclustered,
         "visualization_refitted": visualization_refitted,
         "center_updates_since_membership_refresh": int(
@@ -2022,6 +2758,9 @@ def update_incremental_state(
         ),
         "membership_refreshes_since_recluster": int(
             config["membership_refreshes_since_recluster"]
+        ),
+        "recluster_cooldown_remaining": int(
+            config["recluster_cooldown_remaining"]
         ),
         "total_samples": int(len(combined_embeddings)),
     }
@@ -2041,7 +2780,7 @@ def coordinates_frame(state: IncrementalClusterState) -> pd.DataFrame:
 def save_state(state: IncrementalClusterState, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(f".{path.name}.tmp")
-    config = dict(state.config)
+    config = _initialize_update_config(state.config)
     center_contributions = getattr(state, "center_contributions", {})
     if center_contributions and (
         config.get("center_contribution_format")
@@ -2052,7 +2791,7 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
         )
     config["center_contribution_format"] = CENTER_CONTRIBUTION_FORMAT
     payload = {
-        "version": 4,
+        "version": STATE_VERSION,
         "embeddings": state.embeddings,
         "metadata": state.metadata,
         "assignments": state.assignments,
@@ -2064,6 +2803,11 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
         "visual_reducer": state.visual_reducer,
         "center_statistics": state.center_statistics,
         "center_contributions": center_contributions,
+        "membership_reference_centers": getattr(
+            state,
+            "membership_reference_centers",
+            {},
+        ),
     }
     with temporary_path.open("wb") as handle:
         pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
@@ -2086,7 +2830,14 @@ def load_state(path: Path) -> IncrementalClusterState:
 
     if isinstance(payload, IncrementalClusterState):
         state = payload
-    elif isinstance(payload, dict) and payload.get("version") in {1, 2, 3, 4}:
+    elif isinstance(payload, dict) and payload.get("version") in {
+        1,
+        2,
+        3,
+        4,
+        5,
+        STATE_VERSION,
+    }:
         required_fields = (
             "embeddings",
             "metadata",
@@ -2103,6 +2854,10 @@ def load_state(path: Path) -> IncrementalClusterState:
         fields = {key: payload[key] for key in required_fields}
         fields["center_statistics"] = payload.get("center_statistics", {})
         fields["center_contributions"] = payload.get("center_contributions", {})
+        fields["membership_reference_centers"] = payload.get(
+            "membership_reference_centers",
+            {},
+        )
         state = IncrementalClusterState(**fields)
     else:
         raise ValueError(f"Invalid incremental state: {path}")
@@ -2110,13 +2865,14 @@ def load_state(path: Path) -> IncrementalClusterState:
         state.center_statistics = {}
     if not hasattr(state, "center_contributions"):
         state.center_contributions = {}
-    if state.config.get("recluster_trigger_policy") != "xb_and_noise_v2":
-        state.config["noise_threshold"] = DEFAULT_NOISE_THRESHOLD
-        state.config.setdefault(
-            "max_xb_relative_degradation",
-            DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
+    if (
+        not hasattr(state, "membership_reference_centers")
+        or not state.membership_reference_centers
+    ):
+        state.membership_reference_centers = _snapshot_hierarchy_centers(
+            state.hierarchy_model
         )
-        state.config["recluster_trigger_policy"] = "xb_and_noise_v2"
+    state.config = _initialize_update_config(state.config)
     _validate_embeddings(state.embeddings)
     _validate_metadata(state.metadata, len(state.embeddings))
     if len(state.assignments) != len(state.embeddings):
@@ -2353,7 +3109,34 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         "--noise-threshold",
         type=float,
         default=DEFAULT_NOISE_THRESHOLD,
-        help="Re-cluster when the new batch noise ratio exceeds this value.",
+        help="Activate the drift alarm when smoothed natural noise exceeds this value.",
+    )
+    parser.add_argument(
+        "--noise-release-threshold",
+        type=float,
+        default=None,
+        help=(
+            "Release the drift alarm below this value; defaults to half of "
+            "--noise-threshold."
+        ),
+    )
+    parser.add_argument(
+        "--drift-min-samples",
+        type=int,
+        default=DEFAULT_DRIFT_MIN_SAMPLES,
+        help="Accumulate at least this many new samples before drift evaluation.",
+    )
+    parser.add_argument(
+        "--drift-ewma-alpha",
+        type=float,
+        default=DEFAULT_DRIFT_EWMA_ALPHA,
+        help="EWMA weight for the newest natural-noise observation.",
+    )
+    parser.add_argument(
+        "--recluster-cooldown-updates",
+        type=int,
+        default=DEFAULT_RECLUSTER_COOLDOWN_UPDATES,
+        help="Suppress repeated re-clustering for this many updates.",
     )
     parser.add_argument(
         "--visual-pca-components",
@@ -2445,6 +3228,10 @@ def _run_fit(args: argparse.Namespace) -> None:
         pca_minimum_preservation_gain=args.pca_minimum_preservation_gain,
         seed=args.seed,
         noise_threshold=args.noise_threshold,
+        noise_release_threshold=args.noise_release_threshold,
+        drift_min_samples=args.drift_min_samples,
+        drift_ewma_alpha=args.drift_ewma_alpha,
+        recluster_cooldown_updates=args.recluster_cooldown_updates,
         visual_pca_components=args.visual_pca_components,
         visual_cluster_target_weight=args.visual_cluster_target_weight,
         visual_n_neighbors=args.visual_n_neighbors,
@@ -2511,6 +3298,7 @@ def _run_update(args: argparse.Namespace) -> None:
         embeddings,
         metadata,
         noise_threshold=args.noise_threshold,
+        noise_release_threshold=args.noise_release_threshold,
     )
     output_state = args.state_output or args.state
     save_state(updated_state, output_state)
@@ -2553,6 +3341,11 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("--state", type=Path, required=True)
     update_parser.add_argument("--state-output", type=Path, default=None)
     update_parser.add_argument("--noise-threshold", type=float, default=None)
+    update_parser.add_argument(
+        "--noise-release-threshold",
+        type=float,
+        default=None,
+    )
     _add_visual_output_args(update_parser)
     update_parser.set_defaults(handler=_run_update)
     return parser

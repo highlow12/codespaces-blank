@@ -14,9 +14,13 @@ from fcm_hierarchy import fit_pca_normalized_features, spherical_fcm
 from incremental_clustering import (
     CENTER_CONTRIBUTION_FORMAT,
     DEFAULT_NOISE_THRESHOLD,
+    RECLUSTER_TRIGGER_POLICY,
+    STATE_VERSION,
     IncrementalClusterState,
     _aggregate_center_contributions,
     _center_contributions_for_batch,
+    _evaluate_noise_drift,
+    _initialize_update_config,
     _rebuild_tree_counts,
     _update_hierarchy_centers_from_statistics,
     assign_to_hierarchy,
@@ -184,6 +188,10 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self.assertTrue(summary["center_updated"])
         self.assertFalse(summary["membership_refreshed"])
         self.assertFalse(summary["reclustered"])
+        self.assertGreater(summary["center_movement_max"], 0.0)
+        self.assertGreaterEqual(summary["cluster_occupancy_change"], 0.0)
+        self.assertGreaterEqual(summary["assignment_change_rate"], 0.0)
+        self.assertEqual(summary["compared_assignment_count"], len(self.X))
         self.assertGreater(
             np.max(
                 np.abs(
@@ -516,7 +524,130 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             previous_coordinates,
         )
 
-    def test_version_four_state_preserves_compact_center_statistics(self) -> None:
+    def test_small_abrupt_batches_accumulate_before_drift_evaluation(self) -> None:
+        config = _initialize_update_config(
+            {
+                "noise_threshold": 0.50,
+                "noise_release_threshold": 0.20,
+                "drift_min_samples": 10,
+                "drift_ewma_alpha": 0.50,
+                "recluster_cooldown_updates": 2,
+                "recluster_trigger_policy": RECLUSTER_TRIGGER_POLICY,
+            }
+        )
+
+        first = _evaluate_noise_drift(
+            config,
+            natural_noise_count=4,
+            sample_count=5,
+        )
+        second = _evaluate_noise_drift(
+            config,
+            natural_noise_count=4,
+            sample_count=5,
+        )
+
+        self.assertFalse(first["evaluated"])
+        self.assertEqual(first["pending_samples"], 5)
+        self.assertTrue(second["evaluated"])
+        self.assertEqual(second["evaluation_samples"], 10)
+        self.assertAlmostEqual(second["observed_ratio"], 0.8)
+        self.assertTrue(second["alarm_active"])
+
+        still_active = _evaluate_noise_drift(
+            config,
+            natural_noise_count=0,
+            sample_count=10,
+        )
+        released = _evaluate_noise_drift(
+            config,
+            natural_noise_count=0,
+            sample_count=10,
+        )
+        self.assertTrue(still_active["alarm_active"])
+        self.assertFalse(released["alarm_active"])
+
+    def test_gradual_drift_crosses_ewma_threshold_over_time(self) -> None:
+        config = _initialize_update_config(
+            {
+                "noise_threshold": 0.50,
+                "noise_release_threshold": 0.20,
+                "drift_min_samples": 10,
+                "drift_ewma_alpha": 0.50,
+                "recluster_cooldown_updates": 2,
+                "recluster_trigger_policy": RECLUSTER_TRIGGER_POLICY,
+            }
+        )
+
+        results = [
+            _evaluate_noise_drift(
+                config,
+                natural_noise_count=noise_count,
+                sample_count=10,
+            )
+            for noise_count in (1, 3, 5, 7)
+        ]
+
+        self.assertEqual(
+            [round(result["smoothed_ratio"], 3) for result in results],
+            [0.1, 0.2, 0.35, 0.525],
+        )
+        self.assertEqual(
+            [result["alarm_active"] for result in results],
+            [False, False, False, True],
+        )
+
+    def test_recluster_cooldown_suppresses_repeated_noise_trigger(self) -> None:
+        state = self._make_state(center_refresh_interval=10)
+        state.config.update(
+            {
+                "noise_threshold": DEFAULT_NOISE_THRESHOLD,
+                "noise_release_threshold": 0.02,
+                "drift_min_samples": 2,
+                "drift_ewma_alpha": 1.0,
+                "recluster_cooldown_updates": 2,
+                "recluster_trigger_policy": RECLUSTER_TRIGGER_POLICY,
+            }
+        )
+        summaries = []
+        for update_index in range(4):
+            batch = np.asarray(
+                [[3.0, 0.8, 0.4, 0.0], [0.4, 3.0, 0.2, 0.1]],
+                dtype=np.float64,
+            )
+            metadata = pd.DataFrame(
+                {"id": [300 + update_index * 2, 301 + update_index * 2]}
+            )
+            forced_assignments, _ = assign_to_hierarchy(
+                batch,
+                metadata,
+                state.hierarchy_model,
+                min_membership=0.0,
+                forced_noise_ratio=0.0,
+            )
+            forced_assignments["cluster"] = -1
+            forced_assignments["is_noise"] = True
+            forced_assignments["is_natural_noise"] = True
+            forced_assignments["document_type"] = "noise"
+            with patch(
+                "incremental_clustering.assign_to_hierarchy",
+                return_value=(forced_assignments, 1.0),
+            ):
+                state, summary = update_incremental_state(
+                    state,
+                    batch,
+                    metadata,
+                )
+            summaries.append(summary)
+
+        self.assertTrue(summaries[0]["reclustered"])
+        self.assertTrue(summaries[1]["recluster_suppressed_by_cooldown"])
+        self.assertTrue(summaries[2]["recluster_suppressed_by_cooldown"])
+        self.assertFalse(summaries[1]["reclustered"])
+        self.assertFalse(summaries[2]["reclustered"])
+        self.assertTrue(summaries[3]["reclustered"])
+
+    def test_current_state_version_preserves_compact_center_statistics(self) -> None:
         state = self._make_state()
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "state.pkl"
@@ -524,7 +655,7 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             with path.open("rb") as handle:
                 payload = pickle.load(handle)
             loaded = load_state(path)
-        self.assertEqual(payload["version"], 4)
+        self.assertEqual(payload["version"], STATE_VERSION)
         self.assertEqual(loaded.center_statistics.keys(), {""})
         self.assertEqual(
             loaded.config["center_contribution_format"],
@@ -555,10 +686,13 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
                 pickle.dump(payload, handle)
             loaded = load_state(path)
         self.assertEqual(loaded.center_statistics, {})
-        self.assertEqual(loaded.config["noise_threshold"], 0.05)
+        self.assertEqual(loaded.config["noise_threshold"], 1.0)
+        self.assertEqual(loaded.config["drift_min_samples"], 1)
+        self.assertEqual(loaded.config["drift_ewma_alpha"], 1.0)
+        self.assertEqual(loaded.config["recluster_cooldown_updates"], 0)
         self.assertEqual(
             loaded.config["recluster_trigger_policy"],
-            "xb_and_noise_v2",
+            RECLUSTER_TRIGGER_POLICY,
         )
 
 
