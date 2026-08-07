@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import os
 import pickle
 import sys
 import warnings
@@ -48,6 +47,18 @@ from fcm_hierarchy import (
     run_hierarchical_pca_fcm,
     transform_pca_normalized_features,
 )
+from incremental_core import (
+    atomic_pickle_dump,
+    batch_fingerprint,
+    checked_state_envelope,
+    find_processed_batch,
+    merge_rows_by_id,
+    remember_processed_batch,
+    replay_summary,
+    resolve_batch_id,
+    state_file_lock,
+    unwrap_state_envelope,
+)
 from hierarchical_assignments import (
     build_hierarchical_assignments as _assignments_from_labels,
 )
@@ -74,7 +85,7 @@ DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH = 10
 DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
 CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
 RECLUSTER_TRIGGER_POLICY = "xb_and_noise_stable_v3"
-STATE_VERSION = 6
+STATE_VERSION = 7
 
 
 @dataclass
@@ -1016,6 +1027,8 @@ def _cluster_config(
         "visual_spread": float(visual_spread),
         "visual_densmap": bool(visual_densmap),
         "update_count": 0,
+        "state_generation": 0,
+        "processed_batches": {},
         "center_updates_before_membership_refresh": int(
             center_updates_before_membership_refresh
         ),
@@ -1188,6 +1201,8 @@ def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
         )
         initialized.setdefault("selective_membership_refresh", True)
     defaults = {
+        "state_generation": 0,
+        "processed_batches": {},
         "center_updates_before_membership_refresh": (
             DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
         ),
@@ -1808,82 +1823,22 @@ def _merge_state_rows_by_id(
     list[Any],
 ]:
     """Replace existing rows by ID and append IDs not seen in the state."""
-
-    existing_frame = _validate_metadata(
-        existing_metadata,
-        len(existing_embeddings),
+    existing_frame = _validate_metadata(existing_metadata, len(existing_embeddings))
+    incoming_frame = _validate_metadata(incoming_metadata, len(incoming_embeddings))
+    merged = merge_rows_by_id(
+        existing_embeddings,
+        existing_frame,
+        incoming_embeddings,
+        incoming_frame,
+        existing_coordinates=existing_coordinates,
+        incoming_coordinates=incoming_coordinates,
     )
-    incoming_frame = _validate_metadata(
-        incoming_metadata,
-        len(incoming_embeddings),
-    )
-    if existing_coordinates.shape != (len(existing_embeddings), 2):
-        raise ValueError("State coordinates must have shape (samples, 2)")
-    if incoming_coordinates.shape != (len(incoming_embeddings), 2):
-        raise ValueError("Incoming coordinates must have shape (samples, 2)")
-
-    existing_ids = existing_frame["id"].tolist()
-    incoming_ids = incoming_frame["id"].tolist()
-    existing_positions = {
-        identifier: index for index, identifier in enumerate(existing_ids)
-    }
-    incoming_positions = {
-        identifier: index for index, identifier in enumerate(incoming_ids)
-    }
-    replaced_ids = [
-        identifier
-        for identifier in incoming_ids
-        if identifier in existing_positions
-    ]
-    appended_ids = [
-        identifier
-        for identifier in incoming_ids
-        if identifier not in existing_positions
-    ]
-
-    merged_embeddings = np.asarray(existing_embeddings, dtype=np.float64).copy()
-    merged_coordinates = np.asarray(existing_coordinates, dtype=np.float64).copy()
-    for identifier in replaced_ids:
-        existing_index = existing_positions[identifier]
-        incoming_index = incoming_positions[identifier]
-        merged_embeddings[existing_index] = incoming_embeddings[incoming_index]
-        merged_coordinates[existing_index] = incoming_coordinates[incoming_index]
-
-    if appended_ids:
-        appended_indices = [
-            incoming_positions[identifier] for identifier in appended_ids
-        ]
-        merged_embeddings = np.vstack(
-            [merged_embeddings, incoming_embeddings[appended_indices]]
-        )
-        merged_coordinates = np.vstack(
-            [merged_coordinates, incoming_coordinates[appended_indices]]
-        )
-
-    columns = list(dict.fromkeys([*existing_frame.columns, *incoming_frame.columns]))
-    existing_aligned = existing_frame.reindex(columns=columns).astype(object)
-    incoming_aligned = incoming_frame.reindex(columns=columns).astype(object)
-    merged_metadata = existing_aligned.copy()
-    for identifier in replaced_ids:
-        existing_index = existing_positions[identifier]
-        incoming_index = incoming_positions[identifier]
-        merged_metadata.iloc[existing_index, :] = incoming_aligned.iloc[
-            incoming_index
-        ].to_numpy()
-    if appended_ids:
-        appended_indices = [
-            incoming_positions[identifier] for identifier in appended_ids
-        ]
-        merged_metadata = pd.concat(
-            [merged_metadata, incoming_aligned.iloc[appended_indices]],
-            ignore_index=True,
-        )
     return (
-        merged_embeddings,
-        merged_metadata.reset_index(drop=True),
-        merged_coordinates,
-        replaced_ids,
-        appended_ids,
+        merged.embeddings,
+        merged.metadata,
+        merged.coordinates,
+        merged.replaced_ids,
+        merged.appended_ids,
     )
 
 
@@ -2193,6 +2148,7 @@ def update_incremental_state(
     *,
     noise_threshold: float | None = None,
     noise_release_threshold: float | None = None,
+    batch_id: str | None = None,
 ) -> tuple[IncrementalClusterState, dict[str, Any]]:
     """Update centers, memberships, and models on independent schedules."""
 
@@ -2200,6 +2156,15 @@ def update_incremental_state(
     frame = _validate_metadata(metadata, len(values))
     if values.shape[1] != state.embeddings.shape[1]:
         raise ValueError("new embeddings have a different dimensionality")
+    fingerprint = batch_fingerprint(values, frame)
+    resolved_batch_id = resolve_batch_id(batch_id, fingerprint)
+    replay = find_processed_batch(
+        state.config.get("processed_batches", {}),
+        resolved_batch_id,
+        fingerprint,
+    )
+    if replay is not None:
+        return state, replay_summary(replay, batch_id=resolved_batch_id)
     if state.visual_pca is None or state.visual_reducer is None:
         raise ValueError(
             "This state deferred visualization; fit a final state without "
@@ -2647,6 +2612,8 @@ def update_incremental_state(
     config["last_membership_refresh_skipped_count"] = int(
         membership_refresh_skipped_count
     )
+    generation = int(config.get("state_generation", 0)) + 1
+    config["state_generation"] = generation
     tree.setdefault("config", {}).update(
         {
             "center_updates_before_membership_refresh": int(
@@ -2676,6 +2643,8 @@ def update_incremental_state(
             "recluster_cooldown_remaining": int(
                 config["recluster_cooldown_remaining"]
             ),
+            "state_generation": int(config["state_generation"]),
+            "processed_batch_count": len(config.get("processed_batches", {})),
         }
     )
     tree.setdefault("summary", {}).update(
@@ -2765,7 +2734,17 @@ def update_incremental_state(
             config["recluster_cooldown_remaining"]
         ),
         "total_samples": int(len(combined_embeddings)),
+        "batch_id": resolved_batch_id,
+        "idempotent_replay": False,
+        "generation": generation,
     }
+    config["processed_batches"] = remember_processed_batch(
+        config.get("processed_batches"),
+        batch_id=resolved_batch_id,
+        fingerprint=fingerprint,
+        summary=summary,
+        generation=generation,
+    )
     return updated_state, summary
 
 
@@ -2779,9 +2758,18 @@ def coordinates_frame(state: IncrementalClusterState) -> pd.DataFrame:
     )
 
 
-def save_state(state: IncrementalClusterState, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_name(f".{path.name}.tmp")
+def save_state(
+    state: IncrementalClusterState,
+    path: Path,
+    *,
+    lock: bool = True,
+) -> None:
+    """Persist a checked, atomically replaced state file.
+
+    ``lock=False`` is intended for callers that already hold the source state
+    lock while performing a load-update-save transaction.
+    """
+
     config = _initialize_update_config(state.config)
     center_contributions = getattr(state, "center_contributions", {})
     if center_contributions and (
@@ -2811,9 +2799,12 @@ def save_state(state: IncrementalClusterState, path: Path) -> None:
             {},
         ),
     }
-    with temporary_path.open("wb") as handle:
-        pickle.dump(payload, handle, protocol=pickle.HIGHEST_PROTOCOL)
-    os.replace(temporary_path, path)
+    envelope = checked_state_envelope(payload)
+    if lock:
+        with state_file_lock(path):
+            atomic_pickle_dump(envelope, path)
+    else:
+        atomic_pickle_dump(envelope, path)
 
 
 def load_state(path: Path) -> IncrementalClusterState:
@@ -2830,6 +2821,9 @@ def load_state(path: Path) -> IncrementalClusterState:
             except Exception:
                 raise error
 
+    if isinstance(payload, dict):
+        payload = unwrap_state_envelope(payload)
+
     if isinstance(payload, IncrementalClusterState):
         state = payload
     elif isinstance(payload, dict) and payload.get("version") in {
@@ -2838,6 +2832,7 @@ def load_state(path: Path) -> IncrementalClusterState:
         3,
         4,
         5,
+        6,
         STATE_VERSION,
     }:
         required_fields = (
@@ -2880,10 +2875,20 @@ def load_state(path: Path) -> IncrementalClusterState:
     state.config = _initialize_update_config(state.config)
     _validate_embeddings(state.embeddings)
     _validate_metadata(state.metadata, len(state.embeddings))
+    _validate_metadata(state.assignments, len(state.embeddings))
+    if state.metadata["id"].tolist() != state.assignments["id"].tolist():
+        raise ValueError("State metadata and assignments IDs do not align")
     if len(state.assignments) != len(state.embeddings):
         raise ValueError("State assignments and embeddings do not align")
+    state.coordinates = np.asarray(state.coordinates, dtype=np.float64)
     if state.coordinates.shape != (len(state.embeddings), 2):
         raise ValueError("State coordinates must have shape (samples, 2)")
+    if not np.all(np.isfinite(state.coordinates)):
+        raise ValueError("State coordinates must contain only finite values")
+    if int(state.config["state_generation"]) < 0:
+        raise ValueError("State generation must be non-negative")
+    if not isinstance(state.config.get("processed_batches"), dict):
+        raise ValueError("State processed_batches must be a dictionary")
     return state
 
 
@@ -3317,22 +3322,28 @@ def _run_fit(args: argparse.Namespace) -> None:
 
 
 def _run_update(args: argparse.Namespace) -> None:
-    state = load_state(args.state)
-    embeddings, metadata = load_embeddings_from_json(
-        args.input_json,
-        start=args.start,
-        limit=args.limit,
-        id_offset=args.id_offset,
-    )
-    updated_state, summary = update_incremental_state(
-        state,
-        embeddings,
-        metadata,
-        noise_threshold=args.noise_threshold,
-        noise_release_threshold=args.noise_release_threshold,
-    )
     output_state = args.state_output or args.state
-    save_state(updated_state, output_state)
+    with state_file_lock(args.state):
+        state = load_state(args.state)
+        embeddings, metadata = load_embeddings_from_json(
+            args.input_json,
+            start=args.start,
+            limit=args.limit,
+            id_offset=args.id_offset,
+        )
+        updated_state, summary = update_incremental_state(
+            state,
+            embeddings,
+            metadata,
+            noise_threshold=args.noise_threshold,
+            noise_release_threshold=args.noise_release_threshold,
+            batch_id=args.batch_id,
+        )
+        save_state(
+            updated_state,
+            output_state,
+            lock=output_state != args.state,
+        )
     write_outputs(
         updated_state,
         assignments_output=args.assignments_output
@@ -3371,6 +3382,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_input_args(update_parser)
     update_parser.add_argument("--state", type=Path, required=True)
     update_parser.add_argument("--state-output", type=Path, default=None)
+    update_parser.add_argument(
+        "--batch-id",
+        type=str,
+        default=None,
+        help=(
+            "Stable identifier for this update batch. Reusing it with the "
+            "same content is idempotent; omitting it derives an ID from the "
+            "batch content."
+        ),
+    )
     update_parser.add_argument("--noise-threshold", type=float, default=None)
     update_parser.add_argument(
         "--noise-release-threshold",

@@ -1,9 +1,13 @@
+import gzip
+import json
+import tempfile
 import unittest
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from embedding_data import sample_embedding_batch
+from embedding_data import load_embeddings_from_json, sample_embedding_batch
 
 
 class EmbeddingDataSamplingTests(unittest.TestCase):
@@ -64,6 +68,24 @@ class EmbeddingDataSamplingTests(unittest.TestCase):
                 self.metadata.iloc[:-1],
                 sample_size=4,
             )
+
+    def test_loader_accepts_gzip_json(self) -> None:
+        records = [
+            {"id": "one", "embedding": [1.0, 0.0, 0.0]},
+            {"id": "two", "embedding": [0.0, 1.0, 0.0]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "embeddings.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                json.dump(records, handle)
+
+            embeddings, metadata = load_embeddings_from_json(path)
+
+        np.testing.assert_array_equal(
+            embeddings,
+            np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        )
+        self.assertEqual(metadata["id"].tolist(), ["one", "two"])
 
 
 if __name__ == "__main__":

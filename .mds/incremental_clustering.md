@@ -94,8 +94,8 @@ python incremental_clustering.py fit \
 
 상태 파일에는 중심의 퍼지 충분통계량, 문서별 기여도, 다음 실행까지 남은
 카운터, 마지막 membership 갱신 중심 스냅샷과 EWMA·경보·cooldown 상태가
-저장된다. 상태 버전은 6이다. 기존 버전
-1~5 상태 파일은 기존 즉시 판정 동작(`min_samples=1`, `alpha=1`, cooldown 없음)을
+저장된다. 상태 버전은 7이다. 기존 버전
+1~6 상태 파일은 기존 즉시 판정 동작(`min_samples=1`, `alpha=1`, cooldown 없음)을
 유지하도록 마이그레이션하며, 첫 `update`에서 필요한 문서별 기여도를 복원한다.
 
 각 업데이트 요약에는 `center_movement_mean/max`,
@@ -104,6 +104,23 @@ python incremental_clustering.py fit \
 `drift_evaluated`, `drift_smoothed_noise_ratio`로 확인한다. 선택 갱신 범위는
 `membership_refresh_scope`, `membership_refresh_sample_count`,
 `membership_refresh_skipped_count`로 확인한다.
+
+각 `update`는 `--batch-id`를 지정할 수 있다. 같은 ID와 같은 입력을 다시 실행하면
+기존 상태를 변경하지 않고 replay 요약만 반환한다. 같은 ID를 다른 임베딩·메타데이터와
+함께 사용하면 오류로 중단한다. ID를 생략하면 입력 내용의 fingerprint로 자동 ID를
+만들어 동일 batch의 재실행을 멱등 처리한다.
+
+상태 파일은 SHA-256 checksum envelope와 atomic replace로 저장된다. CLI update는
+상태 파일 옆의 lock을 잡고 load→update→save를 수행하므로 동시 update가 서로의
+결과를 덮어쓰지 않는다.
+
+```bash
+./.venv/bin/python incremental_clustering.py update \
+  --state results_incremental/model.state.pkl \
+  --input-json dbpedia_gemini_embeddings.json.gz \
+  --batch-id gemini-batch-2026-08-07 \
+  --state-output results_incremental/model.updated.state.pkl
+```
 
 ## 변경된 노트 교체
 

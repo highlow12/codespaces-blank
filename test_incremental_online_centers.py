@@ -527,6 +527,58 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         )
         self.assertAlmostEqual(approximate, exact, places=12)
 
+    def test_update_is_idempotent_by_batch_id(self) -> None:
+        state = self._make_state(center_refresh_interval=50)
+        batch = np.asarray(
+            [[3.1, 0.4, 0.2, 0.0], [0.2, 3.2, 0.1, 0.0]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+
+        updated, first_summary = update_incremental_state(
+            state,
+            batch,
+            metadata,
+            batch_id="hierarchical-batch-1",
+        )
+        replayed, replay_summary = update_incremental_state(
+            updated,
+            batch,
+            metadata,
+            batch_id="hierarchical-batch-1",
+        )
+
+        self.assertFalse(first_summary["idempotent_replay"])
+        self.assertTrue(replay_summary["idempotent_replay"])
+        self.assertIs(replayed, updated)
+        self.assertEqual(updated.config["state_generation"], 1)
+        self.assertEqual(replay_summary["generation"], 1)
+        self.assertEqual(len(updated.embeddings), len(state.embeddings) + 2)
+
+        changed_batch = batch.copy()
+        changed_batch[0, 0] += 0.2
+        with self.assertRaisesRegex(ValueError, "different content"):
+            update_incremental_state(
+                updated,
+                changed_batch,
+                metadata,
+                batch_id="hierarchical-batch-1",
+            )
+
+    def test_state_checksum_rejects_tampering(self) -> None:
+        state = self._make_state()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "state.pkl"
+            save_state(state, path)
+            with path.open("rb") as handle:
+                envelope = pickle.load(handle)
+            envelope["checksum"] = "0" * 64
+            with path.open("wb") as handle:
+                pickle.dump(envelope, handle)
+
+            with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+                load_state(path)
+
     def test_default_noise_threshold_is_five_percent(self) -> None:
         self.assertEqual(DEFAULT_NOISE_THRESHOLD, 0.05)
 
@@ -758,8 +810,10 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             path = Path(directory) / "state.pkl"
             save_state(state, path)
             with path.open("rb") as handle:
-                payload = pickle.load(handle)
+                envelope = pickle.load(handle)
+            payload = pickle.loads(envelope["payload_bytes"])
             loaded = load_state(path)
+        self.assertEqual(envelope["format"], "incremental_state_envelope_v1")
         self.assertEqual(payload["version"], STATE_VERSION)
         self.assertEqual(loaded.center_statistics.keys(), {""})
         self.assertEqual(

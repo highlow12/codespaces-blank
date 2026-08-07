@@ -116,6 +116,50 @@ class FullPipelineTest(unittest.TestCase):
             updated.metadata.loc[2:, "incremental_operation"].isna().all()
         )
 
+    def test_incremental_update_is_idempotent_by_batch_id(self) -> None:
+        split = make_incremental_test_split(
+            self.embeddings,
+            self.metadata,
+            seed=12,
+        )
+        state = fit_auto_pca_sfcm(
+            split.initial_embeddings,
+            split.initial_metadata,
+            min_clusters=2,
+            max_clusters=2,
+            min_child_size=2,
+            seed=12,
+        )
+
+        updated, first_summary = update_auto_pca_sfcm(
+            state,
+            split.update_embeddings,
+            split.update_metadata,
+            batch_id="flat-batch-1",
+        )
+        replayed, replay_summary = update_auto_pca_sfcm(
+            updated,
+            split.update_embeddings,
+            split.update_metadata,
+            batch_id="flat-batch-1",
+        )
+
+        self.assertFalse(first_summary["idempotent_replay"])
+        self.assertTrue(replay_summary["idempotent_replay"])
+        self.assertIs(replayed, updated)
+        self.assertEqual(updated.generation, 1)
+        self.assertEqual(replay_summary["generation"], 1)
+
+        changed_embeddings = split.update_embeddings.copy()
+        changed_embeddings[0, 0] += 0.25
+        with self.assertRaisesRegex(ValueError, "different content"):
+            update_auto_pca_sfcm(
+                updated,
+                changed_embeddings,
+                split.update_metadata,
+                batch_id="flat-batch-1",
+            )
+
     def test_fast_fit_searches_fuzzifier_and_preserves_selected_value(self) -> None:
         fast_config = FastFcmConfig(
             sample_size=20,

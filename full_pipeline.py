@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,14 @@ from fcm_core import (
 )
 from fcm_validity import select_fcm_cluster_count
 from fuzzy_cmeans import SphericalGeometry
+from incremental_core import (
+    batch_fingerprint,
+    find_processed_batch,
+    merge_rows_by_id,
+    remember_processed_batch,
+    replay_summary,
+    resolve_batch_id,
+)
 from visualization_pca_dimension_selection import (
     VisualizationPcaDimensionSelection,
     select_visualization_pca_dimension_for_data,
@@ -59,6 +67,8 @@ class AutoPcaSfcmState:
     cluster_selection_metrics: list[dict[str, Any]]
     m: float = 2.0
     fast_mode: bool = False
+    generation: int = 0
+    processed_batches: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -160,6 +170,8 @@ def fit_auto_pca_sfcm(
         cluster_selection_metrics=selection_metrics,
         m=float(result.m),
         fast_mode=fast_mode,
+        generation=0,
+        processed_batches={},
     )
 
 
@@ -168,51 +180,41 @@ def _merge_updated_rows(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
 ) -> tuple[np.ndarray, pd.DataFrame, int, int]:
-    existing_positions = {
-        identifier: index
-        for index, identifier in enumerate(state.metadata["id"].tolist())
-    }
-    incoming_positions = {
-        identifier: index for index, identifier in enumerate(metadata["id"].tolist())
-    }
-    replaced_ids = [
-        identifier for identifier in incoming_positions if identifier in existing_positions
-    ]
-    appended_ids = [
-        identifier for identifier in incoming_positions if identifier not in existing_positions
-    ]
-
-    columns = list(dict.fromkeys([*state.metadata.columns, *metadata.columns]))
-    merged_metadata = state.metadata.reindex(columns=columns).astype(object)
-    incoming_metadata = metadata.reindex(columns=columns).astype(object)
-    merged_embeddings = state.embeddings.copy()
-    for identifier in replaced_ids:
-        merged_embeddings[existing_positions[identifier]] = embeddings[
-            incoming_positions[identifier]
-        ]
-        merged_metadata.iloc[existing_positions[identifier], :] = (
-            incoming_metadata.iloc[incoming_positions[identifier]].to_numpy()
-        )
-    if appended_ids:
-        appended_positions = [incoming_positions[identifier] for identifier in appended_ids]
-        merged_embeddings = np.vstack([merged_embeddings, embeddings[appended_positions]])
-        merged_metadata = pd.concat(
-            [merged_metadata, incoming_metadata.iloc[appended_positions]],
-            ignore_index=True,
-        )
-    return merged_embeddings, merged_metadata, len(replaced_ids), len(appended_ids)
+    merged = merge_rows_by_id(
+        state.embeddings,
+        state.metadata,
+        embeddings,
+        metadata,
+    )
+    return (
+        merged.embeddings,
+        merged.metadata,
+        len(merged.replaced_ids),
+        len(merged.appended_ids),
+    )
 
 
 def update_auto_pca_sfcm(
     state: AutoPcaSfcmState,
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
-) -> tuple[AutoPcaSfcmState, dict[str, int]]:
+    *,
+    batch_id: str | None = None,
+) -> tuple[AutoPcaSfcmState, dict[str, Any]]:
     """Update SFCM centers without refitting the selected PCA projection."""
 
     incoming_embeddings, incoming_metadata = _validate_data(embeddings, metadata)
     if incoming_embeddings.shape[1] != state.embeddings.shape[1]:
         raise ValueError("incremental embeddings have a different dimensionality")
+    fingerprint = batch_fingerprint(incoming_embeddings, incoming_metadata)
+    resolved_batch_id = resolve_batch_id(batch_id, fingerprint)
+    replay = find_processed_batch(
+        getattr(state, "processed_batches", {}),
+        resolved_batch_id,
+        fingerprint,
+    )
+    if replay is not None:
+        return state, replay_summary(replay, batch_id=resolved_batch_id)
     (
         combined_embeddings,
         combined_metadata,
@@ -245,6 +247,22 @@ def update_auto_pca_sfcm(
         labels,
         updated_memberships,
     )
+    generation = int(getattr(state, "generation", 0)) + 1
+    summary: dict[str, Any] = {
+        "replaced_samples": replaced_count,
+        "appended_samples": appended_count,
+        "total_samples": len(combined_embeddings),
+        "batch_id": resolved_batch_id,
+        "idempotent_replay": False,
+        "generation": generation,
+    }
+    processed_batches = remember_processed_batch(
+        getattr(state, "processed_batches", {}),
+        batch_id=resolved_batch_id,
+        fingerprint=fingerprint,
+        summary=summary,
+        generation=generation,
+    )
     return (
         AutoPcaSfcmState(
             embeddings=combined_embeddings,
@@ -257,12 +275,10 @@ def update_auto_pca_sfcm(
             cluster_selection_metrics=state.cluster_selection_metrics,
             m=state.m,
             fast_mode=state.fast_mode,
+            generation=generation,
+            processed_batches=processed_batches,
         ),
-        {
-            "replaced_samples": replaced_count,
-            "appended_samples": appended_count,
-            "total_samples": len(combined_embeddings),
-        },
+        summary,
     )
 
 
@@ -392,6 +408,7 @@ def run_full_pipeline(
     incremental_test: bool = False,
     incremental_ratio: float = DEFAULT_INCREMENTAL_RATIO,
     modification_noise: float = DEFAULT_MODIFICATION_NOISE,
+    incremental_batch_id: str | None = None,
     fast_mode: bool = False,
     fast_config: FastFcmConfig | None = None,
 ) -> dict[str, Any]:
@@ -460,6 +477,7 @@ def run_full_pipeline(
         initial_state,
         split.update_embeddings,
         split.update_metadata,
+        batch_id=incremental_batch_id,
     )
     updated_state.assignments.to_csv(updated_assignments, index=False)
     updated_selection = save_auto_pca_visualization(
@@ -496,6 +514,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--incremental-test", action="store_true")
     parser.add_argument("--incremental-ratio", type=float, default=DEFAULT_INCREMENTAL_RATIO)
     parser.add_argument("--modification-noise", type=float, default=DEFAULT_MODIFICATION_NOISE)
+    parser.add_argument(
+        "--incremental-batch-id",
+        type=str,
+        default=None,
+        help="Stable ID for the optional incremental test batch.",
+    )
     parser.add_argument(
         "--fast",
         action="store_true",
@@ -546,6 +570,7 @@ def main() -> None:
         incremental_test=args.incremental_test,
         incremental_ratio=args.incremental_ratio,
         modification_noise=args.modification_noise,
+        incremental_batch_id=args.incremental_batch_id,
         fast_mode=args.fast,
         fast_config=fast_config,
     )

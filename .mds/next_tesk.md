@@ -100,10 +100,11 @@
 - 업데이트 중 메타데이터 스키마 확장
 - 전체 고유 테스트 65개 통과
 
-`tests/test_spherical_fcm.py`의 zero-length sample 테스트 1개는 현재 `main`에서도
-동일하게 실패하는 기존 문제이며 이번 작업의 회귀가 아니다.
+당시 `tests/test_spherical_fcm.py`의 zero-length sample 검증은 브랜치 분기 후
+`main`의 수정과 비교해야 하는 항목으로 기록했으며, 현재 브랜치의 전체 테스트에서는
+통과한다.
 
-## 다음 작업 우선순위
+## 이전 우선순위 기록
 
 ### 1. 드리프트 판정 안정화 (완료)
 
@@ -119,37 +120,38 @@
 기존 `noise_threshold`, XB degradation 정책과 상태 호환성을 유지했고 새 설정의
 기본값과 상태 마이그레이션을 추가했다.
 
-### 2. 두 증분 엔진 통합
+## 2026-08-07 공통 증분 코어와 운영 안정성 완료
 
-`full_pipeline.update_auto_pca_sfcm`은 flat 전체 데이터 갱신이고,
-`incremental_clustering.update_incremental_state`는 계층형 delta/XB/noise 정책이다.
-공통 증분 코어를 추출해 다음 동작을 한곳에서 관리한다.
+flat `full_pipeline.update_auto_pca_sfcm`과 계층형
+`incremental_clustering.update_incremental_state`가
+`incremental_core.py`의 공통 batch 처리 기능을 사용한다.
 
-- ID 기반 append/replace
-- compact contribution delta
-- membership refresh 스케줄
-- drift 및 재클러스터링 결정
-- 상태 버전과 요약 지표
+- ID 기반 append/replace와 메타데이터 스키마 확장
+- 명시적 또는 content-derived batch ID
+- 동일 batch 재실행 멱등 처리와 다른 내용의 ID 재사용 거부
+- 상태 generation과 최대 256개 batch replay 기록
+- SHA-256 checksum envelope와 legacy raw pickle 읽기 호환
+- process-specific 임시 파일을 사용하는 atomic save
+- CLI update의 sibling lock을 통한 동시 update 직렬화
+- 상태 metadata/assignment ID, 좌표, generation, replay history 검증
+- update 실패 시 atomic save 이전 상태 보존
 
-flat 파이프라인과 계층 파이프라인은 모델 adapter만 다르게 두는 방향이 적합하다.
+추가한 성능 측정 도구:
 
-### 3. 운영 안정성
+```bash
+./.venv/bin/python benchmark_incremental_updates.py \
+  --input-json dbpedia_gemini_embeddings.json.gz \
+  --dataset-sample-size 100 \
+  --update-size 10 \
+  --fast \
+  --output-json /tmp/incremental-benchmark.json
+```
 
-- batch ID를 저장해 동일 배치 재실행을 멱등 처리
-- 상태 파일 checksum과 더 엄격한 스키마 검증
-- 동시 update 방지를 위한 파일 잠금 또는 generation compare-and-swap
-- 실패한 재클러스터링에서 이전 상태로 돌아가는 rollback 테스트
+이 도구는 fit/update/refresh 시간, 선택 refresh 표본 수, 상태 파일 크기,
+peak RSS를 JSON으로 기록한다.
 
-### 4. 성능 검증
-
-문서 수, PCA 차원, 계층 깊이, K를 변화시키며 다음을 측정한다.
-
-- 저장 상태 크기
-- 일반 배치 update 시간
-- membership refresh 시간
-- peak memory
-
-compact 형식과 과거 outer-product 형식의 메모리 비교 결과도 기록한다.
+남은 작업은 제품 통합 범위에 따라 `main`에 이 브랜치 변경을 병합하고,
+실제 운영 데이터에서 위 benchmark 결과를 누적 비교하는 것이다.
 
 ## 재개 시 확인 명령
 

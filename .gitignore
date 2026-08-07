@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 dbpedia_gemini_embeddings.checkpoint.json
 dbpedia_gemini_embeddings.json
+*.lock
