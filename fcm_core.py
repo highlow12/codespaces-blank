@@ -78,6 +78,17 @@ def _fcm_objective(
     return float(np.sum((memberships**m) * (distances**2)) / len(memberships))
 
 
+def _fcm_objective_from_squared_dissimilarities(
+    memberships: np.ndarray,
+    squared_dissimilarities: np.ndarray,
+    *,
+    m: float,
+) -> float:
+    return float(
+        np.sum((memberships**m) * squared_dissimilarities) / len(memberships)
+    )
+
+
 def _restart_stability(results: list[FCMResult]) -> float:
     if len(results) < 2:
         return 0.0
@@ -99,20 +110,24 @@ def _spherical_fcm_once(
     seed: int,
     collapse_center_separation: float | None = None,
 ) -> FCMResult:
+    geometry = SphericalGeometry()
     initial_centers, _ = kmeans_plusplus(
         X,
         n_clusters=n_clusters,
         random_state=seed,
     )
     initial_centers = normalize(initial_centers, norm="l2")
-    memberships = _memberships_from_distances(
-        euclidean_distances(X, initial_centers),
+    squared_dissimilarities = geometry.squared_dissimilarities(
+        X,
+        initial_centers,
+    )
+    memberships = memberships_from_squared_dissimilarities(
+        squared_dissimilarities,
         m=m,
     )
 
     epsilon = 1e-12
     centers = initial_centers
-    distances = euclidean_distances(X, centers)
     for iteration in range(1, max_iter + 1):
         previous = memberships.copy()
         weights = memberships**m
@@ -130,8 +145,11 @@ def _spherical_fcm_once(
             centers_norm = np.linalg.norm(centers, axis=1, keepdims=True)
         centers = centers / np.maximum(centers_norm, epsilon)
 
-        distances = euclidean_distances(X, centers)
-        memberships = _memberships_from_distances(distances, m=m)
+        squared_dissimilarities = geometry.squared_dissimilarities(X, centers)
+        memberships = memberships_from_squared_dissimilarities(
+            squared_dissimilarities,
+            m=m,
+        )
 
         change = np.max(np.abs(memberships - previous))
         if (
@@ -150,7 +168,11 @@ def _spherical_fcm_once(
         memberships=memberships,
         centers=centers,
         iterations=iteration,
-        objective=_fcm_objective(memberships, distances, m=m),
+        objective=_fcm_objective_from_squared_dissimilarities(
+            memberships,
+            squared_dissimilarities,
+            m=m,
+        ),
         m=m,
         minimum_center_distance=_minimum_center_distance(centers),
     )

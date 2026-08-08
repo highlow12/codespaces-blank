@@ -96,6 +96,25 @@ Gemini 3,000건에서 고정 seed `42`, PCA-64, 최대 3계층, `--fast` 설정�
 state 16.4MB, peak RSS 0.87GB를 기록했다. refresh에서는 12건만 다시 계산하고
 282건을 건너뛰었다. 전체 회귀 테스트 58개가 통과했다.
 
+### 2.4 제곱거리 FCM 반복 결과
+
+구면 FCM의 반복은 입력과 중심이 단위 벡터라는 전제에서
+`max(2 - 2 * dot(x, center), 0)` 제곱거리를 직접 사용한다. 따라서 반복마다
+`euclidean_distances`와 제곱근을 만들지 않고 제곱거리 membership·목적 함수를
+계산한다. 기존 Euclidean 반복과 center, membership, objective가 `1e-10` 이내로
+일치하는 회귀 테스트를 추가했다.
+
+재현 명령은 다음과 같다.
+
+```bash
+./.venv/bin/python benchmark_spherical_fcm_kernel.py \
+  --rows 3000 --dimensions 64 --clusters 4 --repeats 5
+```
+
+동일 환경의 5회 중앙값에서 legacy Euclidean loop는 0.575초, 제곱거리 loop는
+0.286초로 약 2.01배 빨랐다. UMAP과 I/O까지 포함한 전체 fit 시간은 시스템 부하에
+따라 흔들리므로, 이 커널 수치는 전체 pipeline 속도와 분리해 기록한다.
+
 ## 3. 측정 규약
 
 먼저 Python 단계별 기준선을 만들고, 계약 동결 뒤 같은 manifest를 JS 하네스가
@@ -349,7 +368,7 @@ cluster, weight를 평면 sparse buffer로 저장한다.
 | 단계 | 산출물 | 다음 단계 진입 조건 |
 |---|---|---|
 | 1 | Python benchmark와 수치 fixture | phase별 기준선과 품질 지표 재현 |
-| 2 | Python `O(nk)` membership | 수치 동등성 및 메모리 목표 통과 (완료) |
+| 2 | Python `O(nk)` membership과 제곱거리 FCM 반복 (완료) | 수치 동등성 및 메모리 목표 통과 |
 | 3 | Python 거리/metric artifact 재사용 (완료) | exact 결과 유지, 전체 fit 회귀 없음 |
 | 4 | Python fast K·silhouette 알고리즘 확정 | 품질 및 exact 대비 목표 통과 |
 | 5 | Python 계층/증분 선택적 재계산 | assignment/통계 fixture 통과 |

@@ -3,6 +3,9 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+from sklearn.cluster import kmeans_plusplus
+from sklearn.metrics.pairwise import euclidean_distances
+from sklearn.preprocessing import normalize
 
 from fcm_core import (
     _memberships_from_distances,
@@ -50,6 +53,58 @@ class SphericalFuzzyCMeansTest(unittest.TestCase):
             geometry.prepare_samples(result.centers),
         )
         np.testing.assert_allclose(result.squared_dissimilarities, expected)
+
+    def test_squared_distance_kernel_matches_legacy_euclidean_iteration(self) -> None:
+        fuzzifier = 2.0
+        seed = 7
+        tolerance = 1e-6
+        max_iter = 200
+        samples = normalize(self.features, norm="l2")
+        centers, _ = kmeans_plusplus(
+            samples,
+            n_clusters=2,
+            random_state=seed,
+        )
+        centers = normalize(centers, norm="l2")
+        memberships = _memberships_from_distances(
+            euclidean_distances(samples, centers),
+            m=fuzzifier,
+        )
+        for iteration in range(1, max_iter + 1):
+            previous = memberships.copy()
+            centers = (memberships**fuzzifier).T @ samples
+            centers = normalize(centers, norm="l2")
+            distances = euclidean_distances(samples, centers)
+            memberships = _memberships_from_distances(
+                distances,
+                m=fuzzifier,
+            )
+            if np.max(np.abs(memberships - previous)) < tolerance:
+                break
+
+        expected_objective = float(
+            np.sum((memberships**fuzzifier) * (distances**2)) / len(samples)
+        )
+        actual = spherical_fcm(
+            self.features,
+            n_clusters=2,
+            m=fuzzifier,
+            max_iter=max_iter,
+            tol=tolerance,
+            seed=seed,
+            n_init=1,
+            max_attempts=1,
+        )
+
+        self.assertEqual(actual.iterations, iteration)
+        np.testing.assert_allclose(actual.centers, centers, rtol=1e-10, atol=1e-10)
+        np.testing.assert_allclose(
+            actual.memberships,
+            memberships,
+            rtol=1e-10,
+            atol=1e-10,
+        )
+        self.assertAlmostEqual(actual.objective, expected_objective, places=12)
 
     def test_fixed_center_memberships_use_exact_spherical_matches(self) -> None:
         memberships, distances = sfcm_memberships_from_centers(
