@@ -8,6 +8,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.preprocessing import normalize
 
 from fcm_core import (
+    _minimum_center_distance,
     _memberships_from_distances,
     sfcm_memberships_from_centers,
     spherical_fcm,
@@ -42,6 +43,26 @@ class SphericalFuzzyCMeansTest(unittest.TestCase):
             np.ones(len(self.features)),
         )
         self.assertEqual(set(result.labels), {0, 1})
+
+    def test_minimum_center_distance_uses_unit_sphere_geometry(self) -> None:
+        centers = normalize(
+            np.asarray(
+                [
+                    [1.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                ]
+            ),
+            norm="l2",
+        )
+        expected_distances = euclidean_distances(centers, centers)
+        np.fill_diagonal(expected_distances, np.inf)
+
+        self.assertAlmostEqual(
+            _minimum_center_distance(centers),
+            float(np.min(expected_distances)),
+            places=12,
+        )
 
     def test_spherical_fit_retains_final_squared_dissimilarities(self) -> None:
         result = spherical_fcm(self.features, n_clusters=2, seed=7)

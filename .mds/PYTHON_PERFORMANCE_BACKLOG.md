@@ -41,6 +41,15 @@ profile 전체는 48.50초였다. 이 값에는 cold import와 입력 decode가 
 포함되어 있으므로, 이 backlog에서는 새 항목으로 중복 등록하지 않는다. 다만
 warm FCM 최적화를 시작할 때 가장 먼저 완료해야 하는 기존 작업이다.
 
+### E-00 결과
+
+- `_minimum_center_distance`를 단위 구면 중심의 `2 - 2 * dot(center_i, center_j)`
+  제곱거리 계산으로 변경했다.
+- 기존 normalized-center Euclidean 결과와 비교하는 회귀 테스트를 추가했다.
+- 동일한 300건 Gemini profile에서 helper 누적 시간이 기존 9.55초에서 0.175초로
+  줄었고, helper 내부의 sklearn `euclidean_distances` 호출은 제거됐다.
+- 전체 테스트 65개가 통과했다.
+
 ## 새 최적화 후보
 
 ### P0-1. 시각화 의존성 lazy import
@@ -115,7 +124,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 
 | ID | 상태 | 작업 | 선행 조건 | 완료 기준 |
 |---|---|---|---|---|
-| E-00 | 기존 계획 | 반복 중 `_minimum_center_distance`의 sklearn 거리 호출 제거 | JS 성능 계획 8.2 | 동일 centers/collapse 판정, warm FCM profile에서 범용 거리 호출 제거 |
+| E-00 | 완료 | 반복 중 `_minimum_center_distance`의 sklearn 거리 호출 제거 | JS 성능 계획 8.2 | 동일 centers/collapse 판정, warm FCM profile에서 범용 거리 호출 제거 |
 | N-01 | 대기 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
 | N-02 | 대기 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
 | N-03 | 대기 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |

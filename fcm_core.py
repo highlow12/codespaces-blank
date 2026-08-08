@@ -6,7 +6,6 @@ import numpy as np
 from sklearn.cluster import kmeans_plusplus
 from sklearn.decomposition import PCA
 from sklearn.metrics import adjusted_rand_score
-from sklearn.metrics.pairwise import euclidean_distances
 from sklearn.preprocessing import normalize
 
 from clustering_types import FCMResult, HierarchicalModel
@@ -62,11 +61,16 @@ def _memberships_from_distances(
 
 
 def _minimum_center_distance(centers: np.ndarray) -> float:
+    """Return the minimum pairwise distance between unit-vector centers."""
+
     if len(centers) < 2:
         return float("inf")
-    distances = euclidean_distances(centers, centers)
-    np.fill_diagonal(distances, np.inf)
-    return float(np.min(distances))
+    squared_distances = np.maximum(
+        2.0 - 2.0 * (centers @ centers.T),
+        0.0,
+    )
+    np.fill_diagonal(squared_distances, np.inf)
+    return float(np.sqrt(np.min(squared_distances)))
 
 
 def _fcm_objective(
