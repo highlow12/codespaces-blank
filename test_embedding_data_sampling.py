@@ -87,6 +87,24 @@ class EmbeddingDataSamplingTests(unittest.TestCase):
                 sample_size=4,
             )
 
+    def test_loader_accepts_gzip_json(self) -> None:
+        records = [
+            {"id": "one", "embedding": [1.0, 0.0, 0.0]},
+            {"id": "two", "embedding": [0.0, 1.0, 0.0]},
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "embeddings.json.gz"
+            with gzip.open(path, "wt", encoding="utf-8") as handle:
+                json.dump(records, handle)
+
+            embeddings, metadata = load_embeddings_from_json(path)
+
+        np.testing.assert_array_equal(
+            embeddings,
+            np.asarray([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]),
+        )
+        self.assertEqual(metadata["id"].tolist(), ["one", "two"])
+
 
 if __name__ == "__main__":
     unittest.main()
