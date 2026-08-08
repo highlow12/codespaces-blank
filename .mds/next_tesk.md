@@ -150,8 +150,25 @@ flat `full_pipeline.update_auto_pca_sfcm`과 계층형
 이 도구는 fit/update/refresh 시간, 선택 refresh 표본 수, 상태 파일 크기,
 peak RSS를 JSON으로 기록한다.
 
-남은 작업은 제품 통합 범위에 따라 `main`에 이 브랜치 변경을 병합하고,
-실제 운영 데이터에서 위 benchmark 결과를 누적 비교하는 것이다.
+## 2026-08-08 Gemini benchmark 및 main 통합 진행
+
+`dbpedia_gemini_embeddings.json` 3,000건 전체를 사용해 3072차원 입력의
+규모별 baseline을 측정했다. 모든 실행은 seed `42`, `--fast`, 시각화를 포함한
+동일 설정이며 update 크기는 전체의 4%로 맞췄다.
+
+| 입력 | fit | 일반 update | 선택 refresh | refresh/skip | state | peak RSS |
+|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 26.5초 | 4.07초 | 2.32초 | 15 / 80 | 5.5MB | 0.87GB |
+| 500 | 31.2초 | 4.34초 | 0.47초 | 86 / 404 | 25.2MB | 0.87GB |
+| 1,000 | 39.2초 | 4.94초 | 0.37초 | 40 / 940 | 38.5MB | 0.97GB |
+| 3,000 | 77.7초 | 5.43초 | 1.51초 | 120 / 2,820 | 88.4MB | 1.36GB |
+
+`main`의 문서 이동·gzip 데이터·spherical FCM 검증 변경은 병합 커밋
+`7f74533`으로 현재 브랜치에 통합했고, `.gitignore` 충돌은 양쪽 설정을
+보존하는 방식으로 해결했다. 통합 후 루트 테스트 57개와 gzip 100건 fit smoke가
+통과했다.
+
+현재 로컬 `main` fast-forward와 원격 push/PR 반영이 남아 있다.
 
 ## 재개 시 확인 명령
 
