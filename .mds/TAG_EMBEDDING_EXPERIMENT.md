@@ -16,7 +16,7 @@
 
 ## 실험 설정
 
-- 내용: 새로 생성한 Gemini 문서 임베딩 `dbpedia_gemini_embeddings.json`
+- 내용: 새로 생성한 Gemini 문서 임베딩 `dbpedia_gemini_embeddings.json.gz`
 - 태그: Gemini 클래스 라벨 임베딩 `dbpedia_label_embeddings.json`
 - 입력 구성:
 
@@ -84,7 +84,7 @@ from tag_embedding_features import (
 )
 
 content, metadata, tags, hierarchies = load_dbpedia_embedding_pair(
-    Path("dbpedia_gemini_embeddings.json"),
+    Path("dbpedia_gemini_embeddings.json.gz"),
     Path("dbpedia_label_embeddings.json"),
 )
 features = build_tag_augmented_features(

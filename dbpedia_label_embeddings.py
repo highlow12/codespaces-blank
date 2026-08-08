@@ -61,7 +61,7 @@ def main() -> None:
     parser.add_argument(
         "--input",
         type=Path,
-        default=Path("dbpedia_gemini_embeddings.json"),
+        default=Path("dbpedia_gemini_embeddings.json.gz"),
         help="Completed document embedding dataset",
     )
     parser.add_argument(

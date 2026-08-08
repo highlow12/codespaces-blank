@@ -191,10 +191,10 @@ def spherical_fcm(
         raise ValueError("min_cluster_size must be at least 1")
     if min_center_separation < 0.0:
         raise ValueError("min_center_separation must be non-negative")
+    X = SphericalGeometry().prepare_samples(X)
     if n_clusters > X.shape[0]:
         raise ValueError("n_clusters cannot exceed the number of samples")
 
-    X = normalize(X, norm="l2")
     attempt_limit = max_attempts if max_attempts is not None else n_init * 3
     if attempt_limit < n_init:
         raise ValueError("max_attempts must be at least n_init")

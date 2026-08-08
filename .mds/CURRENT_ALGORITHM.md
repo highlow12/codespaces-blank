@@ -56,7 +56,7 @@ JSON 임베딩과 메타데이터
 
 ```bash
 python incremental_clustering.py fit \
-  --input-json dbpedia_gemini_embeddings.json \
+  --input-json dbpedia_gemini_embeddings.json.gz \
   --state-output results/model.state.pkl \
   --assignments-output results/model_assignments.csv \
   --coordinates-output results/model_coordinates.csv \
@@ -71,7 +71,7 @@ python incremental_clustering.py fit \
 
 ```bash
 python incremental_clustering.py fit \
-  --input-json dbpedia_gemini_embeddings.json \
+  --input-json dbpedia_gemini_embeddings.json.gz \
   --state-output results/scout.state.pkl \
   --fast \
   --skip-visualization
