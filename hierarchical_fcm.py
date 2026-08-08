@@ -49,6 +49,14 @@ from hierarchical_assignments import (
 )
 
 
+def _sqrt_selected_squared_distances(
+    squared_dissimilarities: np.ndarray,
+    row_selector: np.ndarray,
+    column_selector: int | np.ndarray,
+) -> np.ndarray:
+    """Return only selected distances from a squared distance matrix."""
+
+    return np.sqrt(squared_dissimilarities[row_selector, column_selector])
 
 
 def run_hierarchical_pca_fcm(
@@ -313,21 +321,32 @@ def run_hierarchical_pca_fcm(
 
         current_level = depth
         cached_squared_dissimilarities = best.result.squared_dissimilarities
-        if (
-            cached_squared_dissimilarities is None
-            or np.asarray(cached_squared_dissimilarities).shape
-            != best.result.memberships.shape
-        ):
+        cached_squared = (
+            None
+            if cached_squared_dissimilarities is None
+            else np.asarray(cached_squared_dissimilarities)
+        )
+        has_cached_squared = (
+            cached_squared is not None
+            and cached_squared.shape == best.result.memberships.shape
+        )
+        if not has_cached_squared:
             _, local_distance_matrix = sfcm_memberships_from_centers(
                 Xp[indices],
                 best.result.centers,
             )
+            row_indices = np.arange(indices.size)
+            local_distances = local_distance_matrix[
+                row_indices,
+                best.result.labels,
+            ]
         else:
-            local_distance_matrix = np.sqrt(cached_squared_dissimilarities)
-        local_distances = local_distance_matrix[
-            np.arange(indices.size),
-            best.result.labels,
-        ]
+            row_indices = np.arange(indices.size)
+            local_distances = _sqrt_selected_squared_distances(
+                cached_squared,
+                row_indices,
+                best.result.labels,
+            )
         local_document_types = fcm_document_types(
             Xp[indices],
             best.result,
@@ -371,10 +390,18 @@ def run_hierarchical_pca_fcm(
             center = best.result.centers[source_label]
             model_centers.append(center.copy())
 
-            cluster_distances = local_distance_matrix[
-                cluster_mask,
-                source_label,
-            ]
+            if not has_cached_squared:
+                cluster_distances = local_distance_matrix[
+                    cluster_mask,
+                    source_label,
+                ]
+            else:
+                assert cached_squared is not None
+                cluster_distances = _sqrt_selected_squared_distances(
+                    cached_squared,
+                    cluster_mask,
+                    source_label,
+                )
             if cluster_distances.size < 4:
                 distance_thresholds.append(float("inf"))
             else:

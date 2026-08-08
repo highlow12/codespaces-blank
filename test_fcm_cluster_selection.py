@@ -16,6 +16,7 @@ from fcm_hierarchy import (
     run_hierarchical_pca_fcm,
     select_fcm_cluster_count,
 )
+from hierarchical_fcm import _sqrt_selected_squared_distances
 from fast_fcm import (
     FastFcmConfig,
     _scout_candidate_ks,
@@ -273,6 +274,33 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
             )
 
         self.assertEqual(len(result.assignments), len(self.features))
+
+    def test_hierarchy_extracts_only_selected_squared_distances(self) -> None:
+        squared = np.arange(20, dtype=np.float64).reshape(5, 4)
+        rows = np.arange(5)
+        labels = np.asarray([3, 1, 0, 2, 1])
+        cluster_mask = np.asarray([True, False, True, False, True])
+        original_sqrt = np.sqrt
+        sqrt_input_shapes: list[tuple[int, ...]] = []
+
+        def capture_sqrt(values: np.ndarray) -> np.ndarray:
+            sqrt_input_shapes.append(np.asarray(values).shape)
+            return original_sqrt(values)
+
+        with patch("hierarchical_fcm.np.sqrt", side_effect=capture_sqrt):
+            assigned = _sqrt_selected_squared_distances(squared, rows, labels)
+            source_center = _sqrt_selected_squared_distances(
+                squared,
+                cluster_mask,
+                2,
+            )
+
+        np.testing.assert_allclose(assigned, np.sqrt(squared[rows, labels]))
+        np.testing.assert_allclose(
+            source_center,
+            np.sqrt(squared[cluster_mask, 2]),
+        )
+        self.assertEqual(sqrt_input_shapes, [(5,), (3,)])
 
     def test_selector_passes_distance_artifact_to_xie_beni(self) -> None:
         observed: list[np.ndarray | None] = []

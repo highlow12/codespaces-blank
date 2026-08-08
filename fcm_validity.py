@@ -133,6 +133,10 @@ def fuzzy_silhouette_proxy(
     to its nearest competing center, then fuzzy confidence downweights
     ambiguous assignments.  The full-data refine path still uses sklearn's
     exact silhouette.
+
+    ``m`` remains in the public signature for backward compatibility because
+    this function is re-exported by ``fcm_hierarchy``. The current
+    center-distance proxy does not use the fuzzifier in its calculation.
     """
 
     memberships, _centers, squared = _sfcm_metric_inputs(
