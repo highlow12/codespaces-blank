@@ -40,6 +40,7 @@ class FastFcmConfig:
     refine_tol: float = 1e-5
     max_refine_n_init: int = 10
     stability_target: float = 0.85
+    refine_score_margin: float = 0.15
     m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4)
     minimum_probe_stability: float = 0.80
     min_center_separation: float = DEFAULT_FCM_MIN_CENTER_SEPARATION
@@ -65,6 +66,8 @@ class FastFcmConfig:
             raise ValueError("tolerances must be positive")
         if not 0.0 <= self.stability_target <= 1.0:
             raise ValueError("stability_target must be between 0 and 1")
+        if not 0.0 <= self.refine_score_margin <= 1.0:
+            raise ValueError("refine_score_margin must be between 0 and 1")
         if not 0.0 <= self.minimum_probe_stability <= 1.0:
             raise ValueError("minimum_probe_stability must be between 0 and 1")
         if not self.m_values or any(value <= 1.0 for value in self.m_values):
@@ -110,6 +113,7 @@ def _scout_m(
             max_iter=config.scout_max_iter,
             tol=config.scout_tol,
             collapse_center_separation=config.min_center_separation,
+            use_silhouette_proxy=True,
         )
         for record in probe_records:
             records.append(
@@ -133,7 +137,8 @@ def _scout_candidate_ks(
     *,
     refine_top_k: int,
     min_clusters: int,
-) -> list[int]:
+    refine_score_margin: float,
+) -> tuple[list[int], str, float | None]:
     usable = [
         record
         for record in records
@@ -149,14 +154,31 @@ def _scout_candidate_ks(
         ),
         reverse=True,
     )
+    if not usable:
+        return [], "no_valid_scout_candidate", None
+    score_gap = (
+        float(usable[0]["selection_score"])
+        - float(usable[1]["selection_score"])
+        if len(usable) >= 2
+        else None
+    )
+    limit = refine_top_k
+    decision = "top_k_refine"
+    if score_gap is not None and score_gap >= refine_score_margin:
+        limit = 1
+        decision = "single_clear_scout_winner"
+    elif len(usable) == 1:
+        limit = 1
+        decision = "single_valid_scout_candidate"
+
     ks: list[int] = []
     for record in usable:
         k = int(record["k"])
         if k >= min_clusters and k not in ks:
             ks.append(k)
-        if len(ks) >= refine_top_k:
+        if len(ks) >= limit:
             break
-    return ks
+    return ks, decision, score_gap
 
 
 def _choose_full_candidate(
@@ -232,17 +254,26 @@ def select_fast_fcm_cluster_count(
         # and scout_max_clusters. Evaluate its complete K range so one noisy
         # XB worsening cannot hide a later, stronger split.
         xb_worsening_patience=scout_max_clusters,
+        use_silhouette_proxy=True,
     )
     if scout_best is None:
         return None, [*probe_records, *scout_records], f"fast_scout:{scout_reason}"
 
-    candidate_ks = _scout_candidate_ks(
+    candidate_ks, refine_decision, score_gap = _scout_candidate_ks(
         scout_records,
         refine_top_k=fast.refine_top_k,
         min_clusters=min_clusters,
+        refine_score_margin=fast.refine_score_margin,
     )
     if not candidate_ks:
         candidate_ks = [int(scout_best.n_clusters)]
+        refine_decision = "fallback_scout_best"
+
+    for record in scout_records:
+        record["silhouette_kind"] = "center_distance_proxy"
+        record["refine_selected"] = int(record["k"]) in candidate_ks
+        record["refine_decision"] = refine_decision
+        record["refine_score_gap"] = score_gap
 
     refined: list[FCMKCandidate] = []
     refined_records: list[dict[str, Any]] = []

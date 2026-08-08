@@ -309,8 +309,8 @@ seed = hash(globalSeed, nodeId, candidateK, restartIndex, phase)
 모든 후보와 재시작에 exact silhouette를 계산하지 않는다.
 
 1. 고정 seed의 최대 1,000개 표본으로 K와 m scout
-2. scout에서는 centroid 기반 silhouette proxy 또는 고정 pair 표본 사용
-3. 상위 2개 K만 전체 데이터로 refine
+2. scout에서는 `O(nk)` 중심거리 silhouette proxy를 사용하고, full-data refine에서만 exact silhouette를 계산
+3. scout 점수 차가 작을 때만 상위 2개 K를 전체 데이터로 refine하고, 명확한 1위는 해당 K만 refine
 4. 점수 차이가 허용오차 안일 때만 추가 K 또는 재시작 수행
 5. 최종 후보에만 exact metric과 noise threshold 계산
 

@@ -16,7 +16,11 @@ from fcm_hierarchy import (
     run_hierarchical_pca_fcm,
     select_fcm_cluster_count,
 )
-from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
+from fast_fcm import (
+    FastFcmConfig,
+    _scout_candidate_ks,
+    select_fast_fcm_cluster_count,
+)
 
 
 class XieBeniClusterSelectionTest(unittest.TestCase):
@@ -351,6 +355,7 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
                 refine_max_attempts=3,
                 refine_max_iter=50,
                 refine_top_k=2,
+                refine_score_margin=1.0,
             ),
             seed=11,
         )
@@ -369,6 +374,54 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertIsNotNone(best)
         self.assertEqual(scout_ks, set(range(2, 7)))
         self.assertEqual(len(refined_ks), 2)
+        self.assertTrue(
+            all(
+                record.get("silhouette_kind") == "center_distance_proxy"
+                for record in records
+                if record.get("phase") not in {"m_probe", "refine"}
+            )
+        )
+
+    def test_fast_selector_refines_only_a_clear_scout_winner(self) -> None:
+        ks, decision, score_gap = _scout_candidate_ks(
+            [
+                {"k": 2, "selection_score": 0.25, "valid_clusters": 2},
+                {"k": 3, "selection_score": 0.80, "valid_clusters": 3},
+                {"k": 4, "selection_score": 0.40, "valid_clusters": 4},
+            ],
+            refine_top_k=2,
+            min_clusters=2,
+            refine_score_margin=0.15,
+        )
+
+        self.assertEqual(ks, [3])
+        self.assertEqual(decision, "single_clear_scout_winner")
+        self.assertAlmostEqual(score_gap, 0.40)
+
+    def test_center_distance_silhouette_proxy_avoids_pairwise_metric(self) -> None:
+        with patch(
+            "fcm_validity.silhouette_score",
+            side_effect=AssertionError("scout proxy must not call silhouette_score"),
+        ):
+            best, _records, reason = select_fcm_cluster_count(
+                self.features,
+                min_clusters=2,
+                max_clusters=2,
+                min_child_size=4,
+                selection_method="multi_metric",
+                use_silhouette_proxy=True,
+            )
+
+        self.assertIsNotNone(best)
+        self.assertTrue(np.isfinite(best.silhouette))
+        self.assertIn(
+            reason,
+            {
+                "selected_multi_metric",
+                "selected_multi_metric_max_k",
+                "selected_multi_metric_xb_worsening_patience",
+            },
+        )
 
     def test_default_hierarchical_path_records_automatic_pca_selection(self) -> None:
         result = run_hierarchical_pca_fcm(

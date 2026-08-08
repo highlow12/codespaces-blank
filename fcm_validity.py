@@ -124,13 +124,38 @@ def fuzzy_silhouette_proxy(
     result: FCMResult,
     *,
     m: float = 2.0,
+    squared_dissimilarities: np.ndarray | None = None,
 ) -> float:
-    memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
-    distances = np.sqrt(squared_dissimilarities)
-    weights = memberships**m
-    a = np.sum(weights * distances, axis=1) / np.sum(weights, axis=1)
-    b = np.partition(distances, 1, axis=1)[:, 1]
-    scores = (b - a) / np.maximum(a, b)
+    """Estimate separation from sample-to-center distances in ``O(nk)``.
+
+    This deliberately is not the exact pairwise silhouette.  It is for the
+    bounded scout phase only: each sample compares its most-supported center
+    to its nearest competing center, then fuzzy confidence downweights
+    ambiguous assignments.  The full-data refine path still uses sklearn's
+    exact silhouette.
+    """
+
+    memberships, _centers, squared = _sfcm_metric_inputs(
+        X,
+        result,
+        squared_dissimilarities=squared_dissimilarities,
+    )
+    if memberships.shape[1] < 2:
+        return float("nan")
+    distances = np.sqrt(squared)
+    labels = memberships.argmax(axis=1)
+    rows = np.arange(memberships.shape[0])
+    own_distances = distances[rows, labels]
+    competing_distances = distances.copy()
+    competing_distances[rows, labels] = np.inf
+    nearest_other = np.min(competing_distances, axis=1)
+    scores = (nearest_other - own_distances) / np.maximum(
+        nearest_other,
+        own_distances,
+    )
+    ordered_memberships = np.partition(memberships, -2, axis=1)
+    confidence = ordered_memberships[:, -1] - ordered_memberships[:, -2]
+    return float(np.average(scores, weights=np.maximum(confidence, 1e-12)))
 
 
 def spherical_fcm_objective(
@@ -427,6 +452,7 @@ def select_fcm_cluster_count(
     max_iter: int = 200,
     tol: float = 1e-6,
     collapse_center_separation: float | None = None,
+    use_silhouette_proxy: bool = False,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
     """Evaluate increasing k values and return the best FCM split.
 
@@ -512,11 +538,20 @@ def select_fcm_cluster_count(
         silhouette = float("nan")
         if valid_cluster_count >= 2 and int(np.sum(non_noise)) >= 2:
             try:
-                silhouette = float(
-                    silhouette_score(
-                        Xn[non_noise],
-                        labels[non_noise],
-                        metric="euclidean",
+                silhouette = (
+                    fuzzy_silhouette_proxy(
+                        Xn,
+                        result,
+                        m=m,
+                        squared_dissimilarities=cached_squared_dissimilarities,
+                    )
+                    if use_silhouette_proxy
+                    else float(
+                        silhouette_score(
+                            Xn[non_noise],
+                            labels[non_noise],
+                            metric="euclidean",
+                        )
                     )
                 )
             except Exception:
