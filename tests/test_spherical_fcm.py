@@ -40,6 +40,17 @@ class SphericalFuzzyCMeansTest(unittest.TestCase):
         )
         self.assertEqual(set(result.labels), {0, 1})
 
+    def test_spherical_fit_retains_final_squared_dissimilarities(self) -> None:
+        result = spherical_fcm(self.features, n_clusters=2, seed=7)
+
+        self.assertIsNotNone(result.squared_dissimilarities)
+        geometry = SphericalGeometry()
+        expected = geometry.squared_dissimilarities(
+            geometry.prepare_samples(self.features),
+            geometry.prepare_samples(result.centers),
+        )
+        np.testing.assert_allclose(result.squared_dissimilarities, expected)
+
     def test_fixed_center_memberships_use_exact_spherical_matches(self) -> None:
         memberships, distances = sfcm_memberships_from_centers(
             np.asarray([[1.0, 0.0], [0.0, 1.0]]),

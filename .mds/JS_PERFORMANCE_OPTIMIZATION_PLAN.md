@@ -82,6 +82,20 @@ FCM 소속도 정규화를 pairwise ratio 방식에서 정규화된 역거듭제
 단축됐다. 핵심 임시 배열의 이론상 크기는 Float64 기준 51.2MB에서 6.4MB로
 줄었다. 작은 계층 노드에서는 기존 전체 함수와 비슷한 실행 시간을 유지한다.
 
+### 2.3 거리 artifact 재사용 결과
+
+선택된 FCM 결과는 마지막 중심에 대한 제곱 거리 행렬을 선택된 재시작 하나에만
+보존한다. 후보 selection의 Xie-Beni 계산, membership/noise 분류, 계층 노드의
+거리 threshold와 noise score는 이 artifact를 재사용한다. 따라서 같은 후보의
+`X × centers` 거리를 단계마다 다시 계산하지 않는다. 재시작 중 선택되지 않은
+결과는 dense artifact를 보존하지 않으며, 외부 또는 구형 결과는 기존 재계산
+경로로 fallback한다.
+
+Gemini 3,000건에서 고정 seed `42`, PCA-64, 최대 3계층, `--fast` 설정의
+300건 표본 benchmark는 fit 35.2초, 일반 update 4.90초, 선택 refresh 7.76초,
+state 16.4MB, peak RSS 0.87GB를 기록했다. refresh에서는 12건만 다시 계산하고
+282건을 건너뛰었다. 전체 회귀 테스트 58개가 통과했다.
+
 ## 3. 측정 규약
 
 먼저 Python 단계별 기준선을 만들고, 계약 동결 뒤 같은 manifest를 JS 하네스가
@@ -336,7 +350,7 @@ cluster, weight를 평면 sparse buffer로 저장한다.
 |---|---|---|
 | 1 | Python benchmark와 수치 fixture | phase별 기준선과 품질 지표 재현 |
 | 2 | Python `O(nk)` membership | 수치 동등성 및 메모리 목표 통과 (완료) |
-| 3 | Python 거리/metric artifact 재사용 | exact 결과 유지, 전체 fit 회귀 없음 |
+| 3 | Python 거리/metric artifact 재사용 (완료) | exact 결과 유지, 전체 fit 회귀 없음 |
 | 4 | Python fast K·silhouette 알고리즘 확정 | 품질 및 exact 대비 목표 통과 |
 | 5 | Python 계층/증분 선택적 재계산 | assignment/통계 fixture 통과 |
 | 6 | 알고리즘·입출력 계약 v1 동결 | Python fixture와 schema 버전 확정 |

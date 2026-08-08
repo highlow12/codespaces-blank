@@ -20,6 +20,7 @@ class FCMResult:
     valid_restarts: int = 1
     restart_stability: float = 1.0
     minimum_center_distance: float | None = None
+    squared_dissimilarities: np.ndarray | None = None
 
 
 @dataclass

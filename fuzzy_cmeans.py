@@ -166,6 +166,7 @@ class FuzzyCMeans:
         rng = np.random.default_rng(self.seed)
         memberships = rng.random((samples.shape[0], n_clusters))
         memberships /= memberships.sum(axis=1, keepdims=True)
+        squared_dissimilarities: np.ndarray | None = None
 
         for iteration in range(1, self.max_iter + 1):
             previous = memberships
@@ -175,8 +176,12 @@ class FuzzyCMeans:
                 m=self.m,
                 rng=rng,
             )
+            squared_dissimilarities = self.geometry.squared_dissimilarities(
+                samples,
+                centers,
+            )
             memberships = memberships_from_squared_dissimilarities(
-                self.geometry.squared_dissimilarities(samples, centers),
+                squared_dissimilarities,
                 m=self.m,
             )
             if np.max(np.abs(memberships - previous)) < self.tol:
@@ -187,6 +192,7 @@ class FuzzyCMeans:
             memberships=memberships,
             centers=centers,
             iterations=iteration,
+            squared_dissimilarities=squared_dissimilarities,
         )
 
 

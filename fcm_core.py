@@ -234,6 +234,10 @@ def spherical_fcm(
             else float("inf"),
         ),
     )
+    squared_dissimilarities = SphericalGeometry().squared_dissimilarities(
+        X,
+        best.centers,
+    )
     return FCMResult(
         labels=best.labels,
         memberships=best.memberships,
@@ -246,6 +250,7 @@ def spherical_fcm(
         valid_restarts=len(valid_results),
         restart_stability=_restart_stability(valid_results),
         minimum_center_distance=best.minimum_center_distance,
+        squared_dissimilarities=squared_dissimilarities,
     )
 
 

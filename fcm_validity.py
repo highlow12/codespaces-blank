@@ -31,20 +31,40 @@ FCM_SELECTION_METHODS = frozenset(
 def _sfcm_metric_inputs(
     X: np.ndarray,
     result: FCMResult,
+    *,
+    squared_dissimilarities: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     geometry = SphericalGeometry()
     normalized = geometry.prepare_samples(X)
     memberships = _validated_memberships(result)
     centers = geometry.prepare_samples(result.centers)
-    squared_dissimilarities = geometry.squared_dissimilarities(
-        normalized,
-        centers,
+    if squared_dissimilarities is None:
+        values = geometry.squared_dissimilarities(normalized, centers)
+    else:
+        values = np.asarray(squared_dissimilarities, dtype=np.float64)
+        expected_shape = (normalized.shape[0], centers.shape[0])
+        if values.shape != expected_shape:
+            raise ValueError(
+                "squared_dissimilarities must align with samples and centers"
+            )
+        if not np.all(np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError(
+                "squared_dissimilarities must be finite and non-negative"
+            )
+    return memberships, centers, values
+
+
+def xie_beni_index(
+    X: np.ndarray,
+    result: FCMResult,
+    *,
+    squared_dissimilarities: np.ndarray | None = None,
+) -> float:
+    memberships, centers, squared_dissimilarities = _sfcm_metric_inputs(
+        X,
+        result,
+        squared_dissimilarities=squared_dissimilarities,
     )
-    return memberships, centers, squared_dissimilarities
-
-
-def xie_beni_index(X: np.ndarray, result: FCMResult) -> float:
-    memberships, centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
     numerator = np.sum(
         (memberships ** float(result.m)) * squared_dissimilarities
     )
@@ -118,10 +138,15 @@ def spherical_fcm_objective(
     result: FCMResult,
     *,
     m: float | None = None,
+    squared_dissimilarities: np.ndarray | None = None,
 ) -> float:
     """Return the cosine-equivalent fuzzy compactness on the unit sphere."""
 
-    memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(X, result)
+    memberships, _centers, squared_dissimilarities = _sfcm_metric_inputs(
+        X,
+        result,
+        squared_dissimilarities=squared_dissimilarities,
+    )
     exponent = float(result.m if m is None else m)
     return float(
         np.sum((memberships**exponent) * squared_dissimilarities)
@@ -137,6 +162,7 @@ def _filter_fcm_labels(
     min_membership: float,
     max_membership_gap: float,
     distance_z: float,
+    assigned_distances: np.ndarray | None = None,
 ) -> tuple[np.ndarray, list[int]]:
     """Apply noise rules and remap surviving FCM labels to contiguous IDs."""
 
@@ -148,6 +174,7 @@ def _filter_fcm_labels(
             min_membership=min_membership,
             max_membership_gap=max_membership_gap,
             distance_z=distance_z,
+            assigned_distances=assigned_distances,
         )
     ] = -1
 
@@ -451,6 +478,19 @@ def select_fcm_cluster_count(
             tol=tol,
             collapse_center_separation=collapse_center_separation,
         )
+        cached_squared_dissimilarities = result.squared_dissimilarities
+        if (
+            cached_squared_dissimilarities is not None
+            and np.asarray(cached_squared_dissimilarities).shape
+            != result.memberships.shape
+        ):
+            cached_squared_dissimilarities = None
+        assigned_distances = None
+        if cached_squared_dissimilarities is not None:
+            row_indices = np.arange(result.labels.shape[0])
+            assigned_distances = np.sqrt(
+                cached_squared_dissimilarities[row_indices, result.labels]
+            )
         if selection_method == "multi_metric":
             labels = result.memberships.argmax(axis=1)
             cluster_sizes = [
@@ -465,6 +505,7 @@ def select_fcm_cluster_count(
                 min_membership=min_membership,
                 max_membership_gap=max_membership_gap,
                 distance_z=distance_z,
+                assigned_distances=assigned_distances,
             )
         non_noise = labels != -1
         valid_cluster_count = len(cluster_sizes)
@@ -481,7 +522,11 @@ def select_fcm_cluster_count(
             except Exception:
                 silhouette = float("nan")
 
-        xie_beni = xie_beni_index(Xn, result)
+        xie_beni = xie_beni_index(
+            Xn,
+            result,
+            squared_dissimilarities=cached_squared_dissimilarities,
+        )
         xb_relative_improvement: float | None = None
         if (
             candidates

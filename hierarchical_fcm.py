@@ -312,21 +312,30 @@ def run_hierarchical_pca_fcm(
         node["noise_count"] = int(np.sum(local_labels == -1))
 
         current_level = depth
+        cached_squared_dissimilarities = best.result.squared_dissimilarities
+        if (
+            cached_squared_dissimilarities is None
+            or np.asarray(cached_squared_dissimilarities).shape
+            != best.result.memberships.shape
+        ):
+            _, local_distance_matrix = sfcm_memberships_from_centers(
+                Xp[indices],
+                best.result.centers,
+            )
+        else:
+            local_distance_matrix = np.sqrt(cached_squared_dissimilarities)
+        local_distances = local_distance_matrix[
+            np.arange(indices.size),
+            best.result.labels,
+        ]
         local_document_types = fcm_document_types(
             Xp[indices],
             best.result,
             min_membership=min_membership,
             max_membership_gap=max_membership_gap,
             distance_z=distance_z,
+            assigned_distances=local_distances,
         )
-        _, local_distance_matrix = sfcm_memberships_from_centers(
-            Xp[indices],
-            best.result.centers,
-        )
-        local_distances = local_distance_matrix[
-            np.arange(indices.size),
-            best.result.labels,
-        ]
         local_noise_scores = fcm_noise_scores(
             best.result.memberships,
             local_distances,
@@ -362,11 +371,10 @@ def run_hierarchical_pca_fcm(
             center = best.result.centers[source_label]
             model_centers.append(center.copy())
 
-            _, cluster_distance_matrix = sfcm_memberships_from_centers(
-                node_features[cluster_mask],
-                center.reshape(1, -1),
-            )
-            cluster_distances = cluster_distance_matrix.ravel()
+            cluster_distances = local_distance_matrix[
+                cluster_mask,
+                source_label,
+            ]
             if cluster_distances.size < 4:
                 distance_thresholds.append(float("inf"))
             else:

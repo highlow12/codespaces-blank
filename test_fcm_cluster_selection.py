@@ -247,6 +247,57 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertIsNotNone(result.model)
         self.assertEqual(len(result.assignments), len(self.features))
 
+    def test_hierarchy_reuses_selected_distance_artifact(self) -> None:
+        with patch(
+            "hierarchical_fcm.sfcm_memberships_from_centers",
+            side_effect=AssertionError("selected result distances should be reused"),
+        ):
+            result = run_hierarchical_pca_fcm(
+                self.features,
+                max_depth=1,
+                min_node_size=8,
+                min_child_size=4,
+                min_clusters=2,
+                max_clusters=2,
+                min_membership=0.0,
+                max_membership_gap=0.0,
+                forced_noise_ratio=0.0,
+                selection_method="multi_metric",
+                min_split_silhouette=-1.0,
+                pca_components=3,
+                seed=42,
+            )
+
+        self.assertEqual(len(result.assignments), len(self.features))
+
+    def test_selector_passes_distance_artifact_to_xie_beni(self) -> None:
+        observed: list[np.ndarray | None] = []
+
+        def capture_artifact(
+            _X: np.ndarray,
+            _result: FCMResult,
+            *,
+            squared_dissimilarities: np.ndarray | None = None,
+        ) -> float:
+            observed.append(squared_dissimilarities)
+            return 0.1
+
+        with patch(
+            "fcm_validity.xie_beni_index",
+            side_effect=capture_artifact,
+        ):
+            select_fcm_cluster_count(
+                self.features,
+                min_clusters=2,
+                max_clusters=2,
+                min_child_size=4,
+                selection_method="multi_metric",
+                seed=7,
+            )
+
+        self.assertEqual(len(observed), 1)
+        self.assertIsNotNone(observed[0])
+
     def test_fast_selector_returns_full_data_candidate_and_adaptive_m(self) -> None:
         angles = np.repeat(
             np.asarray([0.0, 2.0 * np.pi / 3.0, 4.0 * np.pi / 3.0]),

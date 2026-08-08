@@ -8,6 +8,8 @@ from fcm_hierarchy import (
     fcm_noise_scores,
     forced_noise_mask,
 )
+from fcm_core import spherical_fcm
+from fcm_document_classification import fcm_document_types
 
 
 class FcmDocumentClassificationTest(unittest.TestCase):
@@ -101,6 +103,35 @@ class FcmDocumentClassificationTest(unittest.TestCase):
 
         self.assertGreater(scores[0], scores[1])
         self.assertGreater(scores[0], scores[2])
+
+    def test_reuses_cached_assigned_distances(self) -> None:
+        features = np.asarray(
+            [
+                [1.0, 0.0],
+                [0.98, 0.02],
+                [0.95, 0.05],
+                [0.0, 1.0],
+                [0.02, 0.98],
+                [0.05, 0.95],
+            ]
+        )
+        result = spherical_fcm(features, n_clusters=2, seed=7)
+        self.assertIsNotNone(result.squared_dissimilarities)
+        cached = np.sqrt(
+            result.squared_dissimilarities[
+                np.arange(len(features)),
+                result.labels,
+            ]
+        )
+
+        expected = fcm_document_types(features, result)
+        actual = fcm_document_types(
+            features,
+            result,
+            assigned_distances=cached,
+        )
+
+        np.testing.assert_array_equal(actual, expected)
 
     def test_forces_exact_top_one_percent_with_stable_id_tie_break(self) -> None:
         scores = np.zeros(200)

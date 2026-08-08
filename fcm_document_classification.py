@@ -202,21 +202,33 @@ def fcm_document_types(
     min_membership: float = 0.40,
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
+    assigned_distances: np.ndarray | None = None,
 ) -> np.ndarray:
-    """Classify fitted FCM samples using robust per-cluster distances."""
+    """Classify fitted FCM samples using robust per-cluster distances.
+
+    ``assigned_distances`` lets callers reuse the selected candidate's final
+    center distances instead of recalculating them from ``X`` and ``centers``.
+    """
 
     if distance_z < 0.0:
         raise ValueError("distance_z must be non-negative")
 
-    labels = result.labels
-    _, distances = sfcm_memberships_from_centers(X, result.centers)
-    row_indices = np.arange(X.shape[0])
-    assigned_distances = distances[row_indices, labels]
+    labels = np.asarray(result.labels)
+    if assigned_distances is None:
+        _, distances = sfcm_memberships_from_centers(X, result.centers)
+        row_indices = np.arange(X.shape[0])
+        distances_for_labels = distances[row_indices, labels]
+    else:
+        distances_for_labels = np.asarray(assigned_distances, dtype=np.float64)
+        if distances_for_labels.ndim != 1 or distances_for_labels.shape[0] != X.shape[0]:
+            raise ValueError("assigned_distances must align with FCM samples")
+        if not np.all(np.isfinite(distances_for_labels)):
+            raise ValueError("assigned_distances must contain only finite values")
     assigned_thresholds = np.full(X.shape[0], float("inf"), dtype=np.float64)
 
     for cluster_id in range(result.memberships.shape[1]):
         cluster_mask = labels == cluster_id
-        cluster_distances = assigned_distances[cluster_mask]
+        cluster_distances = distances_for_labels[cluster_mask]
         if cluster_distances.size < 4:
             continue
 
@@ -228,7 +240,7 @@ def fcm_document_types(
 
     return classify_fcm_documents(
         result.memberships,
-        assigned_distances,
+        distances_for_labels,
         assigned_thresholds,
         min_membership=min_membership,
         max_membership_gap=max_membership_gap,
@@ -242,6 +254,7 @@ def fcm_noise_mask(
     min_membership: float = 0.40,
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     distance_z: float = 3.5,
+    assigned_distances: np.ndarray | None = None,
 ) -> np.ndarray:
     """Return documents satisfying all membership and distance noise rules."""
 
@@ -251,4 +264,5 @@ def fcm_noise_mask(
         min_membership=min_membership,
         max_membership_gap=max_membership_gap,
         distance_z=distance_z,
+        assigned_distances=assigned_distances,
     ) == DOCUMENT_TYPE_NOISE
