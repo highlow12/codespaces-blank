@@ -317,6 +317,52 @@ seed = hash(globalSeed, nodeId, candidateK, restartIndex, phase)
 exact 모드는 회귀 검증용으로 계속 제공한다. fast 모드는 각 생략 이유와 표본 크기,
 후보 점수 차이를 결과에 기록해 품질 저하를 추적한다.
 
+#### `refine_score_margin` 검증 결과
+
+2026-08-08에 `benchmark_fast_fcm_selection.py`로 Gemini 임베딩 3,000건
+(원본 3,072차원, gzip)을 고정 seed `42`로 표본화하고, PCA-64·K 2~4·최소
+자식 크기 20·exact `n_init=10` 조건에서 exact selector와 fast selector의
+선택 K를 비교했다. selector seed는 `42, 43, 44`이며 margin `0.15`와 기존
+상위 2개 refine에 해당하는 `1.0`을 함께 측정했다.
+
+| 표본 수 | margin | K 일치율 | 평균 refine K 수 | fast/exact 시간비 | 평균 label ARI |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 0.15 | 66.7% | 1.33 | 1.50x | 0.635 |
+| 100 | 1.0 | 33.3% | 2.00 | 1.41x | 0.538 |
+| 300 | 0.15 | 100% | 1.67 | 1.20x | 1.000 |
+| 300 | 1.0 | 100% | 2.00 | 1.50x | 1.000 |
+| 1,000 | 0.15 | 100% | 1.00 | 1.16x | 1.000 |
+| 1,000 | 1.0 | 100% | 2.00 | 1.25x | 1.000 |
+| 3,000 | 0.15 | 100% | 1.00 | 1.27x | 1.000 |
+| 3,000 | 1.0 | 100% | 2.00 | 2.06x | 1.000 |
+
+100건 표본만 seed를 `42~51`로 늘린 추가 측정에서는 margin `0.15`의 K
+일치율이 60%, margin `1.0`은 50%였다. 작은 표본에서는 scout 자체의 K
+선택 변동이 남아 있으므로 이 결과를 전체 fast 모드의 정확성 보장으로 해석하지
+않는다. 다만 300건 이상에서는 3개 seed 모두 exact K와 일치했고, 3,000건에서
+refine 수를 평균 2개에서 1개로 줄이면서 label ARI를 유지했다. 따라서
+`0.15`를 fast path의 기본값으로 채택하되, 작은 노드에서 보수적인 탐색이 필요하면
+`FastFcmConfig(refine_score_margin=1.0)`으로 기존 상위 2개 refine 동작을 선택할
+수 있게 한다.
+
+재현 명령:
+
+```bash
+./.venv/bin/python benchmark_fast_fcm_selection.py \
+  --input-json dbpedia_gemini_embeddings.json.gz \
+  --output-json /tmp/fast-fcm-selection-gemini.json \
+  --output-csv /tmp/fast-fcm-selection-gemini.csv \
+  --dataset-sample-sizes 100 300 1000 3000 \
+  --dataset-sample-seed 42 \
+  --seeds 42 43 44 \
+  --pca-components 64 \
+  --max-clusters 4 \
+  --min-child-size 20 \
+  --exact-n-init 10 \
+  --exact-max-attempts 30 \
+  --refine-score-margins 0.15 1.0
+```
+
 ### 8.2 재시작 조기 종료
 
 - 최소 유효 재시작 수를 채운 뒤 안정성이 목표 이상이면 종료
