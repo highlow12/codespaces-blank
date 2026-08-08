@@ -168,7 +168,8 @@ peak RSS를 JSON으로 기록한다.
 보존하는 방식으로 해결했다. 통합 후 루트 테스트 57개와 gzip 100건 fit smoke가
 통과했다.
 
-현재 로컬 `main` fast-forward와 원격 push/PR 반영이 남아 있다.
+로컬 `main` fast-forward와 원격 `refactor/incremental-delta-updates`, `main`
+push까지 완료했다. 이 증분 리팩터 범위의 작업 로그상 필수 작업은 종료되었다.
 
 ## 재개 시 확인 명령
 
