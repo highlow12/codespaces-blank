@@ -124,6 +124,29 @@ ARI/NMI, noise 비율, m scout 호출 수를 함께 기록한다.
   전부 일치했다.
 - 전체 테스트 70개가 통과했다.
 
+### Cluster selection strategy benchmark (2026-08-08)
+
+`benchmark_cluster_selection_strategies.py`는 동일한 전체 데이터 PCA 표현을
+공유한 뒤, FCM cluster-count 선택만 다음 세 방식으로 비교한다.
+
+- `full_selection`: 전체 3,000건에서 K 선택
+- `sample_select_full_fit`: 300건에서 K 선택 후 전체 데이터로 FCM 재학습
+- `sample_select_project`: 300건에서 K·중심을 선택한 뒤 전체 데이터를 해당 중심에 투영
+
+Gemini 3,000건, PCA 128차원, sample size 300, seed 42·43·44의 결과는 다음과 같다.
+선택 시간과 품질 계산은 별도로 기록했으며, 공통 PCA fit 시간은 전략 비교에서
+제외했다.
+
+| 전략 | 평균 algorithm sec | full 대비 speedup | 평균 선택 K | full 선택과의 ARI |
+|---|---:|---:|---:|---:|
+| `full_selection` | 10.802 | 1.00x | 5.0 | 기준선 |
+| `sample_select_full_fit` | 7.438 | 1.45x | 6.0 | 0.575 |
+| `sample_select_project` | 4.368 | 2.47x | 6.0 | 0.514 |
+
+샘플 기반 방식은 빠르지만 seed별 선택 K가 달라지고 full 선택 결과와의 ARI가
+낮아졌으므로, 현재 기본 cluster-selection 경로에는 채택하지 않는다. 재현 가능한
+스크립트와 원자료는 `benchmarks/cluster-selection-2026-08-08/`에 보관한다.
+
 ### N-04 결과
 
 - 2 CPU/OpenBLAS 2-thread 환경에서 restart와 root sibling selector의
