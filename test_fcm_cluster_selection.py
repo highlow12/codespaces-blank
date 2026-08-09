@@ -363,6 +363,43 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertGreater(best.m, 1.0)
         self.assertTrue(any(record.get("phase") == "refine" for record in records))
 
+    def test_fast_selector_reuses_stable_parent_m_without_local_probe(self) -> None:
+        angles = np.repeat(
+            np.asarray([0.0, 2.0 * np.pi / 3.0, 4.0 * np.pi / 3.0]),
+            24,
+        )
+        X = np.column_stack([np.cos(angles), np.sin(angles)])
+        X += np.random.default_rng(7).normal(0.0, 0.02, size=X.shape)
+
+        with patch(
+            "fast_fcm._scout_m",
+            side_effect=AssertionError("stable parent m should be reused"),
+        ):
+            best, records, reason = select_fast_fcm_cluster_count(
+                X,
+                min_clusters=2,
+                max_clusters=4,
+                min_child_size=10,
+                config=FastFcmConfig(
+                    sample_size=36,
+                    scout_n_init=2,
+                    scout_max_attempts=3,
+                    scout_max_iter=40,
+                    refine_n_init=2,
+                    refine_max_attempts=3,
+                    refine_max_iter=50,
+                    refine_top_k=1,
+                ),
+                seed=7,
+                m_hint=2.0,
+            )
+
+        self.assertEqual(reason, "selected_fast_scout_refine")
+        self.assertIsNotNone(best)
+        self.assertTrue(
+            any(record.get("m_selection") == "reused_parent" for record in records)
+        )
+
     def test_fast_selector_scouts_full_k_range_and_refines_top_two(self) -> None:
         angles = np.repeat(np.linspace(0.0, 2.0 * np.pi, 6, endpoint=False), 20)
         X = np.column_stack([np.cos(angles), np.sin(angles)])

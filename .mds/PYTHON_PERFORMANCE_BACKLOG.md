@@ -105,6 +105,25 @@ restart stability가 임계값 미만일 때만 local re-scout하는 정책을 �
 이 변경은 K 선택과 노이즈 품질에 영향을 줄 수 있으므로 exact 대비 선택 K,
 ARI/NMI, noise 비율, m scout 호출 수를 함께 기록한다.
 
+### N-03 결과
+
+- fast hierarchy가 부모 node의 안정적인 m을 자식 node에 전달하고, K scout의
+  restart stability가 `minimum_probe_stability` 미만일 때만 local m probe를 다시
+  실행하도록 구현했다. 기본값은 활성화이며 `--no-fast-m-reuse`로 기존 정책을
+  재현할 수 있다.
+- Gemini 300건 표본 3개에서 m scout 호출은 `9/9/10회`에서 `1/2/1회`로 줄었고,
+  hierarchy runtime 평균은 `2.129초`에서 `1.880초`로 11.7% 단축됐다.
+- seed 43/44에서는 reuse 전후 hierarchy ARI/NMI가 동일했다. seed 42에서는
+  no-reuse 대비 ARI가 `0.3065 → 0.3808`, NMI가 `0.6245 → 0.6143`이었다.
+- 별도 Gemini exact-vs-fast K benchmark(100·300건, seed 42·43, 두 refine 설정)는
+  8/8회 K가 일치했고, 300건의 평균 label ARI/NMI는 모두 1.0이었다.
+- Gemini 1,000건 표본(seed 42, cache 입력)에서는 end-to-end CLI runtime이
+  `10.835초 → 10.664초`로 1.6% 단축됐고, hierarchy fit runtime은
+  `7.817초 → 7.578초`로 3.1% 단축됐다. local m probe는 20회에서 11회로
+  줄었으며, 두 실행 모두 leaf 23개·noise 0건이고 1,000개 샘플의 cluster path가
+  전부 일치했다.
+- 전체 테스트 70개가 통과했다.
+
 ### P1-2. Python의 독립 FCM 작업 병렬화
 
 현재 candidate K와 restart는 직렬 수행된다. Python 경로에도 독립 restart 또는
@@ -151,7 +170,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | E-00 | 완료 | 반복 중 `_minimum_center_distance`의 sklearn 거리 호출 제거 | JS 성능 계획 8.2 | 동일 centers/collapse 판정, warm FCM profile에서 범용 거리 호출 제거 |
 | N-01 | 완료 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
 | N-02 | 완료 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
-| N-03 | 대기 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
+| N-03 | 완료 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
 | N-04 | 조사 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 조사 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 보류 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |

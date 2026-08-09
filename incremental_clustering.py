@@ -912,6 +912,7 @@ def _cluster_config(
     fast_refine_top_k: int,
     fast_stability_target: float,
     fast_m_values: tuple[float, ...],
+    fast_reuse_scout_m: bool,
 ) -> dict[str, Any]:
     if center_updates_before_membership_refresh < 1:
         raise ValueError(
@@ -995,6 +996,7 @@ def _cluster_config(
         "fast_refine_top_k": int(fast_refine_top_k),
         "fast_stability_target": float(fast_stability_target),
         "fast_m_values": [float(value) for value in fast_m_values],
+        "fast_reuse_scout_m": bool(fast_reuse_scout_m),
         "noise_threshold": enter_threshold,
         "noise_release_threshold": resolved_release_threshold,
         "noise_release_threshold_auto": release_threshold_auto,
@@ -1139,6 +1141,7 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
                 "fast_m_values", (2.0, 1.8, 1.6, 1.4)
             )
         ),
+        "fast_reuse_scout_m": bool(config.get("fast_reuse_scout_m", True)),
     }
 
 
@@ -1687,6 +1690,7 @@ def fit_incremental_state(
     fast_refine_top_k: int = 2,
     fast_stability_target: float = 0.85,
     fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
+    fast_reuse_scout_m: bool = True,
     fit_visualization: bool = True,
 ) -> IncrementalClusterState:
     """Fit the initial batch and persist reusable clustering/visual models."""
@@ -1753,6 +1757,7 @@ def fit_incremental_state(
         fast_refine_top_k=fast_refine_top_k,
         fast_stability_target=fast_stability_target,
         fast_m_values=fast_m_values,
+        fast_reuse_scout_m=fast_reuse_scout_m,
     )
     config["visualization_deferred"] = not fit_visualization
     hierarchy_model, tree, assignments = _fit_hierarchy(values, frame, config)
@@ -3083,6 +3088,13 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--fast-refine-top-k", type=int, default=2)
     parser.add_argument("--fast-stability-target", type=float, default=0.85)
     parser.add_argument(
+        "--no-fast-m-reuse",
+        action="store_false",
+        dest="fast_reuse_scout_m",
+        default=True,
+        help="Re-scout fuzzifier m independently at every fast hierarchy node.",
+    )
+    parser.add_argument(
         "--fast-m",
         type=float,
         nargs="+",
@@ -3319,6 +3331,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         fast_refine_top_k=args.fast_refine_top_k,
         fast_stability_target=args.fast_stability_target,
         fast_m_values=tuple(args.fast_m),
+        fast_reuse_scout_m=args.fast_reuse_scout_m,
         fit_visualization=not args.skip_visualization,
     )
     if args.dataset_sample_size is not None:

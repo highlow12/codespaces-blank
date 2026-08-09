@@ -93,6 +93,7 @@ def run_hierarchical_pca_fcm(
     fast_refine_top_k: int = 2,
     fast_stability_target: float = 0.85,
     fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
+    fast_reuse_scout_m: bool = True,
 ) -> HierarchicalResult:
     """Recursively split a dataset with spherical PCA+FCM."""
 
@@ -230,7 +231,12 @@ def run_hierarchical_pca_fcm(
         child["stop_reason"] = f"root_not_split:{reason}"
         root["children"].append(child)
 
-    def recurse(indices: np.ndarray, node: dict[str, Any], depth: int) -> None:
+    def recurse(
+        indices: np.ndarray,
+        node: dict[str, Any],
+        depth: int,
+        inherited_m: float | None = None,
+    ) -> None:
         if depth >= max_depth:
             node["stop_reason"] = "max_depth_reached"
             return
@@ -251,6 +257,7 @@ def run_hierarchical_pca_fcm(
                 selection_method=selection_method,
                 seed=selection_seed,
                 config=fast_config,
+                m_hint=(inherited_m if fast_reuse_scout_m else None),
             )
         else:
             best, candidate_metrics, reason = select_fcm_cluster_count(
@@ -460,7 +467,12 @@ def run_hierarchical_pca_fcm(
                 size=child_indices.size,
             )
             node["children"].append(child)
-            recurse(child_indices, child, depth + 1)
+            recurse(
+                child_indices,
+                child,
+                depth + 1,
+                float(best.m) if fast_mode and fast_reuse_scout_m else None,
+            )
 
     recurse(np.flatnonzero(~projection_outliers), root, 0)
     root["projection_outlier_count"] = int(np.sum(projection_outliers))
@@ -592,6 +604,7 @@ def run_hierarchical_pca_fcm(
         "fast_refine_top_k": int(fast_refine_top_k),
         "fast_stability_target": float(fast_stability_target),
         "fast_m_values": [float(value) for value in fast_m_values],
+        "fast_reuse_scout_m": bool(fast_reuse_scout_m),
     }
     tree = {"config": config, "summary": summary, "root": root}
     return HierarchicalResult(

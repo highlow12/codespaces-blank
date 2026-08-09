@@ -181,6 +181,45 @@ def _scout_candidate_ks(
     return ks, decision, score_gap
 
 
+def _run_scout_k_selection(
+    X: np.ndarray,
+    *,
+    min_clusters: int,
+    max_clusters: int,
+    min_child_size: int,
+    min_membership: float,
+    max_membership_gap: float,
+    distance_z: float,
+    selection_method: str,
+    seed: int,
+    selected_m: float,
+    config: FastFcmConfig,
+) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
+    scout_max_clusters = min(max_clusters, config.scout_max_clusters)
+    return select_fcm_cluster_count(
+        X,
+        min_clusters=min_clusters,
+        max_clusters=scout_max_clusters,
+        min_child_size=min_child_size,
+        min_membership=min_membership,
+        max_membership_gap=max_membership_gap,
+        distance_z=distance_z,
+        selection_method=selection_method,
+        seed=seed,
+        n_init=config.scout_n_init,
+        max_attempts=config.scout_max_attempts,
+        m=selected_m,
+        max_iter=config.scout_max_iter,
+        tol=config.scout_tol,
+        collapse_center_separation=config.min_center_separation,
+        # The scout is already bounded by sample size, restarts, iterations,
+        # and scout_max_clusters. Evaluate its complete K range so one noisy
+        # XB worsening cannot hide a later, stronger split.
+        xb_worsening_patience=scout_max_clusters,
+        use_silhouette_proxy=True,
+    )
+
+
 def _choose_full_candidate(
     candidates: list[FCMKCandidate],
     selection_method: str,
@@ -214,8 +253,13 @@ def select_fast_fcm_cluster_count(
     selection_method: str = "multi_metric",
     seed: int = 42,
     config: FastFcmConfig | None = None,
+    m_hint: float | None = None,
 ) -> tuple[FCMKCandidate | None, list[dict[str, Any]], str]:
-    """Scout a node cheaply and refine only its best full-data K values."""
+    """Scout a node cheaply and refine only its best full-data K values.
+
+    ``m_hint`` reuses a stable parent-node fuzzifier. The local probe is
+    repeated only when the reused value produces an unstable K scout.
+    """
 
     fast = config or FastFcmConfig()
     fast.validate()
@@ -223,39 +267,79 @@ def select_fast_fcm_cluster_count(
         raise ValueError("X must be a non-empty 2D array")
 
     scout_X = _deterministic_sample(X, fast.sample_size, seed)
-    selected_m, probe_records = _scout_m(
+    if m_hint is None:
+        selected_m, probe_records = _scout_m(
+            scout_X,
+            min_child_size=min_child_size,
+            min_clusters=min_clusters,
+            max_membership_gap=max_membership_gap,
+            distance_z=distance_z,
+            selection_method=selection_method,
+            seed=seed,
+            config=fast,
+        )
+        m_selection = "local_probe"
+    else:
+        selected_m = float(m_hint)
+        if not np.isfinite(selected_m) or selected_m <= 1.0:
+            raise ValueError("m_hint must be finite and greater than 1")
+        probe_records = [
+            {
+                "phase": "m_probe",
+                "m_probe": selected_m,
+                "m_probe_reason": "reused_parent_m",
+                "m_reused": True,
+            }
+        ]
+        m_selection = "reused_parent"
+
+    scout_best, scout_records, scout_reason = _run_scout_k_selection(
         scout_X,
-        min_child_size=min_child_size,
         min_clusters=min_clusters,
-        max_membership_gap=max_membership_gap,
-        distance_z=distance_z,
-        selection_method=selection_method,
-        seed=seed,
-        config=fast,
-    )
-    scout_max_clusters = min(max_clusters, fast.scout_max_clusters)
-    scout_best, scout_records, scout_reason = select_fcm_cluster_count(
-        scout_X,
-        min_clusters=min_clusters,
-        max_clusters=scout_max_clusters,
+        max_clusters=max_clusters,
         min_child_size=min_child_size,
         min_membership=min_membership,
         max_membership_gap=max_membership_gap,
         distance_z=distance_z,
         selection_method=selection_method,
         seed=seed + 97,
-        n_init=fast.scout_n_init,
-        max_attempts=fast.scout_max_attempts,
-        m=selected_m,
-        max_iter=fast.scout_max_iter,
-        tol=fast.scout_tol,
-        collapse_center_separation=fast.min_center_separation,
-        # The scout is already bounded by sample size, restarts, iterations,
-        # and scout_max_clusters. Evaluate its complete K range so one noisy
-        # XB worsening cannot hide a later, stronger split.
-        xb_worsening_patience=scout_max_clusters,
-        use_silhouette_proxy=True,
+        selected_m=selected_m,
+        config=fast,
     )
+    if m_hint is not None and (
+        scout_best is None
+        or scout_best.restart_stability < fast.minimum_probe_stability
+    ):
+        local_m, local_probe_records = _scout_m(
+            scout_X,
+            min_child_size=min_child_size,
+            min_clusters=min_clusters,
+            max_membership_gap=max_membership_gap,
+            distance_z=distance_z,
+            selection_method=selection_method,
+            seed=seed,
+            config=fast,
+        )
+        probe_records.extend(local_probe_records)
+        selected_m = local_m
+        m_selection = "local_rescout"
+        scout_best, scout_records, scout_reason = _run_scout_k_selection(
+            scout_X,
+            min_clusters=min_clusters,
+            max_clusters=max_clusters,
+            min_child_size=min_child_size,
+            min_membership=min_membership,
+            max_membership_gap=max_membership_gap,
+            distance_z=distance_z,
+            selection_method=selection_method,
+            seed=seed + 97,
+            selected_m=selected_m,
+            config=fast,
+        )
+
+    for record in [*probe_records, *scout_records]:
+        record["selected_m"] = float(selected_m)
+        record["m_selection"] = m_selection
     if scout_best is None:
         return None, [*probe_records, *scout_records], f"fast_scout:{scout_reason}"
 
