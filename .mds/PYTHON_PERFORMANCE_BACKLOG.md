@@ -81,6 +81,21 @@ Python CLI가 직접 쓸 수 있는 `float32` row-major data file, manifest, met
 필요한 행만 읽도록 한다. JSON loader는 호환 fallback으로 유지하며, 변환 결과에는
 입력 hash·shape·dtype·metadata schema version을 기록한다.
 
+### N-02 결과
+
+- `embedding_cache.py build`가 JSON/gzip JSON을 스트리밍해 `embeddings.f32`,
+  `metadata.jsonl`, row offset index, manifest를 생성한다. manifest에는 source SHA-256,
+  shape `[3000, 3072]`, `<f4` dtype, metadata schema version을 기록한다.
+- `incremental_clustering.py`의 fit/update CLI에 `--input-cache`를 추가했다. 고정 seed
+  표본은 memmap에서 필요한 행만 읽고 source JSON을 다시 decode하지 않는다.
+- Gemini 3,000건 cache를 만든 뒤 seed=42 100건을 원본 JSON loader와 비교해 ID, metadata,
+  float32 embedding을 일치시켰고, cache 기반 incremental fit의 clustering 결과도
+  일치했다.
+- 동일 프로세스 import 이후 측정한 load+sample baseline은 JSON 14.780초/peak RSS
+  808,580KB, cache 0.009초/194,032KB였다. cache build는 9.470초, embedding data는
+  36MB였다.
+- 전체 테스트 69개가 통과했다.
+
 ### P1-1. fuzzifier scout 재사용
 
 fast path는 hierarchy의 여러 노드에서 동일한 `m_values` probe를 반복한다.
@@ -135,7 +150,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 |---|---|---|---|---|
 | E-00 | 완료 | 반복 중 `_minimum_center_distance`의 sklearn 거리 호출 제거 | JS 성능 계획 8.2 | 동일 centers/collapse 판정, warm FCM profile에서 범용 거리 호출 제거 |
 | N-01 | 완료 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
-| N-02 | 대기 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
+| N-02 | 완료 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
 | N-03 | 대기 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
 | N-04 | 조사 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 조사 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |

@@ -21,6 +21,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from embedding_cache import cache_record_count, load_embeddings_from_cache
 from visualization_constants import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
     DEFAULT_VISUAL_PCA_COMPONENTS,
@@ -2950,7 +2951,16 @@ def write_outputs(
 
 
 def _add_input_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--input-json", type=Path, required=True)
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--input-json", type=Path)
+    input_group.add_argument(
+        "--input-cache",
+        type=Path,
+        help=(
+            "Row-addressable cache manifest or directory built by "
+            "embedding_cache.py."
+        ),
+    )
     parser.add_argument("--start", type=int, default=0)
     parser.add_argument("--limit", type=int, default=None)
     parser.add_argument(
@@ -3219,19 +3229,34 @@ def _derived_path(path: Path, suffix: str) -> Path:
 
 
 def _run_fit(args: argparse.Namespace) -> None:
-    embeddings, metadata = load_embeddings_from_json(
-        args.input_json,
-        start=args.start,
-        limit=args.limit,
-        id_offset=args.id_offset,
-    )
-    dataset_total_rows = len(embeddings)
     dataset_sample_seed = (
         args.dataset_sample_seed
         if args.dataset_sample_seed is not None
         else args.seed
     )
-    if args.dataset_sample_size is not None:
+    if args.input_cache is not None:
+        if args.id_offset:
+            raise ValueError(
+                "--id-offset is only supported with --input-json; "
+                "apply it while building the cache"
+            )
+        dataset_total_rows = cache_record_count(args.input_cache)
+        embeddings, metadata = load_embeddings_from_cache(
+            args.input_cache,
+            start=args.start,
+            limit=args.limit,
+            sample_size=args.dataset_sample_size,
+            sample_seed=dataset_sample_seed,
+        )
+    else:
+        embeddings, metadata = load_embeddings_from_json(
+            args.input_json,
+            start=args.start,
+            limit=args.limit,
+            id_offset=args.id_offset,
+        )
+        dataset_total_rows = len(embeddings)
+    if args.input_cache is None and args.dataset_sample_size is not None:
         embeddings, metadata = sample_embedding_batch(
             embeddings,
             metadata,
@@ -3330,12 +3355,24 @@ def _run_update(args: argparse.Namespace) -> None:
     output_state = args.state_output or args.state
     with state_file_lock(args.state):
         state = load_state(args.state)
-        embeddings, metadata = load_embeddings_from_json(
-            args.input_json,
-            start=args.start,
-            limit=args.limit,
-            id_offset=args.id_offset,
-        )
+        if args.input_cache is not None:
+            if args.id_offset:
+                raise ValueError(
+                    "--id-offset is only supported with --input-json; "
+                    "apply it while building the cache"
+                )
+            embeddings, metadata = load_embeddings_from_cache(
+                args.input_cache,
+                start=args.start,
+                limit=args.limit,
+            )
+        else:
+            embeddings, metadata = load_embeddings_from_json(
+                args.input_json,
+                start=args.start,
+                limit=args.limit,
+                id_offset=args.id_offset,
+            )
         updated_state, summary = update_incremental_state(
             state,
             embeddings,

@@ -10,6 +10,40 @@ import pandas as pd
 from sklearn.datasets import make_blobs
 
 
+EMBEDDING_METADATA_SCHEMA_VERSION = 1
+
+
+def normalize_embedding_record(
+    record: Any,
+    *,
+    index: int,
+    id_offset: int = 0,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Validate one JSON record and normalize its metadata fields."""
+
+    if not isinstance(record, dict) or "embedding" not in record:
+        raise ValueError(f"Invalid embedding record at index {index}")
+    embedding = np.asarray(record["embedding"], dtype=np.float64)
+    if embedding.ndim != 1 or not np.all(np.isfinite(embedding)):
+        raise ValueError(f"Invalid embedding at index {index}")
+    metadata = {key: value for key, value in record.items() if key != "embedding"}
+    if "id" not in metadata:
+        metadata["id"] = metadata.get("resource", id_offset + index)
+    if "tag" not in metadata:
+        hierarchy = metadata.get("class_hierarchy")
+        if (
+            isinstance(hierarchy, list)
+            and hierarchy
+            and isinstance(hierarchy[0], str)
+        ):
+            metadata["tag"] = hierarchy[0]
+        elif isinstance(metadata.get("class"), str):
+            metadata["tag"] = metadata["class"]
+        else:
+            metadata["tag"] = f"Document_{index}"
+    return embedding, metadata
+
+
 def load_embeddings_from_json(
     json_path: Path,
     *,
@@ -42,27 +76,12 @@ def load_embeddings_from_json(
     embeddings: list[np.ndarray] = []
     ids: list[Any] = []
     for index, record in enumerate(selected_records, start=start):
-        if not isinstance(record, dict) or "embedding" not in record:
-            raise ValueError(f"Invalid embedding record at index {index}")
-        embedding = np.asarray(record["embedding"], dtype=np.float64)
-        if embedding.ndim != 1 or not np.all(np.isfinite(embedding)):
-            raise ValueError(f"Invalid embedding at index {index}")
+        embedding, metadata = normalize_embedding_record(
+            record,
+            index=index,
+            id_offset=id_offset,
+        )
         embeddings.append(embedding)
-        metadata = {key: value for key, value in record.items() if key != "embedding"}
-        if "id" not in metadata:
-            metadata["id"] = metadata.get("resource", id_offset + index)
-        if "tag" not in metadata:
-            hierarchy = metadata.get("class_hierarchy")
-            if (
-                isinstance(hierarchy, list)
-                and hierarchy
-                and isinstance(hierarchy[0], str)
-            ):
-                metadata["tag"] = hierarchy[0]
-            elif isinstance(metadata.get("class"), str):
-                metadata["tag"] = metadata["class"]
-            else:
-                metadata["tag"] = f"Document_{index}"
         ids.append(metadata["id"])
         metadata_rows.append(metadata)
 
