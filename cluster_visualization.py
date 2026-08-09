@@ -10,9 +10,11 @@ from cluster_plotting import (
     make_fixed_coordinate_plot,
     make_selected_coordinate_plot,
 )
-from umap_projection import (
+from visualization_constants import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
     DEFAULT_VISUAL_PCA_COMPONENTS,
+)
+from umap_projection import (
     _load_umap,
     _make_umap_reducer,
     _validate_cluster_target,

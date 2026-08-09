@@ -21,13 +21,9 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from cluster_visualization import (
+from visualization_constants import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
     DEFAULT_VISUAL_PCA_COMPONENTS,
-    build_cluster_supervision,
-    fit_projection_model,
-    make_fixed_coordinate_plot,
-    transform_projection,
 )
 from clustering_types import HierarchicalModel
 from embedding_data import load_embeddings_from_json, sample_embedding_batch
@@ -1619,6 +1615,11 @@ def _fit_visualization(
     assignments: pd.DataFrame,
     config: dict[str, Any],
 ) -> tuple[Any, Any, np.ndarray]:
+    from cluster_visualization import (
+        build_cluster_supervision,
+        fit_projection_model,
+    )
+
     cluster_target, cluster_target_metric, _ = build_cluster_supervision(assignments)
     return fit_projection_model(
         embeddings,
@@ -2247,6 +2248,8 @@ def update_incremental_state(
         drift["evaluated"] and drift["alarm_active"]
     )
     emergency_recluster = emergency_recluster_requested and not cooldown_active
+    from cluster_visualization import transform_projection
+
     new_coordinates = transform_projection(
         values,
         pca=state.visual_pca,
@@ -2925,6 +2928,8 @@ def write_outputs(
             "visual_pca_components",
             DEFAULT_VISUAL_PCA_COMPONENTS,
         )
+        from cluster_visualization import make_fixed_coordinate_plot
+
         make_fixed_coordinate_plot(
             state.coordinates,
             state.assignments,

@@ -61,6 +61,15 @@ warm FCM 최적화를 시작할 때 가장 먼저 완료해야 하는 기존 작
 시각화 함수와 타입 의존성을 `_fit_visualization` 및 실제 plot 생성 경로로 옮긴다.
 클러스터링·update CLI는 UMAP/Matplotlib 없이 import 가능해야 한다.
 
+### N-01 결과
+
+- 시각화 기본값을 `visualization_constants.py`로 분리하고, `cluster_visualization`의
+  함수 import를 fit/update/plot 실행 경로로 이동했다.
+- `incremental_clustering` 초기 import에서 `cluster_visualization`,
+  `cluster_plotting`, `umap_projection`이 로드되지 않는 회귀 테스트를 추가했다.
+- Gemini 100건 고정 표본의 `--fast --skip-visualization` 실행에서 state가 정상 생성되고,
+  전체 테스트 66개가 통과했다.
+
 ### P0-2. Python용 바이너리 입력 캐시와 부분 로더
 
 현재 JSON loader는 표본 실행 전에도 전체 gzip JSON을 Python dict/list와
@@ -125,7 +134,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | ID | 상태 | 작업 | 선행 조건 | 완료 기준 |
 |---|---|---|---|---|
 | E-00 | 완료 | 반복 중 `_minimum_center_distance`의 sklearn 거리 호출 제거 | JS 성능 계획 8.2 | 동일 centers/collapse 판정, warm FCM profile에서 범용 거리 호출 제거 |
-| N-01 | 대기 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
+| N-01 | 완료 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
 | N-02 | 대기 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
 | N-03 | 대기 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
 | N-04 | 조사 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |

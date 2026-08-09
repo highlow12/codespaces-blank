@@ -22,10 +22,10 @@ from pca_projection import (
     fit_normalized_pca_projection,
     transform_normalized_pca_projection,
 )
-
-
-DEFAULT_VISUAL_PCA_COMPONENTS = 64
-DEFAULT_CLUSTER_TARGET_WEIGHT = 0.01
+from visualization_constants import (
+    DEFAULT_CLUSTER_TARGET_WEIGHT,
+    DEFAULT_VISUAL_PCA_COMPONENTS,
+)
 
 
 def _load_umap() -> Any:
