@@ -221,6 +221,28 @@ atomic write한다. 300건 profile에서는 0.07초로 우선순위가 낮지만
 payload checksum을 stream 또는 sidecar manifest로 분리하고, checksum·legacy
 load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 
+## CPU·RSS 공동 최적화 계획 (2026-08-09)
+
+CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리만 줄이고 hot path를
+느리게 만드는 것을 피하기 위해 이후 작업은 두 지표를 함께 측정한다. 작업별 범위,
+설계 선택지, 결과 동등성 검증, 채택·중단 기준은
+[PYTHON_CPU_RSS_OPTIMIZATION_PLAN.md](PYTHON_CPU_RSS_OPTIMIZATION_PLAN.md)에 상세히
+정의한다.
+
+| 우선순위 | 계획 ID | 작업 | 주 목표 | 상태 |
+|---:|---|---|---|---|
+| 0 | R-00 | Gemini cache warm CPU·RSS 기준선과 병목 프로파일 고정 | 이후 작업의 시간·RSS·state 기준값 확보 | 대기 |
+| 1 | C-01 | FCM candidate K·restart 배열/계산 재사용 | CPU 우선, workspace 수명 관리로 RSS 제한 | 대기 |
+| 2 | C-02 | PCA 자동 차원 탐색의 projection 재사용 | 반복 PCA/투영 CPU와 임시 배열 RSS 감소 | 대기 |
+| 3 | M-01 | 증분 center contribution compact numeric 저장 | update CPU·state 크기·RSS 동시 감소 | 대기 |
+| 4 | I-01 / N-07 | state envelope 직렬화 중복 제거 | 대형 state save/load CPU·일시 RSS 감소 | 보류: I/O profile 필요 |
+| 5 | M-02 | level soft-membership의 필요 시 생성 추가 축소 | 소비되지 않는 출력의 RSS/state 감소 | 대기: field profile 필요 |
+| 조건부 | H-01 / N-04 | worker 병렬화 재검토 | 충분한 CPU에서만 wall time 개선 검증 | 보류: 2 CPU에서 역효과 |
+
+공통 채택선은 동일 Gemini cache·seed의 1,000/3,000 rows warm-run에서 CPU 시간 또는
+peak RSS 10% 이상 개선, 그리고 다른 지표의 3% 초과 회귀가 없는 것이다. 작은 개선은
+측정값과 보류 사유를 남기고 기본 경로에는 반영하지 않는다.
+
 ## 작업 트래커
 
 | ID | 상태 | 작업 | 선행 조건 | 완료 기준 |
@@ -232,15 +254,22 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | N-04 | 보류 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 완료 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 완료 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
-| N-07 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
+| R-00 | 대기 | Gemini cache warm CPU·RSS 기준선 및 병목 프로파일 | 동일 환경·cache·seed 고정 | 1,000/3,000 rows p50·peak RSS·state 표와 CPU/RSS 상위 보유 구조 기록 |
+| C-01 | 대기 | FCM candidate K·restart 배열/계산 재사용 | R-00에서 FCM 병목 확인 | 수치 결과 동등, CPU 또는 RSS 10% 개선, 다른 지표 3% 초과 회귀 없음 |
+| C-02 | 대기 | PCA 자동 차원 탐색 projection 재사용 | R-00에서 PCA 병목 확인 | 선택 차원·downstream 결과 동등, CPU/RSS 공동 기준 통과 |
+| M-01 | 대기 | 증분 center contribution compact numeric 저장 | contribution/state 필드별 크기 측정 | replace/idempotency·legacy load 통과, update CPU·state/RSS 개선 |
+| N-07 / I-01 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
+| M-02 | 대기 | level soft-membership 필요 시 생성 추가 축소 | field-level 출력 메모리 profile | schema/visualization fallback 통과, 기본 경로 RSS/state 개선 |
+| N-04 / H-01 | 보류 | restart·sibling Python 병렬화 재검토 | 4+ 실제 CPU와 큰 작업량 | seed 결과 일치, aggregate RSS 제한, warm fit p50 개선 |
 
-## 실행 순서
+## 향후 실행 순서
 
-1. E-00을 먼저 완료해 warm FCM의 현재 최대 비용을 제거한다.
-2. N-01과 N-02를 병렬로 진행해 cold CLI와 표본 실행의 지배적 비용을 줄인다.
-3. N-03을 Gemini exact-vs-fast benchmark로 검증한다.
-4. N-04와 N-05는 수치 fixture 및 BLAS 환경을 고정한 별도 spike로 판단한다.
-5. N-06과 N-07은 출력 계약 및 대형 state profile이 필요할 때만 시작한다.
+1. R-00으로 warm CPU·RSS 기준선과 실제 hot path를 확정한다.
+2. C-01과 C-02 중 R-00에서 더 큰 CPU 병목으로 확인된 항목을 먼저, 나머지를 다음으로
+   진행한다. 두 작업을 한 변경에 섞지 않는다.
+3. M-01로 증분 update/state의 Python 객체 오버헤드를 줄인다.
+4. I/O profile 또는 field profile 근거가 생기면 N-07/I-01, M-02를 진행한다.
+5. N-04/H-01은 재개 조건을 충족할 때만 다시 실험한다.
 
 ## 공통 검증 규칙
 
