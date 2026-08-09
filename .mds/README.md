@@ -14,6 +14,7 @@
 - `PROJECT_DECISION_HISTORY.md`: 프로젝트 의사결정과 과거 성능 비교
 - `PCA_DIMENSION_SELECTION.md`: 고정 PCA 후보 평가와 자동 선택 근거
 - `TAG_EMBEDDING_EXPERIMENT.md`: 태그 임베딩 실험
+- `SYNTHETIC_TAG_DATASET_SIMULATION.md`: 숨은 concept 기반 합성 태그 데이터셋과 3,000개 시뮬레이션
 - `hierarchical_clustering_js_plan.md`: JavaScript/TypeScript 이식 기획
 - `JS_PERFORMANCE_OPTIMIZATION_PLAN.md`: Python 알고리즘 최적화 후 JS 이식 계획
 - `PYTHON_PERFORMANCE_BACKLOG.md`: 기존 계획 밖 Python 성능 후보와 작업 트래커
