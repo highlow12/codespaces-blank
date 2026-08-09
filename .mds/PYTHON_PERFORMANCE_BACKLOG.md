@@ -281,6 +281,30 @@ center contribution projected/weights 합계 2,158,536 bytes였다.
 변경으로 구현한다. 수치 결과·선택 차원·downstream assignment가 동일하지 않으면
 채택하지 않는다.
 
+### C-02 결과 (2026-08-09)
+
+`pca_dimension_search.py`에 후보별 `k` 이웃 탐색을 최대 `k` 한 번으로 통합하는
+`neighbor_indices_by_k`를 추가했다. reference embedding과 각 PCA prefix 모두에서
+`k=15,30`을 따로 계산하던 경로를 `k=30` 검색 결과의 prefix view로 재사용한다.
+이 변경으로 3,000건의 이웃 검색 호출은 34회에서 18회(전체 reference 1회와
+17개 후보별 1회)로 줄었다.
+
+| 표본 | baseline wall p50 (초) | C-02 wall p50 (초) | CPU 변화 | baseline RSS (KiB) | C-02 RSS (KiB) | state 변화 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 9.202636 | 8.492067 | -7.72% | 313,640 | 319,588 (+1.90%) | 0% |
+| 3,000 | 30.501021 | 26.745578 | -12.31% | 592,508 | 592,720 (+0.04%) | 0% |
+
+3,000건에서 CPU 10% 개선과 RSS 3% 이내 회귀 기준을 충족해 C-02를 채택한다.
+1,000건 개선은 7.72%로 작지만 RSS 회귀는 3% 이내이고, 큰 운영 표본에서 목표를
+넘겼다. 변경 전후 1,000/3,000건 state의 PCA 선택 차원, assignments, metadata,
+embedding, hierarchy summary/root metric가 모두 같았고 hierarchy center 최대
+절대 차이는 `0`이었다. PCA·clustering/visualization 관련 테스트와 루트 테스트
+총 81개가 통과했다.
+
+변경 후 3,000건 cProfile에서 `evaluate_pca_prefixes`는 6.318초에서 3.537초,
+neighbor search는 34회·6.436초에서 17회·3.198초로 줄었다. 다음 병목은 fast FCM
+후보 K·restart 경로인 **C-01**이다.
+
 CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리만 줄이고 hot path를
 느리게 만드는 것을 피하기 위해 이후 작업은 두 지표를 함께 측정한다. 작업별 범위,
 설계 선택지, 결과 동등성 검증, 채택·중단 기준은
@@ -291,7 +315,7 @@ CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리�
 |---:|---|---|---|---|
 | 0 | R-00 | Gemini cache warm CPU·RSS 기준선과 병목 프로파일 고정 | 이후 작업의 시간·RSS·state 기준값 확보 | 완료 |
 | 1 | C-01 | FCM candidate K·restart 배열/계산 재사용 | CPU 우선, workspace 수명 관리로 RSS 제한 | 대기 |
-| 2 | C-02 | PCA 자동 차원 탐색의 projection 재사용 | 반복 PCA/투영 CPU와 임시 배열 RSS 감소 | 대기 |
+| 2 | C-02 | PCA 자동 차원 탐색의 projection 재사용 | 반복 PCA/투영 CPU와 임시 배열 RSS 감소 | 완료 |
 | 3 | M-01 | 증분 center contribution compact numeric 저장 | update CPU·state 크기·RSS 동시 감소 | 대기 |
 | 4 | I-01 / N-07 | state envelope 직렬화 중복 제거 | 대형 state save/load CPU·일시 RSS 감소 | 보류: I/O profile 필요 |
 | 5 | M-02 | level soft-membership의 필요 시 생성 추가 축소 | 소비되지 않는 출력의 RSS/state 감소 | 대기: field profile 필요 |
@@ -314,7 +338,7 @@ peak RSS 10% 이상 개선, 그리고 다른 지표의 3% 초과 회귀가 없�
 | N-06 | 완료 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
 | R-00 | 완료 | Gemini cache warm CPU·RSS 기준선 및 병목 프로파일 | 동일 환경·cache·seed 고정 | 1,000/3,000 rows p50·peak RSS·state 표와 CPU/RSS 상위 보유 구조 기록 |
 | C-01 | 대기 | FCM candidate K·restart 배열/계산 재사용 | R-00에서 FCM 병목 확인 | 수치 결과 동등, CPU 또는 RSS 10% 개선, 다른 지표 3% 초과 회귀 없음 |
-| C-02 | 대기 | PCA 자동 차원 탐색 projection 재사용 | R-00에서 PCA 병목 확인 | 선택 차원·downstream 결과 동등, CPU/RSS 공동 기준 통과 |
+| C-02 | 완료 | PCA 자동 차원 탐색 projection 재사용 | R-00에서 PCA 병목 확인 | 선택 차원·downstream 결과 동등, CPU/RSS 공동 기준 통과 |
 | M-01 | 대기 | 증분 center contribution compact numeric 저장 | contribution/state 필드별 크기 측정 | replace/idempotency·legacy load 통과, update CPU·state/RSS 개선 |
 | N-07 / I-01 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
 | M-02 | 대기 | level soft-membership 필요 시 생성 추가 축소 | field-level 출력 메모리 profile | schema/visualization fallback 통과, 기본 경로 RSS/state 개선 |

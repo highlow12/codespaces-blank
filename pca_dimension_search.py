@@ -178,6 +178,32 @@ def neighbor_indices(
     return neighbors
 
 
+def neighbor_indices_by_k(
+    X: np.ndarray,
+    k_values: Sequence[int],
+    *,
+    metric: str = "cosine",
+) -> dict[int, np.ndarray]:
+    """Compute one maximum-neighbor search and expose the requested prefixes.
+
+    ``NearestNeighbors.kneighbors`` repeats the pairwise search when called
+    separately for each k. The first k non-self neighbors from a maximum-k
+    search are the same neighbors needed by every smaller k for the continuous
+    embedding data used by the clustering pipeline. Keeping the prefixes as
+    views also avoids copying the small neighbor-index arrays.
+    """
+
+    normalized_k_values = tuple(dict.fromkeys(int(k) for k in k_values))
+    if not normalized_k_values:
+        raise ValueError("k_values must contain at least one value")
+    maximum_k = max(normalized_k_values)
+    neighbors = neighbor_indices(X, maximum_k, metric=metric)
+    return {
+        k: neighbors[:, :k]
+        for k in normalized_k_values
+    }
+
+
 def mean_neighbor_preservation(
     reference_neighbors: np.ndarray,
     candidate_neighbors: np.ndarray,
@@ -233,10 +259,10 @@ def prepare_pca_prefix_search(
         candidate_dimensions=candidate_dimensions,
         k_values=normalized_k_values,
         cumulative_variance=np.cumsum(projection.pca.explained_variance_ratio_),
-        reference_neighbors={
-            k: neighbor_indices(projection.normalized_input, k)
-            for k in normalized_k_values
-        },
+        reference_neighbors=neighbor_indices_by_k(
+            projection.normalized_input,
+            normalized_k_values,
+        ),
     )
 
 
@@ -272,10 +298,15 @@ def evaluate_pca_prefixes(
         if score_features.shape[0] != search.projection.normalized_input.shape[0]:
             raise ValueError("candidate_features must contain one row per input")
 
+        candidate_neighbors = neighbor_indices_by_k(
+            score_features,
+            search.k_values,
+            metric=neighbor_metric,
+        )
         preservation_by_k = {
             k: mean_neighbor_preservation(
                 search.reference_neighbors[k],
-                neighbor_indices(score_features, k, metric=neighbor_metric),
+                candidate_neighbors[k],
             )
             for k in search.k_values
         }

@@ -10,7 +10,11 @@ from pca_dimension_selection import (
     select_pca_dimension,
     transform_with_selected_dimension,
 )
-from pca_dimension_search import GLOBAL_KNEE_REASON
+from pca_dimension_search import (
+    GLOBAL_KNEE_REASON,
+    neighbor_indices,
+    neighbor_indices_by_k,
+)
 
 
 class PcaDimensionSelectionTests(unittest.TestCase):
@@ -60,6 +64,38 @@ class PcaDimensionSelectionTests(unittest.TestCase):
         maximum_projection = selection.pca.transform(normalize(self.X, norm="l2"))
         expected = normalize(maximum_projection[:, :32], norm="l2")
         np.testing.assert_allclose(selection.selected_features, expected)
+
+    def test_reuses_maximum_neighbor_search_for_requested_k_values(self) -> None:
+        requested_k_values = (3, 5, 4)
+        combined = neighbor_indices_by_k(
+            self.X,
+            requested_k_values,
+            metric="cosine",
+        )
+
+        self.assertEqual(set(combined), {3, 4, 5})
+        for k in (3, 4, 5):
+            np.testing.assert_array_equal(
+                combined[k],
+                neighbor_indices(self.X, k, metric="cosine"),
+            )
+
+    def test_prefix_evaluation_searches_neighbors_once_per_candidate(self) -> None:
+        with patch(
+            "pca_dimension_search.neighbor_indices",
+            wraps=neighbor_indices,
+        ) as search_mock:
+            select_pca_dimension(
+                self.X,
+                max_components=32,
+                min_components=8,
+                component_step=8,
+                k_values=(3, 5),
+                minimum_preservation_gain=0.0,
+            )
+
+        # One reference search plus one maximum-k search for each prefix.
+        self.assertEqual(search_mock.call_count, 1 + 4)
 
     def test_selects_previous_dimension_at_first_below_minimum_gain(self) -> None:
         selection = select_pca_dimension(
