@@ -124,6 +124,20 @@ ARI/NMI, noise 비율, m scout 호출 수를 함께 기록한다.
   전부 일치했다.
 - 전체 테스트 70개가 통과했다.
 
+### N-04 결과
+
+- 2 CPU/OpenBLAS 2-thread 환경에서 restart와 root sibling selector의
+  worker 2 프로토타입을 측정했다. 병렬 경로는 worker당 BLAS thread를 1개로
+  제한해 oversubscription을 피했다.
+- Gemini cache 1,000건(seed 42)의 warm hierarchy fit 3회에서 sequential
+  p50은 `8.092초`, worker 2는 `8.926초`로 10.3% 느려졌다. 전체 cluster path와
+  noise 판정은 일치했다.
+- root의 4개 sibling selector만 병렬화한 별도 측정에서도 p50이
+  `0.800초 → 0.936초`로 17.1% 느려졌고, 선택 K/m은 일치했다.
+- 현재 환경과 1,000건 규모에서는 executor 및 BLAS thread 제어 비용이 이득보다
+  컸으므로 production 병렬화는 채택하지 않고 보류한다. 더 많은 CPU 또는 더 큰
+  node가 실제 운영 조건이 될 때 재측정한다.
+
 ### P1-2. Python의 독립 FCM 작업 병렬화
 
 현재 candidate K와 restart는 직렬 수행된다. Python 경로에도 독립 restart 또는
@@ -171,7 +185,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | N-01 | 완료 | skip-visualization lazy import | 없음 | skip CLI가 UMAP/plotting을 import하지 않고 cluster 결과·state가 기존과 일치 |
 | N-02 | 완료 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
 | N-03 | 완료 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
-| N-04 | 조사 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
+| N-04 | 보류 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 조사 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 보류 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
 | N-07 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
