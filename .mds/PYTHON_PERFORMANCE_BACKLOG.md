@@ -223,6 +223,64 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 
 ## CPU·RSS 공동 최적화 계획 (2026-08-09)
 
+### R-00 결과 (2026-08-09)
+
+`perf/optimization-plan`의 commit `294fdb5a3694072fbed9dbabe8279897b8b88246`에서
+3,000건 Gemini gzip 원본으로 row-addressable cache를 만들고, cache 입력의
+`fit --fast --skip-visualization`을 표본 크기별 새 프로세스 3회 실행했다. cache
+생성 시간은 측정에서 제외했다.
+
+- 원본: `dbpedia_gemini_embeddings.json.gz`, SHA-256
+  `9a949bec1402b52f4b2cba4376ea3eda7c69003b33b7b1ea72e9501cf84d25fc`
+- cache manifest SHA-256:
+  `d27b00b5cee234330973727e999d82ef936cf13db6ed87768aba119867bb80d3`
+- 입력 shape/dtype: `3000 x 3072`, `<f4`
+- Python 3.12.1, NumPy 2.4.6, SciPy 1.18.0, scikit-learn 1.9.0
+- 2 CPU 환경에서 `OPENBLAS_NUM_THREADS=2`, `OMP_NUM_THREADS=2`,
+  `MKL_NUM_THREADS=2`, `NUMEXPR_NUM_THREADS=2`를 고정했고 seed와 표본 seed는
+  모두 `42`로 고정했다.
+
+실행 명령은 다음과 같다.
+
+```bash
+./.venv/bin/python incremental_clustering.py fit \
+  --input-cache <gemini-cache> \
+  --dataset-sample-size <1000-or-3000> \
+  --dataset-sample-seed 42 \
+  --seed 42 \
+  --fast --skip-visualization \
+  --state-output <state-path>
+```
+
+| 표본 | wall p50 (초) | 개별 wall 범위 (초) | peak RSS p50 (KiB) | state p50 (bytes) | PCA | root K | leaf/noise |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 9.202636 | 9.107045–9.427152 | 313,640 | 20,023,121 | 160 | 4 | 23 / 0 |
+| 3,000 | 30.501021 | 30.290327–31.710225 | 592,508 | 47,214,009 | 160 | 4 | 36 / 0 |
+
+wall 편차는 1,000건 3.48%, 3,000건 4.66%로 계획의 5% 중단 기준 이내다. 3,000건
+root 선택값은 silhouette `0.0421347469`, Xie–Beni `0.2311225618`, selection
+score `0.7`이며, 전체 hierarchy의 natural/forced/projection noise는 모두 0이다.
+
+별도 `cProfile`에서도 두 표본의 hot path 순서가 일치했다.
+
+| 표본 | hierarchy FCM | PCA 차원 선택 | fast FCM 후보 선택 | spherical FCM |
+|---:|---:|---:|---:|---:|
+| 1,000 | 7.758초 | 2.351초 | 5.156초 | 4.548초 |
+| 3,000 | 28.924초 | 14.915초 | 13.310초 | 11.415초 |
+
+3,000건 PCA 시간 중 `scipy.linalg.svd`가 7.344초, PCA prefix neighbor 평가가
+6.318초였다. state envelope/checksum과 atomic pickle은 각각 약 0.038초(1,000건),
+0.110초(3,000건)로 현재 fit CPU의 주 병목이 아니다. 3,000건 state에서 확인한 큰
+수치 보유 구조는 입력 embedding 36,864,000 bytes, PCA components 6,291,456
+bytes, assignments 1,744,064 bytes, metadata 767,130 bytes,
+center contribution projected/weights 합계 2,158,536 bytes였다.
+
+따라서 다음 구현 대상은 PCA 자동 차원 탐색의 projection·neighbor 계산 재사용인
+**C-02**로 정한다. 현재 측정상 C-02가 fast FCM 후보 선택(C-01)보다 누적 시간이
+크지만, PCA fit과 prefix 평가가 수학적으로 재사용 가능한지 먼저 확인한 뒤 하나의
+변경으로 구현한다. 수치 결과·선택 차원·downstream assignment가 동일하지 않으면
+채택하지 않는다.
+
 CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리만 줄이고 hot path를
 느리게 만드는 것을 피하기 위해 이후 작업은 두 지표를 함께 측정한다. 작업별 범위,
 설계 선택지, 결과 동등성 검증, 채택·중단 기준은
@@ -231,7 +289,7 @@ CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리�
 
 | 우선순위 | 계획 ID | 작업 | 주 목표 | 상태 |
 |---:|---|---|---|---|
-| 0 | R-00 | Gemini cache warm CPU·RSS 기준선과 병목 프로파일 고정 | 이후 작업의 시간·RSS·state 기준값 확보 | 대기 |
+| 0 | R-00 | Gemini cache warm CPU·RSS 기준선과 병목 프로파일 고정 | 이후 작업의 시간·RSS·state 기준값 확보 | 완료 |
 | 1 | C-01 | FCM candidate K·restart 배열/계산 재사용 | CPU 우선, workspace 수명 관리로 RSS 제한 | 대기 |
 | 2 | C-02 | PCA 자동 차원 탐색의 projection 재사용 | 반복 PCA/투영 CPU와 임시 배열 RSS 감소 | 대기 |
 | 3 | M-01 | 증분 center contribution compact numeric 저장 | update CPU·state 크기·RSS 동시 감소 | 대기 |
@@ -254,7 +312,7 @@ peak RSS 10% 이상 개선, 그리고 다른 지표의 3% 초과 회귀가 없�
 | N-04 | 보류 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 완료 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 완료 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
-| R-00 | 대기 | Gemini cache warm CPU·RSS 기준선 및 병목 프로파일 | 동일 환경·cache·seed 고정 | 1,000/3,000 rows p50·peak RSS·state 표와 CPU/RSS 상위 보유 구조 기록 |
+| R-00 | 완료 | Gemini cache warm CPU·RSS 기준선 및 병목 프로파일 | 동일 환경·cache·seed 고정 | 1,000/3,000 rows p50·peak RSS·state 표와 CPU/RSS 상위 보유 구조 기록 |
 | C-01 | 대기 | FCM candidate K·restart 배열/계산 재사용 | R-00에서 FCM 병목 확인 | 수치 결과 동등, CPU 또는 RSS 10% 개선, 다른 지표 3% 초과 회귀 없음 |
 | C-02 | 대기 | PCA 자동 차원 탐색 projection 재사용 | R-00에서 PCA 병목 확인 | 선택 차원·downstream 결과 동등, CPU/RSS 공동 기준 통과 |
 | M-01 | 대기 | 증분 center contribution compact numeric 저장 | contribution/state 필드별 크기 측정 | replace/idempotency·legacy load 통과, update CPU·state/RSS 개선 |
