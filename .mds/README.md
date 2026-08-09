@@ -17,6 +17,7 @@
 - `hierarchical_clustering_js_plan.md`: JavaScript/TypeScript 이식 기획
 - `JS_PERFORMANCE_OPTIMIZATION_PLAN.md`: Python 알고리즘 최적화 후 JS 이식 계획
 - `PYTHON_PERFORMANCE_BACKLOG.md`: 기존 계획 밖 Python 성능 후보와 작업 트래커
+- `MAIN_OPTIMIZATION_REVIEW.md`: main 최적화의 종합 성능·품질·과최적화 검증
 - `incremental_clustering.md`: 증분 사용법의 초기 문서
 - `FAST_FCM.md`: 빠른 FCM 탐색의 초기 사용 예
 - `METRIC_EXTRACTOR.md`: 지표 전용 평가 도구 설명
