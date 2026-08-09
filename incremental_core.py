@@ -74,6 +74,7 @@ def merge_rows_by_id(
     *,
     existing_coordinates: np.ndarray | None = None,
     incoming_coordinates: np.ndarray | None = None,
+    embedding_dtype: str | np.dtype = np.float64,
 ) -> RowMergeResult:
     """Replace rows by ID and append incoming IDs not in the state.
 
@@ -82,8 +83,8 @@ def merge_rows_by_id(
     columns without invalidating the stored state.
     """
 
-    existing_values = np.asarray(existing_embeddings, dtype=np.float64)
-    incoming_values = np.asarray(incoming_embeddings, dtype=np.float64)
+    existing_values = np.asarray(existing_embeddings, dtype=embedding_dtype)
+    incoming_values = np.asarray(incoming_embeddings, dtype=embedding_dtype)
     if existing_values.ndim != 2 or incoming_values.ndim != 2:
         raise ValueError("embeddings must be two-dimensional")
     if existing_values.shape[1] != incoming_values.shape[1]:

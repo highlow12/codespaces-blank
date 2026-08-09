@@ -69,9 +69,11 @@ def validate_embedding_matrix(
     name: str = "X",
     expected_features: int | None = None,
 ) -> np.ndarray:
-    """Return a finite float matrix suitable for PCA-based pipelines."""
+    """Return a finite float32/float64 matrix suitable for PCA pipelines."""
 
-    matrix = np.asarray(values, dtype=np.float64)
+    matrix = np.asarray(values)
+    if matrix.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+        matrix = np.asarray(values, dtype=np.float64)
     if matrix.ndim != 2 or matrix.shape[0] == 0 or matrix.shape[1] == 0:
         raise ValueError(f"{name} must be a non-empty 2D array")
     if expected_features is not None and matrix.shape[1] != expected_features:

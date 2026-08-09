@@ -83,6 +83,7 @@ DEFAULT_MAX_XB_RELATIVE_DEGRADATION = 0.05
 CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
 RECLUSTER_TRIGGER_POLICY = "xb_and_noise_stable_v3"
 STATE_VERSION = 7
+DEFAULT_EMBEDDING_STORAGE_DTYPE = "float32"
 
 
 @dataclass
@@ -109,8 +110,36 @@ class IncrementalClusterState:
     )
 
 
-def _validate_embeddings(embeddings: np.ndarray) -> np.ndarray:
-    values = np.asarray(embeddings, dtype=np.float64)
+def _resolve_embedding_storage_dtype(
+    value: str | np.dtype | None,
+    *,
+    default: str | np.dtype = DEFAULT_EMBEDDING_STORAGE_DTYPE,
+) -> tuple[str, np.dtype]:
+    candidate = default if value is None else value
+    try:
+        dtype = np.dtype(candidate)
+    except TypeError as error:
+        raise ValueError(
+            "embedding_storage_dtype must be float32 or float64"
+        ) from error
+    if dtype == np.dtype(np.float32):
+        return "float32", dtype
+    if dtype == np.dtype(np.float64):
+        return "float64", dtype
+    raise ValueError("embedding_storage_dtype must be float32 or float64")
+
+
+def _validate_embeddings(
+    embeddings: np.ndarray,
+    *,
+    dtype: str | np.dtype | None = None,
+) -> np.ndarray:
+    if dtype is None:
+        values = np.asarray(embeddings)
+        if values.dtype not in (np.dtype(np.float32), np.dtype(np.float64)):
+            values = np.asarray(embeddings, dtype=np.float64)
+    else:
+        values = np.asarray(embeddings, dtype=dtype)
     if values.ndim != 2 or values.shape[0] == 0 or values.shape[1] == 0:
         raise ValueError("embeddings must be a non-empty 2D array")
     if not np.all(np.isfinite(values)):
@@ -905,6 +934,7 @@ def _cluster_config(
     fuzzifier: float,
     max_fcm_iter: int,
     fcm_tol: float,
+    embedding_storage_dtype: str,
     fast_mode: bool,
     fast_sample_size: int,
     fast_scout_n_init: int,
@@ -937,6 +967,9 @@ def _cluster_config(
         or max_xb_relative_degradation < 0.0
     ):
         raise ValueError("max_xb_relative_degradation must be non-negative")
+    storage_dtype_name, _ = _resolve_embedding_storage_dtype(
+        embedding_storage_dtype
+    )
     enter_threshold = _validate_noise_threshold(noise_threshold)
     release_threshold_auto = noise_release_threshold is None
     resolved_release_threshold = (
@@ -989,6 +1022,7 @@ def _cluster_config(
         "m": float(fuzzifier),
         "max_fcm_iter": int(max_fcm_iter),
         "fcm_tol": float(fcm_tol),
+        "embedding_storage_dtype": storage_dtype_name,
         "fast_mode": bool(fast_mode),
         "fast_sample_size": int(fast_sample_size),
         "fast_scout_n_init": int(fast_scout_n_init),
@@ -1170,6 +1204,11 @@ def _visualization_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
 
 def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
     initialized = dict(config)
+    if "embedding_storage_dtype" in initialized:
+        storage_dtype_name, _ = _resolve_embedding_storage_dtype(
+            initialized["embedding_storage_dtype"]
+        )
+        initialized["embedding_storage_dtype"] = storage_dtype_name
     legacy_policy = (
         initialized.get("recluster_trigger_policy")
         != RECLUSTER_TRIGGER_POLICY
@@ -1405,6 +1444,8 @@ def _select_embedding_rows_by_ids(
     embeddings: np.ndarray,
     metadata: pd.DataFrame,
     identifiers: list[Any],
+    *,
+    dtype: str | np.dtype = np.float64,
 ) -> tuple[np.ndarray, pd.DataFrame]:
     positions = {
         identifier: index
@@ -1415,7 +1456,7 @@ def _select_embedding_rows_by_ids(
     except KeyError as error:
         raise ValueError("Metadata does not contain every selected ID") from error
     return (
-        np.asarray(embeddings, dtype=np.float64)[selected].copy(),
+        np.asarray(embeddings, dtype=dtype)[selected].copy(),
         metadata.iloc[selected].reset_index(drop=True).copy(),
     )
 
@@ -1683,6 +1724,7 @@ def fit_incremental_state(
     fuzzifier: float = 2.0,
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
+    embedding_storage_dtype: str = DEFAULT_EMBEDDING_STORAGE_DTYPE,
     fast_mode: bool = False,
     fast_sample_size: int = 1000,
     fast_scout_n_init: int = 2,
@@ -1695,7 +1737,10 @@ def fit_incremental_state(
 ) -> IncrementalClusterState:
     """Fit the initial batch and persist reusable clustering/visual models."""
 
-    values = _validate_embeddings(embeddings)
+    storage_dtype_name, storage_dtype = _resolve_embedding_storage_dtype(
+        embedding_storage_dtype
+    )
+    values = _validate_embeddings(embeddings, dtype=storage_dtype)
     frame = _validate_metadata(metadata, len(values))
     if visual_densmap:
         warnings.warn(
@@ -1750,6 +1795,7 @@ def fit_incremental_state(
         fuzzifier=fuzzifier,
         max_fcm_iter=max_fcm_iter,
         fcm_tol=fcm_tol,
+        embedding_storage_dtype=storage_dtype_name,
         fast_mode=fast_mode,
         fast_sample_size=fast_sample_size,
         fast_scout_n_init=fast_scout_n_init,
@@ -1822,6 +1868,8 @@ def _merge_state_rows_by_id(
     incoming_embeddings: np.ndarray,
     incoming_metadata: pd.DataFrame,
     incoming_coordinates: np.ndarray,
+    *,
+    embedding_dtype: str | np.dtype = np.float64,
 ) -> tuple[
     np.ndarray,
     pd.DataFrame,
@@ -1839,6 +1887,7 @@ def _merge_state_rows_by_id(
         incoming_frame,
         existing_coordinates=existing_coordinates,
         incoming_coordinates=incoming_coordinates,
+        embedding_dtype=embedding_dtype,
     )
     return (
         merged.embeddings,
@@ -2159,7 +2208,12 @@ def update_incremental_state(
 ) -> tuple[IncrementalClusterState, dict[str, Any]]:
     """Update centers, memberships, and models on independent schedules."""
 
-    values = _validate_embeddings(embeddings)
+    configured_storage_dtype = state.config.get("embedding_storage_dtype")
+    storage_dtype_name, storage_dtype = _resolve_embedding_storage_dtype(
+        configured_storage_dtype,
+        default=np.asarray(state.embeddings).dtype,
+    )
+    values = _validate_embeddings(embeddings, dtype=storage_dtype)
     frame = _validate_metadata(metadata, len(values))
     if values.shape[1] != state.embeddings.shape[1]:
         raise ValueError("new embeddings have a different dimensionality")
@@ -2188,6 +2242,7 @@ def update_incremental_state(
     ]
 
     config = _initialize_update_config(state.config)
+    config["embedding_storage_dtype"] = storage_dtype_name
     threshold = _validate_noise_threshold(
         config["noise_threshold"] if noise_threshold is None else noise_threshold
     )
@@ -2275,6 +2330,7 @@ def update_incremental_state(
         values,
         frame,
         new_coordinates,
+        embedding_dtype=storage_dtype,
     )
     if (
         _merged_replaced_ids != replaced_ids
@@ -2399,6 +2455,7 @@ def update_incremental_state(
                 combined_embeddings,
                 combined_metadata,
                 refresh_ids,
+                dtype=storage_dtype,
             )
             refreshed_subset, _ = assign_to_hierarchy(
                 refresh_embeddings,
@@ -2882,7 +2939,7 @@ def load_state(path: Path) -> IncrementalClusterState:
         # Every state written before v6 used an all-document refresh.
         state.config["selective_membership_refresh"] = False
     state.config = _initialize_update_config(state.config)
-    _validate_embeddings(state.embeddings)
+    _validate_embeddings(state.embeddings, dtype=None)
     _validate_metadata(state.metadata, len(state.embeddings))
     _validate_metadata(state.assignments, len(state.embeddings))
     if state.metadata["id"].tolist() != state.assignments["id"].tolist():
@@ -3324,6 +3381,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         fuzzifier=args.fuzzifier,
         max_fcm_iter=args.max_fcm_iter,
         fcm_tol=args.fcm_tol,
+        embedding_storage_dtype=args.embedding_storage_dtype,
         fast_mode=args.fast,
         fast_sample_size=args.fast_sample_size,
         fast_scout_n_init=args.fast_scout_n_init,
@@ -3423,6 +3481,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_input_args(fit_parser)
     _add_dataset_sampling_args(fit_parser)
     fit_parser.add_argument("--state-output", type=Path, required=True)
+    fit_parser.add_argument(
+        "--embedding-storage-dtype",
+        choices=["float32", "float64"],
+        default=DEFAULT_EMBEDDING_STORAGE_DTYPE,
+        help="Dtype used for input/PCA/state embedding storage (default: float32).",
+    )
     _add_visual_output_args(fit_parser)
     _add_cluster_args(fit_parser)
     fit_parser.set_defaults(handler=_run_fit)

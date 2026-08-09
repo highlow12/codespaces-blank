@@ -36,6 +36,23 @@ class SharedPcaProjectionTests(unittest.TestCase):
             atol=1e-12,
         )
 
+    def test_float32_input_keeps_float32_pca_projection(self) -> None:
+        rng = np.random.default_rng(31)
+        embeddings = rng.normal(size=(20, 8)).astype(np.float32)
+
+        fitted = fit_normalized_pca_projection(
+            embeddings,
+            n_components=6,
+            seed=7,
+        )
+
+        self.assertEqual(fitted.normalized_input.dtype, np.dtype(np.float32))
+        self.assertEqual(fitted.projected.dtype, np.dtype(np.float32))
+        self.assertEqual(
+            fitted.normalized_prefix(4).dtype,
+            np.dtype(np.float32),
+        )
+
     def test_transform_rejects_a_different_embedding_width(self) -> None:
         fitted = fit_normalized_pca_projection(
             np.eye(6),

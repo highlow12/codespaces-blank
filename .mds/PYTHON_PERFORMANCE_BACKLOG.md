@@ -138,6 +138,25 @@ ARI/NMI, noise 비율, m scout 호출 수를 함께 기록한다.
   컸으므로 production 병렬화는 채택하지 않고 보류한다. 더 많은 CPU 또는 더 큰
   node가 실제 운영 조건이 될 때 재측정한다.
 
+### N-05 결과
+
+- `--embedding-storage-dtype {float32,float64}`를 추가하고 기본값을 `float32`로
+  설정했다. 입력·PCA projection·state embedding은 저장 dtype을 따르며, FCM
+  중심·membership·목적 함수·XB 계산은 `float64`를 유지한다. 기존에 dtype 설정이
+  없는 legacy `float64` state는 update 시 `float64`를 유지한다.
+- Gemini cache 100·300·1,000건, seed 42·43의 reference `float64`/`float32`
+  비교 6회에서 cluster path·noise·선택 K가 모두 일치했다. 중심 최대 절대 차이는
+  `3.94e-05`, XB 최대 상대 차이는 `1.22e-05`였다. update fixture에서도 path와
+  noise가 일치했고 중심 최대 절대 차이는 `1.01e-08`, XB는 동일했다.
+- 1,000건 cache, seed 42의 별도 프로세스 측정에서 peak RSS는
+  `415,336KB → 308,184KB`로 25.8% 감소했고, state embedding bytes는
+  `24,576,000 → 12,288,000`으로 50.0% 감소했다. pickle state 크기도
+  `39,254,489 → 20,023,080 bytes`로 49.0% 줄었다. 같은 측정의 fit runtime은
+  `8.089초 → 7.022초`였으며, 100·300건에서는 실행 편차로 속도 개선이 중립적이거나
+  작았고 1,000건 직접 비교에서는 12.3~14.9% 단축됐다.
+- 수치 허용오차, update/save/load dtype 보존, 기본 설정 회귀 테스트를 포함해 전체
+  테스트 73개가 통과했다.
+
 ### P1-2. Python의 독립 FCM 작업 병렬화
 
 현재 candidate K와 restart는 직렬 수행된다. Python 경로에도 독립 restart 또는
@@ -186,7 +205,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | N-02 | 완료 | Python binary cache 및 부분 loader | N-01과 독립 | Gemini 표본 ID/embedding 일치, 전체 JSON materialization 없음, load 시간·RSS baseline 기록 |
 | N-03 | 완료 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
 | N-04 | 보류 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
-| N-05 | 조사 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
+| N-05 | 완료 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 보류 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
 | N-07 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
 

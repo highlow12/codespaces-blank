@@ -28,6 +28,7 @@ from incremental_clustering import (
     _snapshot_hierarchy_centers,
     _update_hierarchy_centers_from_statistics,
     assign_to_hierarchy,
+    fit_incremental_state,
     hierarchy_xie_beni_index,
     load_state,
     save_state,
@@ -209,6 +210,50 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
             state.hierarchy_model.nodes[""].centers,
             previous_centers,
         )
+
+    def test_float32_state_storage_survives_update_and_reload(self) -> None:
+        state = self._make_state(center_refresh_interval=5)
+        state.embeddings = state.embeddings.astype(np.float32)
+        state.config["embedding_storage_dtype"] = "float32"
+        batch = np.asarray(
+            [[3.0, 0.8, 0.4, 0.0], [2.7, 0.9, 0.2, 0.1]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+
+        updated, summary = update_incremental_state(
+            state,
+            batch,
+            metadata,
+        )
+
+        self.assertEqual(updated.embeddings.dtype, np.dtype(np.float32))
+        self.assertEqual(updated.config["embedding_storage_dtype"], "float32")
+        self.assertTrue(summary["center_updated"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "float32.state.pkl"
+            save_state(updated, path)
+            loaded = load_state(path)
+        self.assertEqual(loaded.embeddings.dtype, np.dtype(np.float32))
+
+    def test_fit_defaults_to_float32_embedding_storage(self) -> None:
+        state = fit_incremental_state(
+            self.X,
+            self.metadata,
+            max_depth=1,
+            min_node_size=4,
+            min_child_size=2,
+            min_clusters=2,
+            max_clusters=2,
+            min_membership=0.0,
+            selection_method="silhouette",
+            min_split_silhouette=-1.0,
+            pca_components=3,
+            fit_visualization=False,
+        )
+
+        self.assertEqual(state.embeddings.dtype, np.dtype(np.float32))
+        self.assertEqual(state.config["embedding_storage_dtype"], "float32")
 
     def test_changed_note_replaces_embedding_and_center_contribution(self) -> None:
         state = self._make_state(center_refresh_interval=10)
