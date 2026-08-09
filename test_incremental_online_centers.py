@@ -255,6 +255,85 @@ class IncrementalOnlineCenterTests(unittest.TestCase):
         self.assertEqual(state.embeddings.dtype, np.dtype(np.float32))
         self.assertEqual(state.config["embedding_storage_dtype"], "float32")
 
+    def test_fit_can_omit_conditional_membership_columns(self) -> None:
+        with patch(
+            "hierarchical_fcm.conditional_memberships_from_projected"
+        ) as conditional_memberships:
+            state = fit_incremental_state(
+                self.X,
+                self.metadata,
+                max_depth=1,
+                min_node_size=4,
+                min_child_size=2,
+                min_clusters=2,
+                max_clusters=2,
+                min_membership=0.0,
+                selection_method="silhouette",
+                min_split_silhouette=-1.0,
+                pca_components=3,
+                include_conditional_memberships=False,
+                fit_visualization=False,
+            )
+
+        conditional_memberships.assert_not_called()
+        self.assertFalse(state.config["include_conditional_memberships"])
+        self.assertFalse(
+            any("path_membership" in column for column in state.assignments)
+        )
+        self.assertIn("level_1_membership_0", state.assignments)
+
+    def test_update_preserves_conditional_membership_schema_choice(self) -> None:
+        state = self._make_state(center_refresh_interval=5)
+        state.assignments, _ = assign_to_hierarchy(
+            state.embeddings,
+            state.metadata,
+            state.hierarchy_model,
+            min_membership=0.0,
+            include_conditional_memberships=True,
+        )
+        path_columns = [
+            column
+            for column in state.assignments
+            if "path_membership" in column
+        ]
+        self.assertTrue(path_columns)
+        state.assignments = state.assignments.drop(columns=path_columns)
+        state.config["include_conditional_memberships"] = False
+        batch = np.asarray(
+            [[3.0, 0.8, 0.4, 0.0], [2.7, 0.9, 0.2, 0.1]],
+            dtype=np.float64,
+        )
+        metadata = pd.DataFrame({"id": [100, 101]})
+
+        with patch(
+            "incremental_clustering.conditional_memberships_from_projected"
+        ) as conditional_memberships:
+            updated, _ = update_incremental_state(state, batch, metadata)
+
+        conditional_memberships.assert_not_called()
+        self.assertFalse(updated.config["include_conditional_memberships"])
+        self.assertFalse(
+            any("path_membership" in column for column in updated.assignments)
+        )
+
+    def test_legacy_path_membership_columns_infer_opt_in_schema(self) -> None:
+        state = self._make_state(center_refresh_interval=5)
+        state.assignments, _ = assign_to_hierarchy(
+            state.embeddings,
+            state.metadata,
+            state.hierarchy_model,
+            min_membership=0.0,
+            include_conditional_memberships=True,
+        )
+        state.config.pop("include_conditional_memberships", None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "legacy-path-memberships.state.pkl"
+            save_state(state, path)
+            loaded = load_state(path)
+
+        self.assertTrue(loaded.config["include_conditional_memberships"])
+
     def test_changed_note_replaces_embedding_and_center_contribution(self) -> None:
         state = self._make_state(center_refresh_interval=10)
         changed_embedding = np.asarray(

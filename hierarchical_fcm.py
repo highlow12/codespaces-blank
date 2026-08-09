@@ -86,6 +86,7 @@ def run_hierarchical_pca_fcm(
     m: float = 2.0,
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
+    include_conditional_memberships: bool = False,
     fast_mode: bool = False,
     fast_sample_size: int = 1000,
     fast_scout_n_init: int = 2,
@@ -509,7 +510,12 @@ def run_hierarchical_pca_fcm(
         fallback_single_cluster=bool(root.get("fallback_single_cluster", False)),
         projection_support_threshold=projection_support_threshold,
     )
-    conditional_memberships = conditional_memberships_from_projected(Xp, model)
+    conditional_memberships = None
+    if include_conditional_memberships:
+        conditional_memberships = conditional_memberships_from_projected(
+            Xp,
+            model,
+        )
     assignments = build_hierarchical_assignments(
         metadata,
         labels_by_level,
@@ -597,6 +603,9 @@ def run_hierarchical_pca_fcm(
         "fuzzifier": float(m),
         "max_fcm_iter": int(max_fcm_iter),
         "fcm_tol": float(fcm_tol),
+        "include_conditional_memberships": bool(
+            include_conditional_memberships
+        ),
         "fast_mode": bool(fast_mode),
         "fast_sample_size": int(fast_sample_size),
         "fast_scout_n_init": int(fast_scout_n_init),

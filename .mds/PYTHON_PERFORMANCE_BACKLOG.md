@@ -187,6 +187,31 @@ XB, incremental update 결과가 정한 허용오차를 만족할 때만 채택�
 검토한다. 기본값 또는 출력 schema를 바꾸기 전에는 downstream 소비자가 모든 path
 membership 열을 요구하는지 확인해야 한다.
 
+### N-06 결과
+
+- fit API와 CLI에 `include_conditional_memberships`를 연결하고,
+  `--include-conditional-memberships`로 opt-in할 수 있게 했다. 기본값은 `false`이며
+  state config에 저장되어 update·membership refresh·recluster도 같은 assignment
+  schema를 유지한다. 비활성화 시 conditional membership 계산과 path 열 생성을 모두
+  건너뛴다.
+- 조사 중 conditional membership helper의 누락된 반환을 복구하고,
+  `visual_assignments.py`의 level/path 열 정규식 이중 escape를 수정했다. opt-in
+  assignment는 path membership을 시각화 supervision의 soft target으로 사용하고,
+  비활성화 assignment는 cluster label fallback으로 동작한다.
+- Gemini cache seed=42에서 1,000건은 path 열이 `0개 → 40개`, state pickle이
+  `20,023,048 → 20,346,392 bytes`로 1.6% 증가했다. 3,000건은 path 열이
+  `0개 → 62개`, state pickle이 `47,213,936 → 48,707,303 bytes`로 3.1% 증가했다.
+  peak RSS도 1,000건에서 `310,188KB/310,680KB`, 3,000건에서
+  `584,832KB/586,916KB`(off/on)로 측정됐다. 반대로 기본 비활성화 경로는 이
+  rows×paths 출력 비용을 제거한다.
+- 3,000건 비교에서 cluster path·noise·level labels·tree가 일치했고, hierarchy
+  center 최대 절대 차이는 `0`이었다. fit runtime은 1,000건에서 `6.992초/6.886초`,
+  3,000건에서 `28.735초/28.407초`로 측정됐지만 실행 편차 범위이며, conditional
+  계산은 전체 fit runtime의 지배 비용이 아니므로 안정적인 runtime 개선으로
+  주장하지 않는다.
+- opt-in/off assignment, update schema 보존, legacy state migration, 시각화 fallback
+  및 기존 경로를 포함한 전체 테스트 79개가 통과했다.
+
 ### P2-2. 대형 상태의 envelope 직렬화 경로
 
 checksum envelope는 payload를 bytes로 pickle한 뒤 envelope 자체를 다시 pickle해
@@ -206,7 +231,7 @@ load·atomic replace 계약을 유지하는지 대형 state에서 측정한다.
 | N-03 | 완료 | m scout 재사용 정책 | fast K benchmark | exact 대비 K/ARI/NMI/noise 기준 통과, scout 호출 수와 fit 시간 감소 |
 | N-04 | 보류 | restart·sibling Python 병렬화 | thread/BLAS 제어 실험 | worker 1/N의 seed 결과 일치, oversubscription 없음, warm fit p50 개선 |
 | N-05 | 완료 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
-| N-06 | 보류 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
+| N-06 | 완료 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
 | N-07 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
 
 ## 실행 순서

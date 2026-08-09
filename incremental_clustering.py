@@ -84,6 +84,7 @@ CENTER_CONTRIBUTION_FORMAT = "compact_weights_v1"
 RECLUSTER_TRIGGER_POLICY = "xb_and_noise_stable_v3"
 STATE_VERSION = 7
 DEFAULT_EMBEDDING_STORAGE_DTYPE = "float32"
+DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS = False
 
 
 @dataclass
@@ -216,6 +217,9 @@ def assign_to_hierarchy(
     max_membership_gap: float = DEFAULT_MAX_MEMBERSHIP_GAP,
     forced_noise_ratio: float = DEFAULT_FORCED_NOISE_RATIO,
     m: float = 2.0,
+    include_conditional_memberships: bool = (
+        DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS
+    ),
 ) -> tuple[pd.DataFrame, float]:
     """Assign a batch to fixed hierarchy centers and return its noise ratio."""
 
@@ -235,11 +239,13 @@ def assign_to_hierarchy(
         projection_support_threshold > 0.0
     ) & (projection_support < projection_support_threshold)
     projected = transform_pca_normalized_features(values, hierarchy_model.pca)
-    conditional_memberships = conditional_memberships_from_projected(
-        projected,
-        hierarchy_model,
-        m=m,
-    )
+    conditional_memberships = None
+    if include_conditional_memberships:
+        conditional_memberships = conditional_memberships_from_projected(
+            projected,
+            hierarchy_model,
+            m=m,
+        )
     labels_by_level = np.full(
         (len(values), hierarchy_model.max_depth),
         -1,
@@ -935,6 +941,7 @@ def _cluster_config(
     max_fcm_iter: int,
     fcm_tol: float,
     embedding_storage_dtype: str,
+    include_conditional_memberships: bool,
     fast_mode: bool,
     fast_sample_size: int,
     fast_scout_n_init: int,
@@ -1023,6 +1030,9 @@ def _cluster_config(
         "max_fcm_iter": int(max_fcm_iter),
         "fcm_tol": float(fcm_tol),
         "embedding_storage_dtype": storage_dtype_name,
+        "include_conditional_memberships": bool(
+            include_conditional_memberships
+        ),
         "fast_mode": bool(fast_mode),
         "fast_sample_size": int(fast_sample_size),
         "fast_scout_n_init": int(fast_scout_n_init),
@@ -1094,7 +1104,7 @@ def _assignment_parameters(
     config: dict[str, Any],
     *,
     forced_noise_ratio: float | None = None,
-) -> dict[str, float]:
+) -> dict[str, Any]:
     return {
         **_fuzzy_parameters(config),
         "max_membership_gap": float(
@@ -1104,6 +1114,12 @@ def _assignment_parameters(
             float(config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO))
             if forced_noise_ratio is None
             else float(forced_noise_ratio)
+        ),
+        "include_conditional_memberships": bool(
+            config.get(
+                "include_conditional_memberships",
+                DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS,
+            )
         ),
     }
 
@@ -1161,6 +1177,12 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
         "m": float(config.get("m", 2.0)),
         "max_fcm_iter": int(config.get("max_fcm_iter", 200)),
         "fcm_tol": float(config.get("fcm_tol", 1e-6)),
+        "include_conditional_memberships": bool(
+            config.get(
+                "include_conditional_memberships",
+                DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS,
+            )
+        ),
         "fast_mode": bool(config.get("fast_mode", False)),
         "fast_sample_size": int(config.get("fast_sample_size", 1000)),
         "fast_scout_n_init": int(config.get("fast_scout_n_init", 2)),
@@ -1262,6 +1284,9 @@ def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
         "membership_refresh_min_influence": (
             DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE
         ),
+        "include_conditional_memberships": (
+            DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS
+        ),
     }
     for key, value in defaults.items():
         initialized.setdefault(key, value)
@@ -1282,6 +1307,12 @@ def _initialize_update_config(config: dict[str, Any]) -> dict[str, Any]:
     )
     initialized["recluster_trigger_policy"] = RECLUSTER_TRIGGER_POLICY
     return initialized
+
+
+def _assignments_include_conditional_memberships(
+    assignments: pd.DataFrame,
+) -> bool:
+    return any("path_membership" in str(column) for column in assignments)
 
 
 def _evaluate_noise_drift(
@@ -1725,6 +1756,9 @@ def fit_incremental_state(
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
     embedding_storage_dtype: str = DEFAULT_EMBEDDING_STORAGE_DTYPE,
+    include_conditional_memberships: bool = (
+        DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS
+    ),
     fast_mode: bool = False,
     fast_sample_size: int = 1000,
     fast_scout_n_init: int = 2,
@@ -1796,6 +1830,7 @@ def fit_incremental_state(
         max_fcm_iter=max_fcm_iter,
         fcm_tol=fcm_tol,
         embedding_storage_dtype=storage_dtype_name,
+        include_conditional_memberships=include_conditional_memberships,
         fast_mode=fast_mode,
         fast_sample_size=fast_sample_size,
         fast_scout_n_init=fast_scout_n_init,
@@ -2214,6 +2249,13 @@ def update_incremental_state(
     """Update centers, memberships, and models on independent schedules."""
 
     configured_storage_dtype = state.config.get("embedding_storage_dtype")
+    configured_conditional_memberships = state.config.get(
+        "include_conditional_memberships"
+    )
+    if configured_conditional_memberships is None:
+        configured_conditional_memberships = (
+            _assignments_include_conditional_memberships(state.assignments)
+        )
     storage_dtype_name, storage_dtype = _resolve_embedding_storage_dtype(
         configured_storage_dtype,
         default=np.asarray(state.embeddings).dtype,
@@ -2248,6 +2290,9 @@ def update_incremental_state(
 
     config = _initialize_update_config(state.config)
     config["embedding_storage_dtype"] = storage_dtype_name
+    config["include_conditional_memberships"] = bool(
+        configured_conditional_memberships
+    )
     threshold = _validate_noise_threshold(
         config["noise_threshold"] if noise_threshold is None else noise_threshold
     )
@@ -2841,7 +2886,12 @@ def save_state(
     lock while performing a load-update-save transaction.
     """
 
-    config = _initialize_update_config(state.config)
+    state_config = dict(state.config)
+    state_config.setdefault(
+        "include_conditional_memberships",
+        _assignments_include_conditional_memberships(state.assignments),
+    )
+    config = _initialize_update_config(state_config)
     center_contributions = getattr(state, "center_contributions", {})
     if center_contributions and (
         config.get("center_contribution_format")
@@ -2943,6 +2993,10 @@ def load_state(path: Path) -> IncrementalClusterState:
     if "selective_membership_refresh" not in state.config:
         # Every state written before v6 used an all-document refresh.
         state.config["selective_membership_refresh"] = False
+    if "include_conditional_memberships" not in state.config:
+        state.config["include_conditional_memberships"] = (
+            _assignments_include_conditional_memberships(state.assignments)
+        )
     state.config = _initialize_update_config(state.config)
     _validate_embeddings(state.embeddings, dtype=None)
     _validate_metadata(state.metadata, len(state.embeddings))
@@ -3387,6 +3441,7 @@ def _run_fit(args: argparse.Namespace) -> None:
         max_fcm_iter=args.max_fcm_iter,
         fcm_tol=args.fcm_tol,
         embedding_storage_dtype=args.embedding_storage_dtype,
+        include_conditional_memberships=args.include_conditional_memberships,
         fast_mode=args.fast,
         fast_sample_size=args.fast_sample_size,
         fast_scout_n_init=args.fast_scout_n_init,
@@ -3491,6 +3546,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["float32", "float64"],
         default=DEFAULT_EMBEDDING_STORAGE_DTYPE,
         help="Dtype used for input/PCA/state embedding storage (default: float32).",
+    )
+    fit_parser.add_argument(
+        "--include-conditional-memberships",
+        action="store_true",
+        dest="include_conditional_memberships",
+        default=DEFAULT_INCLUDE_CONDITIONAL_MEMBERSHIPS,
+        help=(
+            "Include per-path conditional membership arrays and assignment columns."
+        ),
     )
     _add_visual_output_args(fit_parser)
     _add_cluster_args(fit_parser)

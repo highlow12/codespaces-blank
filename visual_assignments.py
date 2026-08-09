@@ -10,13 +10,13 @@ import numpy as np
 import pandas as pd
 
 
-_LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\\d+)_cluster$")
-_MEMBERSHIP_COLUMN_PATTERN = re.compile(r"^membership_(\\d+)$")
+_LEVEL_COLUMN_PATTERN = re.compile(r"^level_(\d+)_cluster$")
+_MEMBERSHIP_COLUMN_PATTERN = re.compile(r"^membership_(\d+)$")
 _LEVEL_MEMBERSHIP_COLUMN_PATTERN = re.compile(
-    r"^level_(\\d+)_membership_(\\d+)$"
+    r"^level_(\d+)_membership_(\d+)$"
 )
 _PATH_MEMBERSHIP_COLUMN_PATTERN = re.compile(
-    r"^level_(\\d+)_path_membership_(\\d+(?:_\\d+)*)$"
+    r"^level_(\d+)_path_membership_(\d+(?:_\d+)*)$"
 )
 
 
@@ -359,5 +359,4 @@ def build_cluster_supervision(
     if unique_labels.size < 2:
         return None, None, "no varying cluster target"
     return encoded.astype(np.int32), "categorical", f"cluster labels ({len(unique_labels)} groups)"
-
 

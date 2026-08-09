@@ -452,3 +452,4 @@ def conditional_memberships_from_projected(
             )
 
     probabilities.pop("", None)
+    return probabilities
