@@ -179,6 +179,7 @@ def _spherical_fcm_once(
         ),
         m=m,
         minimum_center_distance=_minimum_center_distance(centers),
+        squared_dissimilarities=squared_dissimilarities,
     )
 
 
@@ -260,10 +261,14 @@ def spherical_fcm(
             else float("inf"),
         ),
     )
-    squared_dissimilarities = SphericalGeometry().squared_dissimilarities(
-        X,
-        best.centers,
-    )
+    squared_dissimilarities = best.squared_dissimilarities
+    if squared_dissimilarities is None:
+        # Keep compatibility with legacy/custom _spherical_fcm_once results
+        # that do not carry the final distance artifact.
+        squared_dissimilarities = SphericalGeometry().squared_dissimilarities(
+            X,
+            best.centers,
+        )
     return FCMResult(
         labels=best.labels,
         memberships=best.memberships,

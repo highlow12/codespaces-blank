@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
 import numpy as np
 from sklearn.cluster import kmeans_plusplus
@@ -74,6 +75,36 @@ class SphericalFuzzyCMeansTest(unittest.TestCase):
             geometry.prepare_samples(result.centers),
         )
         np.testing.assert_allclose(result.squared_dissimilarities, expected)
+
+    def test_spherical_fit_reuses_final_distance_artifact_from_restart(self) -> None:
+        original_calculate_distances = SphericalGeometry.squared_dissimilarities
+
+        def calculate_distances(
+            samples: np.ndarray,
+            centers: np.ndarray,
+        ) -> np.ndarray:
+            return original_calculate_distances(
+                SphericalGeometry(),
+                samples,
+                centers,
+            )
+
+        with patch(
+            "fcm_core.SphericalGeometry.squared_dissimilarities",
+            side_effect=calculate_distances,
+        ) as distances:
+            result = spherical_fcm(
+                self.features,
+                n_clusters=2,
+                seed=7,
+                n_init=1,
+                max_attempts=1,
+            )
+
+        self.assertIsNotNone(result.squared_dissimilarities)
+        # One initial distance calculation and one per FCM iteration; the
+        # wrapper must not add another calculation for the selected restart.
+        self.assertEqual(distances.call_count, result.iterations + 1)
 
     def test_squared_distance_kernel_matches_legacy_euclidean_iteration(self) -> None:
         fuzzifier = 2.0

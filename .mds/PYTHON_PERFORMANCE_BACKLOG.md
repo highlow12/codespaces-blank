@@ -302,8 +302,32 @@ embedding, hierarchy summary/root metric가 모두 같았고 hierarchy center �
 총 81개가 통과했다.
 
 변경 후 3,000건 cProfile에서 `evaluate_pca_prefixes`는 6.318초에서 3.537초,
-neighbor search는 34회·6.436초에서 17회·3.198초로 줄었다. 다음 병목은 fast FCM
-후보 K·restart 경로인 **C-01**이다.
+neighbor search는 34회·6.436초에서 17회·3.198초로 줄었다. 다음으로 fast FCM
+후보 K·restart 경로인 **C-01**을 확인한다.
+
+### C-01 결과 (2026-08-09)
+
+현재 후보 K·restart 경로에는 이미 이전 FCM distance-artifact 재사용이 적용되어
+있었다. 남아 있던 안전한 중복은 선택된 restart가 마지막 iteration에서 계산한
+`squared_dissimilarities`를 `spherical_fcm` wrapper가 한 번 더 계산하는 부분이었다.
+`FCMResult`에 마지막 artifact를 전달하고 wrapper에서 이를 재사용하도록 수정했으며,
+legacy/custom 결과가 artifact를 제공하지 않는 경우에는 기존 재계산 fallback을
+유지했다.
+
+cache·seed가 같은 3회 측정에서 상태 크기는 변하지 않았고, C-02 결과와 비교해
+추가적인 end-to-end CPU 개선은 측정 편차 수준이었다.
+
+| 표본 | C-02 wall p50 (초) | C-01 wall p50 (초) | CPU 변화 | C-02 RSS p50 (KiB) | C-01 RSS p50 (KiB) | state 변화 |
+|---:|---:|---:|---:|---:|---:|---:|
+| 1,000 | 8.492067 | 8.693274 | +2.37% | 319,588 | 317,868 (-0.54%) | 0% |
+| 3,000 | 26.745578 | 26.752811 | +0.03% | 592,720 | 584,640 (-1.36%) | 0% |
+
+FCM 선택 테스트 30개와 전체 테스트 81개가 통과했고, cache state를 semantic
+comparison한 결과 runtime 요약값 외의 assignments·metadata·embedding·hierarchy
+model 값은 동일했다. 이 변경은 중복 계산을 제거하는 안전한 micro-optimization으로
+커밋하지만, 공통 채택선인 10% CPU/RSS 개선을 충족한 C-01 작업으로는 집계하지
+않는다. 더 큰 후보 K/restart 병렬화나 공유는 seed·center 의존성과 현재 fast 경로의
+조기 종료 때문에 별도 변경으로 확대하지 않고, 다음 작업은 **M-01**로 넘긴다.
 
 CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리만 줄이고 hot path를
 느리게 만드는 것을 피하기 위해 이후 작업은 두 지표를 함께 측정한다. 작업별 범위,
@@ -314,7 +338,7 @@ CPU 시간만 줄이는 변경이 peak RSS를 키우거나, 반대로 메모리�
 | 우선순위 | 계획 ID | 작업 | 주 목표 | 상태 |
 |---:|---|---|---|---|
 | 0 | R-00 | Gemini cache warm CPU·RSS 기준선과 병목 프로파일 고정 | 이후 작업의 시간·RSS·state 기준값 확보 | 완료 |
-| 1 | C-01 | FCM candidate K·restart 배열/계산 재사용 | CPU 우선, workspace 수명 관리로 RSS 제한 | 대기 |
+| 1 | C-01 | FCM candidate K·restart 배열/계산 재사용 | CPU 우선, workspace 수명 관리로 RSS 제한 | 보류: 추가 개선이 10% 미만 |
 | 2 | C-02 | PCA 자동 차원 탐색의 projection 재사용 | 반복 PCA/투영 CPU와 임시 배열 RSS 감소 | 완료 |
 | 3 | M-01 | 증분 center contribution compact numeric 저장 | update CPU·state 크기·RSS 동시 감소 | 대기 |
 | 4 | I-01 / N-07 | state envelope 직렬화 중복 제거 | 대형 state save/load CPU·일시 RSS 감소 | 보류: I/O profile 필요 |
@@ -337,7 +361,7 @@ peak RSS 10% 이상 개선, 그리고 다른 지표의 3% 초과 회귀가 없�
 | N-05 | 완료 | Float32 Python 경로 | 수치 fixture 확장 | labels/중심/XB/update 허용오차 통과, input·state RSS 및 크기 감소 |
 | N-06 | 완료 | conditional membership 선택화 | downstream schema 사용처 조사 | opt-in/off 계약 확정, 필요 없는 실행의 rows×paths 배열·열 미생성 |
 | R-00 | 완료 | Gemini cache warm CPU·RSS 기준선 및 병목 프로파일 | 동일 환경·cache·seed 고정 | 1,000/3,000 rows p50·peak RSS·state 표와 CPU/RSS 상위 보유 구조 기록 |
-| C-01 | 대기 | FCM candidate K·restart 배열/계산 재사용 | R-00에서 FCM 병목 확인 | 수치 결과 동등, CPU 또는 RSS 10% 개선, 다른 지표 3% 초과 회귀 없음 |
+| C-01 | 보류 | FCM candidate K·restart 배열/계산 재사용 | R-00에서 FCM 병목 확인 | 남은 artifact 중복 제거·동등성 확인; end-to-end 추가 개선이 10% 미만 |
 | C-02 | 완료 | PCA 자동 차원 탐색 projection 재사용 | R-00에서 PCA 병목 확인 | 선택 차원·downstream 결과 동등, CPU/RSS 공동 기준 통과 |
 | M-01 | 대기 | 증분 center contribution compact numeric 저장 | contribution/state 필드별 크기 측정 | replace/idempotency·legacy load 통과, update CPU·state/RSS 개선 |
 | N-07 / I-01 | 보류 | state envelope 복사·직렬화 개선 | 3,000건 이상 state I/O profile | checksum/legacy/atomic 계약 통과, peak RSS·save/load 시간 비교 |
@@ -347,8 +371,8 @@ peak RSS 10% 이상 개선, 그리고 다른 지표의 3% 초과 회귀가 없�
 ## 향후 실행 순서
 
 1. R-00으로 warm CPU·RSS 기준선과 실제 hot path를 확정한다.
-2. C-01과 C-02 중 R-00에서 더 큰 CPU 병목으로 확인된 항목을 먼저, 나머지를 다음으로
-   진행한다. 두 작업을 한 변경에 섞지 않는다.
+2. C-02를 완료하고 C-01의 남은 안전한 artifact 중복을 측정한다. 채택선에 미달하면
+   더 큰 FCM 구조 변경으로 확대하지 않는다.
 3. M-01로 증분 update/state의 Python 객체 오버헤드를 줄인다.
 4. I/O profile 또는 field profile 근거가 생기면 N-07/I-01, M-02를 진행한다.
 5. N-04/H-01은 재개 조건을 충족할 때만 다시 실험한다.
