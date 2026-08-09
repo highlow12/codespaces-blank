@@ -1978,7 +1978,7 @@ def _apply_global_forced_noise(
     natural_noise = updated.get(
         "is_natural_noise",
         updated["is_noise"],
-    ).fillna(False).astype(bool)
+    ).astype("boolean").fillna(False).astype(bool)
     stored_boundary_level = updated.get(
         "boundary_level",
         pd.Series(-1, index=updated.index),
@@ -2032,7 +2032,12 @@ def _apply_global_forced_noise(
         ],
         key=lambda column: int(column.split("_")[1]),
     )
-    labels = updated[level_columns].fillna(-1).to_numpy(dtype=int)
+    labels = (
+        updated[level_columns]
+        .apply(pd.to_numeric, errors="coerce")
+        .fillna(-1)
+        .to_numpy(dtype=int)
+    )
     assigned_depth = np.sum(labels >= 0, axis=1)
     leaf_cluster = np.full(len(updated), -1, dtype=int)
     has_leaf = assigned_depth > 0
@@ -2119,11 +2124,11 @@ def _refresh_tree_after_append(
     natural_noise = all_assignments.get(
         "is_natural_noise",
         all_assignments["is_noise"],
-    ).fillna(False).astype(bool)
+    ).astype("boolean").fillna(False).astype(bool)
     forced_noise = all_assignments.get(
         "is_forced_noise",
         pd.Series(False, index=all_assignments.index),
-    ).fillna(False).astype(bool)
+    ).astype("boolean").fillna(False).astype(bool)
     summary["natural_noise_count"] = int(natural_noise.sum())
     summary["forced_noise_count"] = int(forced_noise.sum())
     summary["forced_only_noise_count"] = int((forced_noise & ~natural_noise).sum())
