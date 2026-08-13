@@ -18,6 +18,7 @@ from benchmark_cluster_selection_sample_ratios import (
     choose_dataset_indices,
     choose_nested_sample_indices,
     online_refine_sample_centers,
+    online_refine_sample_centers_with_trace,
     sample_size_for_ratio,
     scaled_sample_min_child_size,
 )
@@ -192,6 +193,59 @@ class ClusterSelectionSampleRatioTests(unittest.TestCase):
         )
         self.assertGreater(result.centers[0, 1], 0.0)
         self.assertGreater(result.centers[1, 0], 0.0)
+
+    def test_online_refinement_trace_retains_then_refreshes_memberships(self) -> None:
+        features = np.array(
+            [
+                [1.0, 0.0],
+                [0.80, 0.60],
+                [0.0, 1.0],
+                [0.60, 0.80],
+            ]
+        )
+        sample_indices = np.array([0, 2])
+        selected = SimpleNamespace(
+            centers=np.array([[1.0, 0.0], [0.0, 1.0]]),
+            memberships=np.array([[1.0, 0.0], [0.0, 1.0]]),
+            m=2.0,
+            n_init=1,
+            attempts=1,
+            valid_restarts=1,
+            restart_stability=1.0,
+        )
+
+        trace = online_refine_sample_centers_with_trace(
+            features,
+            sample_indices,
+            selected,
+            batch_size=1,
+            order_seed=42,
+        )
+
+        np.testing.assert_allclose(
+            trace.stale_result.memberships[sample_indices],
+            selected.memberships,
+        )
+        self.assertFalse(
+            np.allclose(
+                trace.refreshed_result.memberships[sample_indices],
+                selected.memberships,
+            )
+        )
+        np.testing.assert_allclose(
+            trace.stale_result.centers,
+            trace.refreshed_result.centers,
+        )
+        self.assertEqual(trace.polished_result.labels.shape, (4,))
+        self.assertFalse(
+            np.allclose(
+                trace.polished_result.centers,
+                trace.refreshed_result.centers,
+            )
+        )
+        self.assertGreaterEqual(trace.streaming_update_sec, 0.0)
+        self.assertGreaterEqual(trace.membership_refresh_sec, 0.0)
+        self.assertGreaterEqual(trace.polish_sec, 0.0)
 
 
 if __name__ == "__main__":

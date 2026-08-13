@@ -1,11 +1,8 @@
-"""Run the project's default Auto-PCA SFCM workflow end to end.
+"""Run the project's default hierarchical PCA + spherical FCM workflow.
 
-The default workflow is intentionally narrow and reproducible:
-
-1. fit Auto-PCA SFCM;
-2. choose the visualization PCA dimension automatically and render UMAP; and
-3. when requested, run a mixed new-document/modified-document incremental
-   update and render the updated visualization again.
+The default path recursively selects a cluster count at every eligible node,
+then writes assignments, the hierarchy tree, and a fixed-coordinate UMAP view.
+The legacy flat helpers in this module remain available for direct comparisons.
 """
 
 from __future__ import annotations
@@ -25,6 +22,11 @@ from cluster_visualization import (
     make_selected_coordinate_plot,
 )
 from clustering_pipelines import build_soft_assignments
+from consensus_fcm import (
+    DEFAULT_CONSENSUS_MIN_ROWS,
+    ConsensusFcmConfig,
+    select_consensus_fcm_cluster_count,
+)
 from embedding_data import load_embeddings_from_json
 from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
 from fcm_core import (
@@ -42,6 +44,11 @@ from incremental_core import (
     remember_processed_batch,
     replay_summary,
     resolve_batch_id,
+)
+from incremental_clustering import (
+    fit_incremental_state,
+    update_incremental_state,
+    write_outputs as write_incremental_outputs,
 )
 from visualization_pca_dimension_selection import (
     VisualizationPcaDimensionSelection,
@@ -124,11 +131,16 @@ def fit_auto_pca_sfcm(
     m: float = 2.0,
     fast_mode: bool = False,
     fast_config: FastFcmConfig | None = None,
+    consensus_k_selection: bool = True,
+    consensus_min_rows: int = DEFAULT_CONSENSUS_MIN_ROWS,
+    consensus_config: ConsensusFcmConfig | None = None,
 ) -> AutoPcaSfcmState:
     """Fit Auto-PCA SFCM and select its cluster count automatically."""
 
     values, frame = _validate_data(embeddings, metadata)
     projected, pca, _selection = fit_clustering_pca(values, seed=seed)
+    if consensus_min_rows < 1:
+        raise ValueError("consensus_min_rows must be positive")
     if fast_mode:
         best, selection_metrics, selection_reason = select_fast_fcm_cluster_count(
             projected,
@@ -138,6 +150,19 @@ def fit_auto_pca_sfcm(
             selection_method="multi_metric",
             seed=seed,
             config=fast_config,
+        )
+    elif consensus_k_selection and len(projected) >= consensus_min_rows:
+        best, selection_metrics, selection_reason = (
+            select_consensus_fcm_cluster_count(
+                projected,
+                min_clusters=min_clusters,
+                max_clusters=max_clusters,
+                min_child_size=min_child_size,
+                selection_method="multi_metric",
+                seed=seed,
+                m=m,
+                config=consensus_config,
+            )
         )
     else:
         best, selection_metrics, selection_reason = select_fcm_cluster_count(
@@ -403,7 +428,9 @@ def run_full_pipeline(
     output_dir: Path,
     min_clusters: int = 2,
     max_clusters: int = 8,
-    min_child_size: int = 2,
+    max_depth: int = 4,
+    min_node_size: int = 60,
+    min_child_size: int = 20,
     seed: int = 42,
     incremental_test: bool = False,
     incremental_ratio: float = DEFAULT_INCREMENTAL_RATIO,
@@ -411,8 +438,11 @@ def run_full_pipeline(
     incremental_batch_id: str | None = None,
     fast_mode: bool = False,
     fast_config: FastFcmConfig | None = None,
+    consensus_k_selection: bool = True,
+    consensus_min_rows: int = DEFAULT_CONSENSUS_MIN_ROWS,
+    consensus_config: ConsensusFcmConfig | None = None,
 ) -> dict[str, Any]:
-    """Run the configured full workflow and return its saved artifact summary."""
+    """Run the default hierarchical workflow and save its artifact summary."""
 
     values, frame = _validate_data(embeddings, metadata)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -429,40 +459,61 @@ def run_full_pipeline(
     )
     initial_embeddings = values if split is None else split.initial_embeddings
     initial_metadata = frame if split is None else split.initial_metadata
-    initial_state = fit_auto_pca_sfcm(
+    hierarchy_kwargs: dict[str, Any] = {
+        "max_depth": max_depth,
+        "min_node_size": min_node_size,
+        "min_child_size": min_child_size,
+        "min_clusters": min_clusters,
+        "max_clusters": max_clusters,
+        "seed": seed,
+        "fast_mode": fast_mode,
+        "consensus_k_selection": consensus_k_selection,
+        "consensus_min_rows": consensus_min_rows,
+        "fit_visualization": True,
+    }
+    if fast_config is not None:
+        hierarchy_kwargs.update(
+            {
+                "fast_sample_size": fast_config.sample_size,
+                "fast_scout_n_init": fast_config.scout_n_init,
+                "fast_refine_n_init": fast_config.refine_n_init,
+                "fast_refine_top_k": fast_config.refine_top_k,
+                "fast_stability_target": fast_config.stability_target,
+                "fast_m_values": fast_config.m_values,
+            }
+        )
+    # The hierarchy owns its consensus configuration per node.  Preserve the
+    # flat API parameter for compatibility; its detailed config is not needed
+    # by the hierarchical selector.
+    _ = consensus_config
+    initial_state = fit_incremental_state(
         initial_embeddings,
         initial_metadata,
-        min_clusters=min_clusters,
-        max_clusters=max_clusters,
-        min_child_size=min_child_size,
-        seed=seed,
-        fast_mode=fast_mode,
-        fast_config=fast_config,
+        **hierarchy_kwargs,
     )
-    initial_assignments = output_dir / "auto_pca_sfcm_assignments.csv"
-    initial_plot = output_dir / "auto_pca_sfcm_visualization.png"
-    initial_report = output_dir / "auto_pca_sfcm_visualization_pca.json"
-    initial_state.assignments.to_csv(initial_assignments, index=False)
-    initial_selection = save_auto_pca_visualization(
+    initial_assignments = output_dir / "hierarchical_assignments.csv"
+    initial_coordinates = output_dir / "hierarchical_coordinates.csv"
+    initial_tree = output_dir / "hierarchical_tree.json"
+    initial_plot = output_dir / "hierarchical_visualization.png"
+    write_incremental_outputs(
         initial_state,
-        output_path=initial_plot,
-        report_path=initial_report,
-        title="Auto-PCA SFCM clustering",
-        seed=seed,
+        assignments_output=initial_assignments,
+        coordinates_output=initial_coordinates,
+        tree_output=initial_tree,
+        plot_output=initial_plot,
+        title="Hierarchical PCA SFCM clustering",
     )
+    initial_summary = initial_state.tree["summary"]
     summary: dict[str, Any] = {
-        "pipeline": "auto_pca_sfcm",
+        "pipeline": "hierarchical_pca_sfcm",
         "initial_samples": len(initial_state.embeddings),
-        "initial_selected_clusters": initial_state.selected_clusters,
-        "selected_fuzzifier": initial_state.m,
-        "fast_mode": initial_state.fast_mode,
-        "cluster_selection_reason": initial_state.cluster_selection_reason,
-        "cluster_selection_metrics": initial_state.cluster_selection_metrics,
-        "initial_visualization_pca_components": initial_selection.selected_dimension,
+        "hierarchy": initial_summary,
+        "config": initial_state.tree["config"],
         "artifacts": {
             "initial_assignments": str(initial_assignments),
             "initial_visualization": str(initial_plot),
-            "initial_visualization_pca": str(initial_report),
+            "initial_coordinates": str(initial_coordinates),
+            "initial_tree": str(initial_tree),
         },
     }
     if split is None:
@@ -470,32 +521,35 @@ def run_full_pipeline(
 
     update_batch_path = output_dir / "incremental_test_batch.csv"
     updated_assignments = output_dir / "incremental_test_assignments.csv"
+    updated_coordinates = output_dir / "incremental_test_coordinates.csv"
+    updated_tree = output_dir / "incremental_test_tree.json"
     updated_plot = output_dir / "incremental_test_visualization.png"
-    updated_report = output_dir / "incremental_test_visualization_pca.json"
     split.update_metadata.to_csv(update_batch_path, index=False)
-    updated_state, update_summary = update_auto_pca_sfcm(
+    updated_state, update_summary = update_incremental_state(
         initial_state,
         split.update_embeddings,
         split.update_metadata,
         batch_id=incremental_batch_id,
     )
-    updated_state.assignments.to_csv(updated_assignments, index=False)
-    updated_selection = save_auto_pca_visualization(
+    write_incremental_outputs(
         updated_state,
-        output_path=updated_plot,
-        report_path=updated_report,
-        title="Auto-PCA SFCM after incremental test",
-        seed=seed,
+        assignments_output=updated_assignments,
+        coordinates_output=updated_coordinates,
+        tree_output=updated_tree,
+        plot_output=updated_plot,
+        title="Hierarchical PCA SFCM after incremental test",
     )
     summary["incremental_test"] = {
-        **split.to_dict(),
         **update_summary,
-        "updated_visualization_pca_components": updated_selection.selected_dimension,
+        # Keep these as the deterministic synthetic-test composition rather
+        # than the update engine's incoming-batch count.
+        **split.to_dict(),
         "artifacts": {
             "update_batch": str(update_batch_path),
             "updated_assignments": str(updated_assignments),
             "updated_visualization": str(updated_plot),
-            "updated_visualization_pca": str(updated_report),
+            "updated_coordinates": str(updated_coordinates),
+            "updated_tree": str(updated_tree),
         },
     }
     return summary
@@ -503,13 +557,18 @@ def run_full_pipeline(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run Auto-PCA SFCM clustering and automatic-PCA visualization."
+        description=(
+            "Run hierarchical PCA + spherical FCM with automatic K selection "
+            "at every eligible node."
+        )
     )
     parser.add_argument("--input-json", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("results/full_pipeline"))
     parser.add_argument("--min-clusters", type=int, default=2)
     parser.add_argument("--max-clusters", type=int, default=8)
-    parser.add_argument("--min-child-size", type=int, default=2)
+    parser.add_argument("--max-depth", type=int, default=4)
+    parser.add_argument("--min-node-size", type=int, default=60)
+    parser.add_argument("--min-child-size", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--incremental-test", action="store_true")
     parser.add_argument("--incremental-ratio", type=float, default=DEFAULT_INCREMENTAL_RATIO)
@@ -533,6 +592,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--fast-refine-n-init", type=int, default=3)
     parser.add_argument("--fast-refine-top-k", type=int, default=2)
     parser.add_argument("--fast-stability-target", type=float, default=0.85)
+    parser.add_argument(
+        "--exact-k-selection",
+        action="store_false",
+        dest="consensus_k_selection",
+        default=True,
+        help=(
+            "Disable the default sampled consensus K selector and evaluate "
+            "every K on the complete dataset."
+        ),
+    )
+    parser.add_argument(
+        "--consensus-min-rows",
+        type=int,
+        default=DEFAULT_CONSENSUS_MIN_ROWS,
+        help="Minimum row count for sampled consensus K selection.",
+    )
     parser.add_argument(
         "--fast-m",
         type=float,
@@ -565,6 +640,8 @@ def main() -> None:
         output_dir=args.output_dir,
         min_clusters=args.min_clusters,
         max_clusters=args.max_clusters,
+        max_depth=args.max_depth,
+        min_node_size=args.min_node_size,
         min_child_size=args.min_child_size,
         seed=args.seed,
         incremental_test=args.incremental_test,
@@ -573,6 +650,8 @@ def main() -> None:
         incremental_batch_id=args.incremental_batch_id,
         fast_mode=args.fast,
         fast_config=fast_config,
+        consensus_k_selection=args.consensus_k_selection,
+        consensus_min_rows=args.consensus_min_rows,
     )
     summary_path = args.output_dir / "full_pipeline_summary.json"
     summary_path.write_text(

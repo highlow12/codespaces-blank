@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pandas as pd
 
+from consensus_fcm import select_consensus_fcm_cluster_count
 from full_pipeline import (
     build_parser,
     fit_auto_pca_sfcm,
@@ -88,6 +89,43 @@ class FullPipelineTest(unittest.TestCase):
             updated.assignments.filter(like="membership_").sum(axis=1),
             np.ones(20),
         )
+
+    def test_default_large_fit_uses_consensus_k_selection(self) -> None:
+        with patch(
+            "full_pipeline.select_consensus_fcm_cluster_count",
+            wraps=select_consensus_fcm_cluster_count,
+        ) as consensus_selector:
+            state = fit_auto_pca_sfcm(
+                self.embeddings,
+                self.metadata,
+                min_clusters=2,
+                max_clusters=2,
+                min_child_size=2,
+                seed=12,
+                consensus_min_rows=20,
+            )
+
+        consensus_selector.assert_called_once()
+        self.assertTrue(
+            state.cluster_selection_reason.startswith("consensus_")
+            or state.cluster_selection_reason == "selected_consensus_sample_vote"
+        )
+
+    def test_small_fit_keeps_exact_k_selection(self) -> None:
+        with patch(
+            "full_pipeline.select_consensus_fcm_cluster_count",
+            side_effect=AssertionError("small fits must stay exact"),
+        ):
+            state = fit_auto_pca_sfcm(
+                self.embeddings,
+                self.metadata,
+                min_clusters=2,
+                max_clusters=2,
+                min_child_size=2,
+                seed=12,
+            )
+
+        self.assertTrue(state.cluster_selection_reason.startswith("selected_"))
 
     def test_incremental_update_accepts_new_metadata_columns(self) -> None:
         state = fit_auto_pca_sfcm(
@@ -223,42 +261,55 @@ class FullPipelineTest(unittest.TestCase):
         self.assertTrue(args.fast)
         self.assertEqual(args.fast_m, [1.9, 1.5])
 
-    def test_full_pipeline_runs_the_updated_visualization_after_incremental_test(self) -> None:
-        selections = [
-            SimpleNamespace(selected_dimension=3),
-            SimpleNamespace(selected_dimension=4),
-        ]
+    def test_parser_can_disable_default_consensus_k_selection(self) -> None:
+        args = build_parser().parse_args(
+            ["--input-json", "embeddings.json", "--exact-k-selection"]
+        )
+
+        self.assertFalse(args.consensus_k_selection)
+
+    def test_full_pipeline_defaults_to_hierarchy_with_automatic_k(self) -> None:
+        initial_state = SimpleNamespace(
+            embeddings=self.embeddings[:18],
+            tree={
+                "summary": {"leaf_cluster_count": 2, "levels_reached": 1},
+                "config": {"consensus_k_selection": True},
+            },
+        )
+        updated_state = SimpleNamespace(embeddings=self.embeddings)
         with tempfile.TemporaryDirectory() as temporary_directory, patch(
-            "full_pipeline.save_auto_pca_visualization",
-            side_effect=selections,
-        ) as save_visualization:
+            "full_pipeline.fit_incremental_state",
+            return_value=initial_state,
+        ) as fit_hierarchy, patch(
+            "full_pipeline.update_incremental_state",
+            return_value=(
+                updated_state,
+                {"new_samples": 4, "total_samples": 20},
+            ),
+        ) as update_hierarchy, patch(
+            "full_pipeline.write_incremental_outputs",
+        ) as write_outputs:
             summary = run_full_pipeline(
                 self.embeddings,
                 self.metadata,
                 output_dir=Path(temporary_directory),
-                min_clusters=2,
-                max_clusters=2,
-                min_child_size=2,
                 seed=12,
                 incremental_test=True,
             )
 
-            self.assertEqual(save_visualization.call_count, 2)
+            fit_kwargs = fit_hierarchy.call_args.kwargs
+            self.assertEqual(fit_kwargs["max_depth"], 4)
+            self.assertEqual(fit_kwargs["min_node_size"], 60)
+            self.assertEqual(fit_kwargs["min_child_size"], 20)
+            self.assertTrue(fit_kwargs["consensus_k_selection"])
+            self.assertEqual(write_outputs.call_count, 2)
+            update_hierarchy.assert_called_once()
             self.assertEqual(summary["initial_samples"], 18)
-            self.assertEqual(summary["initial_selected_clusters"], 2)
-            self.assertFalse(summary["fast_mode"])
-            self.assertEqual(summary["selected_fuzzifier"], 2.0)
+            self.assertEqual(summary["pipeline"], "hierarchical_pca_sfcm")
+            self.assertEqual(summary["hierarchy"]["leaf_cluster_count"], 2)
             self.assertEqual(summary["incremental_test"]["new_samples"], 2)
             self.assertEqual(summary["incremental_test"]["modified_samples"], 2)
             self.assertEqual(summary["incremental_test"]["total_samples"], 20)
-            self.assertTrue(
-                Path(summary["artifacts"]["initial_assignments"]).is_file()
-            )
-            self.assertTrue(
-                Path(
-                    summary["incremental_test"]["artifacts"]["updated_assignments"]
-                ).is_file()
-            )
 
 
 if __name__ == "__main__":

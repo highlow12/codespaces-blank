@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 
 from clustering_types import HierarchicalModel, HierarchicalResult, HierarchyNodeModel
+from consensus_fcm import (
+    DEFAULT_CONSENSUS_MIN_ROWS,
+    ConsensusFcmConfig,
+    select_consensus_fcm_cluster_count,
+)
 from fcm_core import (
     conditional_memberships_from_projected,
     fit_clustering_pca,
@@ -95,6 +100,12 @@ def run_hierarchical_pca_fcm(
     fast_stability_target: float = 0.85,
     fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
     fast_reuse_scout_m: bool = True,
+    consensus_k_selection: bool = True,
+    consensus_min_rows: int = DEFAULT_CONSENSUS_MIN_ROWS,
+    consensus_sample_ratio: float = 0.20,
+    consensus_max_scouts: int = 5,
+    consensus_vote_threshold: int = 3,
+    consensus_scout_n_init: int = 3,
 ) -> HierarchicalResult:
     """Recursively split a dataset with spherical PCA+FCM."""
 
@@ -124,6 +135,22 @@ def run_hierarchical_pca_fcm(
         raise ValueError("forced_noise_ratio must be between 0 and 1")
     if min_split_silhouette < -1.0 or min_split_silhouette > 1.0:
         raise ValueError("min_split_silhouette must be between -1 and 1")
+    if consensus_min_rows < 1:
+        raise ValueError("consensus_min_rows must be positive")
+    consensus_config = ConsensusFcmConfig(
+        sample_ratio=consensus_sample_ratio,
+        max_scouts=consensus_max_scouts,
+        vote_threshold=consensus_vote_threshold,
+        scout_n_init=consensus_scout_n_init,
+        scout_max_attempts=max(
+            consensus_scout_n_init,
+            consensus_scout_n_init + 2,
+        ),
+        full_max_iter=max_fcm_iter,
+        full_tol=fcm_tol,
+    )
+    if consensus_k_selection:
+        consensus_config.validate()
     fast_config = FastFcmConfig(
         sample_size=fast_sample_size,
         scout_n_init=fast_scout_n_init,
@@ -259,6 +286,28 @@ def run_hierarchical_pca_fcm(
                 seed=selection_seed,
                 config=fast_config,
                 m_hint=(inherited_m if fast_reuse_scout_m else None),
+            )
+        elif (
+            consensus_k_selection
+            and selection_method == "multi_metric"
+            and indices.size >= consensus_min_rows
+        ):
+            best, candidate_metrics, reason = (
+                select_consensus_fcm_cluster_count(
+                    Xp[indices],
+                    min_clusters=min_clusters,
+                    max_clusters=max_clusters,
+                    min_child_size=min_child_size,
+                    min_membership=min_membership,
+                    max_membership_gap=max_membership_gap,
+                    distance_z=distance_z,
+                    selection_method=selection_method,
+                    min_xb_relative_improvement=min_xb_relative_improvement,
+                    xb_worsening_patience=xb_worsening_patience,
+                    seed=selection_seed,
+                    m=m,
+                    config=consensus_config,
+                )
             )
         else:
             best, candidate_metrics, reason = select_fcm_cluster_count(
@@ -614,6 +663,12 @@ def run_hierarchical_pca_fcm(
         "fast_stability_target": float(fast_stability_target),
         "fast_m_values": [float(value) for value in fast_m_values],
         "fast_reuse_scout_m": bool(fast_reuse_scout_m),
+        "consensus_k_selection": bool(consensus_k_selection),
+        "consensus_min_rows": int(consensus_min_rows),
+        "consensus_sample_ratio": float(consensus_sample_ratio),
+        "consensus_max_scouts": int(consensus_max_scouts),
+        "consensus_vote_threshold": int(consensus_vote_threshold),
+        "consensus_scout_n_init": int(consensus_scout_n_init),
     }
     tree = {"config": config, "summary": summary, "root": root}
     return HierarchicalResult(

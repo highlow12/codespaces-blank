@@ -68,6 +68,18 @@ class _CachedSelection:
     result: _CachedResult
 
 
+@dataclass(frozen=True)
+class OnlineCenterUpdateTrace:
+    """Streaming assignments before and after a final full membership refresh."""
+
+    stale_result: FCMResult
+    refreshed_result: FCMResult
+    polished_result: FCMResult
+    streaming_update_sec: float
+    membership_refresh_sec: float
+    polish_sec: float
+
+
 def _source_fingerprint(embeddings: np.ndarray, metadata: pd.DataFrame) -> str:
     """Fingerprint loaded input so resume cannot silently mix datasets."""
 
@@ -456,20 +468,22 @@ def _project_to_centers(features: np.ndarray, selected: FCMResult) -> FCMResult:
     )
 
 
-def online_refine_sample_centers(
+def online_refine_sample_centers_with_trace(
     features: np.ndarray,
     sample_indices: np.ndarray,
     selected: FCMResult,
     *,
     batch_size: int,
     order_seed: int,
-) -> FCMResult:
-    """Adapt sampled SFCM centers in one streaming pass over held-out rows.
+) -> OnlineCenterUpdateTrace:
+    """Adapt centers once and retain assignments from before a full refresh.
 
     The sample's fitted memberships initialize cumulative fuzzy sufficient
     statistics. Each subsequent batch is assigned to the current centers,
     added to those statistics, and then updates the centers once. This avoids
     full-data FCM iterations while letting the prototypes represent every row.
+    The trace contains both the assignments observed during that pass and the
+    assignments obtained by evaluating every row against the final centers.
     """
 
     values = np.asarray(features, dtype=np.float64)
@@ -489,6 +503,12 @@ def online_refine_sample_centers(
     if batch_size < 1:
         raise ValueError("batch_size must be positive")
 
+    streaming_started = time.perf_counter()
+    streaming_memberships = np.zeros(
+        (len(values), centers.shape[0]),
+        dtype=np.float64,
+    )
+    streaming_memberships[indices] = memberships
     weights = memberships**selected.m
     weighted_sum = weights.T @ values[indices]
     total_weight = weights.sum(axis=0)
@@ -504,6 +524,7 @@ def online_refine_sample_centers(
             centers,
             m=selected.m,
         )
+        streaming_memberships[batch_indices] = batch_memberships
         batch_weights = batch_memberships**selected.m
         weighted_sum += batch_weights.T @ values[batch_indices]
         total_weight += batch_weights.sum(axis=0)
@@ -513,29 +534,119 @@ def online_refine_sample_centers(
             1e-12,
         )
 
+    streaming_update_sec = time.perf_counter() - streaming_started
+    refresh_started = time.perf_counter()
     all_memberships, distances = sfcm_memberships_from_centers(
         values,
         centers,
         m=selected.m,
     )
+    membership_refresh_sec = time.perf_counter() - refresh_started
     center_distances = euclidean_distances(centers, centers)
     np.fill_diagonal(center_distances, np.inf)
-    return FCMResult(
+    common = {
+        "centers": centers,
+        "iterations": int(np.ceil(len(ordered_held_out) / batch_size)),
+        "m": selected.m,
+        "n_init": selected.n_init,
+        "attempts": selected.attempts,
+        "valid_restarts": selected.valid_restarts,
+        "restart_stability": selected.restart_stability,
+        "minimum_center_distance": float(np.min(center_distances)),
+        "squared_dissimilarities": distances**2,
+    }
+    stale_result = FCMResult(
+        labels=streaming_memberships.argmax(axis=1),
+        memberships=streaming_memberships,
+        objective=float(
+            np.sum((streaming_memberships**selected.m) * (distances**2))
+            / len(values)
+        ),
+        **common,
+    )
+    refreshed_result = FCMResult(
         labels=all_memberships.argmax(axis=1),
         memberships=all_memberships,
-        centers=centers,
-        iterations=int(np.ceil(len(ordered_held_out) / batch_size)),
         objective=float(
             np.sum((all_memberships**selected.m) * (distances**2)) / len(values)
+        ),
+        **common,
+    )
+
+    # One global FCM M-step: reuse the full E-step above to update all centers
+    # once, then evaluate memberships against those polished centers for the
+    # final labels.  This is deliberately bounded to one pass; it is not a
+    # hidden full convergence loop.
+    polish_started = time.perf_counter()
+    polish_weights = all_memberships**selected.m
+    polish_weight_totals = polish_weights.sum(axis=0)
+    polish_raw_centers = polish_weights.T @ values
+    polished_centers = polish_raw_centers / np.maximum(
+        polish_weight_totals[:, None],
+        1e-12,
+    )
+    polished_centers /= np.maximum(
+        np.linalg.norm(polished_centers, axis=1, keepdims=True),
+        1e-12,
+    )
+    polished_memberships, polished_distances = sfcm_memberships_from_centers(
+        values,
+        polished_centers,
+        m=selected.m,
+    )
+    polished_center_distances = euclidean_distances(
+        polished_centers,
+        polished_centers,
+    )
+    np.fill_diagonal(polished_center_distances, np.inf)
+    polish_sec = time.perf_counter() - polish_started
+    polished_result = FCMResult(
+        labels=polished_memberships.argmax(axis=1),
+        memberships=polished_memberships,
+        centers=polished_centers,
+        iterations=1,
+        objective=float(
+            np.sum(
+                (polished_memberships**selected.m)
+                * (polished_distances**2)
+            )
+            / len(values)
         ),
         m=selected.m,
         n_init=selected.n_init,
         attempts=selected.attempts,
         valid_restarts=selected.valid_restarts,
         restart_stability=selected.restart_stability,
-        minimum_center_distance=float(np.min(center_distances)),
-        squared_dissimilarities=distances**2,
+        minimum_center_distance=float(np.min(polished_center_distances)),
+        squared_dissimilarities=polished_distances**2,
     )
+    return OnlineCenterUpdateTrace(
+        stale_result=stale_result,
+        refreshed_result=refreshed_result,
+        polished_result=polished_result,
+        streaming_update_sec=streaming_update_sec,
+        membership_refresh_sec=membership_refresh_sec,
+        polish_sec=polish_sec,
+    )
+
+
+def online_refine_sample_centers(
+    features: np.ndarray,
+    sample_indices: np.ndarray,
+    selected: FCMResult,
+    *,
+    batch_size: int,
+    order_seed: int,
+) -> FCMResult:
+    """Return online-refined centers after refreshing every membership."""
+
+    return online_refine_sample_centers_with_trace(
+        features,
+        sample_indices,
+        selected,
+        batch_size=batch_size,
+        order_seed=order_seed,
+    ).refreshed_result
 
 
 def _quality(
