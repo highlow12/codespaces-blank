@@ -4,3 +4,8 @@ __pycache__/
 dbpedia_gemini_embeddings.checkpoint.json
 dbpedia_gemini_embeddings.json
 *.lock
+dbpedia_gemini_embeddings.py
+embed_notes_gemini.py
+notes.zip
+/notes/
+/results/
