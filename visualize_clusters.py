@@ -49,12 +49,17 @@ def main() -> None:
         default="auto",
         choices=["auto", "cluster"],
     )
-    parser.add_argument("--n-neighbors", type=int, default=15)
-    parser.add_argument("--min-dist", type=float, default=0.02)
-    parser.add_argument("--metric", type=str, default="cosine")
-    parser.add_argument("--spread", type=float, default=0.85)
-    parser.add_argument("--densmap", action="store_true", default=True)
+    parser.add_argument("--n-neighbors", type=int, default=24)
+    parser.add_argument("--min-dist", type=float, default=1.0)
+    parser.add_argument("--metric", type=str, default="euclidean")
+    parser.add_argument("--spread", type=float, default=1.8)
+    parser.add_argument("--densmap", action="store_true", default=False)
     parser.add_argument("--no-densmap", action="store_false", dest="densmap")
+    parser.add_argument(
+        "--no-legend",
+        action="store_true",
+        help="Omit the cluster legend from the saved scatter plot.",
+    )
     parser.add_argument(
         "--compare",
         action="store_true",
@@ -99,6 +104,7 @@ def main() -> None:
             spread=args.spread,
             densmap=args.densmap,
             cluster_target_weight=args.cluster_target_weight,
+            show_legend=not args.no_legend,
         )
     print(f"Saved visualization to: {args.output}")
 

@@ -379,10 +379,10 @@ def save_auto_pca_visualization(
     report_path: Path,
     title: str,
     seed: int,
-    n_neighbors: int = 15,
-    min_dist: float = 0.02,
-    metric: str = "cosine",
-    spread: float = 0.85,
+    n_neighbors: int = 24,
+    min_dist: float = 1.0,
+    metric: str = "euclidean",
+    spread: float = 1.8,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
 ) -> VisualizationPcaDimensionSelection:
     """Select visualization PCA automatically, then save one UMAP plot/report."""

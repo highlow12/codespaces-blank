@@ -38,7 +38,7 @@ def compact_umap_presets() -> list[dict[str, object]]:
             "name": "dense",
             "n_neighbors": 8,
             "min_dist": 0.0,
-            "metric": "cosine",
+            "metric": "euclidean",
             "spread": 0.7,
             "densmap": True,
         },
@@ -46,7 +46,7 @@ def compact_umap_presets() -> list[dict[str, object]]:
             "name": "compact",
             "n_neighbors": 12,
             "min_dist": 0.01,
-            "metric": "cosine",
+            "metric": "euclidean",
             "spread": 0.8,
             "densmap": True,
         },
@@ -54,7 +54,7 @@ def compact_umap_presets() -> list[dict[str, object]]:
             "name": "balanced",
             "n_neighbors": 15,
             "min_dist": 0.02,
-            "metric": "cosine",
+            "metric": "euclidean",
             "spread": 0.85,
             "densmap": True,
         },
@@ -62,7 +62,7 @@ def compact_umap_presets() -> list[dict[str, object]]:
             "name": "local",
             "n_neighbors": 20,
             "min_dist": 0.03,
-            "metric": "cosine",
+            "metric": "euclidean",
             "spread": 0.9,
             "densmap": False,
         },
@@ -226,6 +226,7 @@ def _save_cluster_scatter(
     output_path: Path,
     *,
     title: str,
+    show_legend: bool = True,
 ) -> None:
     fig, axis = plt.subplots(figsize=(12, 9))
     handles = _plot_groups(
@@ -240,12 +241,13 @@ def _save_cluster_scatter(
     axis.set_title(title)
     axis.set_xlabel("UMAP-1")
     axis.set_ylabel("UMAP-2")
-    axis.legend(
-        handles=handles,
-        loc="best",
-        frameon=True,
-        title="cluster label (count)",
-    )
+    if show_legend:
+        axis.legend(
+            handles=handles,
+            loc="best",
+            frameon=True,
+            title="cluster label (count)",
+        )
     fig.tight_layout()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=220)
@@ -271,6 +273,7 @@ def make_cluster_plot(
     spread: float,
     densmap: bool,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
+    show_legend: bool = True,
 ) -> None:
     metadata, values, color_mode, hierarchical, color_map = _prepare_plot_style(
         metadata,
@@ -306,6 +309,7 @@ def make_cluster_plot(
             f"{title} [PCA-{_pca_title_dimension(pca_components)} -> UMAP-2 | {color_mode}"
             f"{' | hierarchical' if hierarchical else ''}{target_suffix}]"
         ),
+        show_legend=show_legend,
     )
 
 

@@ -1767,10 +1767,10 @@ def fit_incremental_state(
     recluster_cooldown_updates: int = DEFAULT_RECLUSTER_COOLDOWN_UPDATES,
     visual_pca_components: int | None = None,
     visual_cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
-    visual_n_neighbors: int = 15,
-    visual_min_dist: float = 0.02,
-    visual_metric: str = "cosine",
-    visual_spread: float = 0.85,
+    visual_n_neighbors: int = 24,
+    visual_min_dist: float = 1.0,
+    visual_metric: str = "euclidean",
+    visual_spread: float = 1.8,
     visual_densmap: bool = False,
     center_updates_before_membership_refresh: int = (
         DEFAULT_CENTER_UPDATES_BEFORE_MEMBERSHIP_REFRESH
@@ -3368,10 +3368,10 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
             "(default: 0.01)."
         ),
     )
-    parser.add_argument("--visual-n-neighbors", type=int, default=15)
-    parser.add_argument("--visual-min-dist", type=float, default=0.02)
-    parser.add_argument("--visual-metric", type=str, default="cosine")
-    parser.add_argument("--visual-spread", type=float, default=0.85)
+    parser.add_argument("--visual-n-neighbors", type=int, default=24)
+    parser.add_argument("--visual-min-dist", type=float, default=1.0)
+    parser.add_argument("--visual-metric", type=str, default="euclidean")
+    parser.add_argument("--visual-spread", type=float, default=1.8)
     parser.add_argument(
         "--visual-densmap",
         action="store_true",
