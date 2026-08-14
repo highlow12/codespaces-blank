@@ -276,6 +276,7 @@ def evaluate_pca_prefixes(
     minimum_preservation_gain: float,
     neighbor_metric: str,
     stop_at_plateau: bool,
+    normalize_pca_output: bool = True,
 ) -> PcaPrefixSearchResult[CandidatePayload]:
     """Score PCA prefixes and select a stable preservation saturation point.
 
@@ -289,7 +290,11 @@ def evaluate_pca_prefixes(
     previous_evaluation: PcaPrefixEvaluation[CandidatePayload] | None = None
 
     for dimension in search.candidate_dimensions:
-        pca_features = search.projection.normalized_prefix(dimension)
+        pca_features = (
+            search.projection.normalized_prefix(dimension)
+            if normalize_pca_output
+            else search.projection.projected[:, :dimension]
+        )
         score_features, payload = candidate_factory(dimension, pca_features)
         score_features = validate_embedding_matrix(
             score_features,

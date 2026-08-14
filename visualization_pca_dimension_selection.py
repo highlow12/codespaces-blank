@@ -8,6 +8,7 @@ from typing import Any, Callable, Sequence
 
 import numpy as np
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import normalize
 
 from cluster_visualization import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -26,6 +27,7 @@ from pca_dimension_search import (
     prepare_pca_prefix_search,
 )
 from pca_projection import (
+    PcaPrefixTransformer,
     transform_normalized_pca_projection,
     validate_embedding_matrix,
 )
@@ -49,6 +51,7 @@ class VisualizationPcaDimensionSelection:
     component_step: int
     k_values: tuple[int, ...]
     minimum_preservation_gain: float
+    normalize_pca_output: bool
     umap_configuration: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
@@ -64,6 +67,7 @@ class VisualizationPcaDimensionSelection:
                 "input_normalized": True,
                 "neighbor_reference": "original_embeddings",
                 "neighbor_candidate": "umap_2d",
+                "pca_output_normalized": self.normalize_pca_output,
                 "umap": self.umap_configuration,
             },
             "candidates": [candidate.to_dict() for candidate in self.candidates],
@@ -78,11 +82,12 @@ def select_visualization_pca_dimension(
     component_step: int = DEFAULT_VISUALIZATION_COMPONENT_STEP,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
     minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
-    n_neighbors: int = 15,
-    min_dist: float = 0.02,
-    metric: str = "cosine",
-    spread: float = 0.85,
+    n_neighbors: int = 24,
+    min_dist: float = 1.0,
+    metric: str = "euclidean",
+    spread: float = 1.8,
     densmap: bool = False,
+    normalize_pca_output: bool = False,
     cluster_target: np.ndarray | None = None,
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -92,7 +97,8 @@ def select_visualization_pca_dimension(
     """Select the PCA prefix used before UMAP-2 visualization.
 
     PCA is fitted once at the maximum supported width. Each configured
-    prefix is normalized and passed through an identically configured UMAP-2.
+    prefix is passed through an identically configured UMAP-2. By default its
+    PCA magnitude is retained; set ``normalize_pca_output`` to normalize it.
     The score is k-NN preservation between the normalized original embeddings
     and the two-dimensional UMAP coordinates. When the score gain first falls
     below the configured minimum, the previous PCA dimension is selected.
@@ -129,6 +135,7 @@ def select_visualization_pca_dimension(
         "metric": metric,
         "spread": spread,
         "densmap": densmap,
+        "normalize_pca_output": normalize_pca_output,
         "random_state": seed,
         "target_metric": target_metric,
         "target_weight": target_weight,
@@ -163,6 +170,7 @@ def select_visualization_pca_dimension(
         minimum_preservation_gain=minimum_preservation_gain,
         neighbor_metric="euclidean",
         stop_at_plateau=True,
+        normalize_pca_output=normalize_pca_output,
     )
     selected_umap, selected_coordinates = result.selected_payload
 
@@ -178,6 +186,7 @@ def select_visualization_pca_dimension(
         component_step=component_step,
         k_values=search.k_values,
         minimum_preservation_gain=minimum_preservation_gain,
+        normalize_pca_output=normalize_pca_output,
         umap_configuration=umap_configuration,
     )
 
@@ -190,11 +199,12 @@ def select_visualization_pca_dimension_for_data(
     component_step: int = DEFAULT_VISUALIZATION_COMPONENT_STEP,
     k_values: Sequence[int] = DEFAULT_K_VALUES,
     minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
-    n_neighbors: int = 15,
-    min_dist: float = 0.02,
-    metric: str = "cosine",
-    spread: float = 0.85,
+    n_neighbors: int = 24,
+    min_dist: float = 1.0,
+    metric: str = "euclidean",
+    spread: float = 1.8,
     densmap: bool = False,
+    normalize_pca_output: bool = False,
     cluster_target: np.ndarray | None = None,
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -230,6 +240,7 @@ def select_visualization_pca_dimension_for_data(
         metric=metric,
         spread=spread,
         densmap=densmap,
+        normalize_pca_output=normalize_pca_output,
         cluster_target=cluster_target,
         cluster_target_metric=cluster_target_metric,
         cluster_target_weight=cluster_target_weight,
@@ -244,11 +255,25 @@ def transform_with_selected_visualization(
 ) -> np.ndarray:
     """Transform new embeddings with the selected PCA prefix and UMAP."""
 
-    features = transform_normalized_pca_projection(
-        X,
-        selection.pca,
-        dimension=selection.selected_dimension,
-    )
+    if selection.normalize_pca_output:
+        features = transform_normalized_pca_projection(
+            X,
+            selection.pca,
+            dimension=selection.selected_dimension,
+        )
+    else:
+        features = PcaPrefixTransformer(
+            selection.pca,
+            selection.selected_dimension,
+        ).transform(
+            normalize(
+                validate_embedding_matrix(
+                    X,
+                    expected_features=int(selection.pca.n_features_in_),
+                ),
+                norm="l2",
+            )
+        )
     return np.asarray(selection.umap.transform(features), dtype=np.float64)
 
 
@@ -299,10 +324,10 @@ def main() -> None:
         type=float,
         default=DEFAULT_MINIMUM_PRESERVATION_GAIN,
     )
-    parser.add_argument("--n-neighbors", type=int, default=15)
-    parser.add_argument("--min-dist", type=float, default=0.02)
-    parser.add_argument("--metric", type=str, default="cosine")
-    parser.add_argument("--spread", type=float, default=0.85)
+    parser.add_argument("--n-neighbors", type=int, default=24)
+    parser.add_argument("--min-dist", type=float, default=1.0)
+    parser.add_argument("--metric", type=str, default="euclidean")
+    parser.add_argument("--spread", type=float, default=1.8)
     parser.add_argument("--densmap", action="store_true", default=False)
     parser.add_argument(
         "--cluster-target-weight",

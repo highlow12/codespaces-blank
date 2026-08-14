@@ -15,12 +15,14 @@ os.environ.setdefault(
 import numpy as np
 import pandas as pd
 from sklearn.decomposition import PCA
+from sklearn.preprocessing import normalize
 
 from embedding_data import load_embeddings_from_json
 from pca_projection import (
     PcaPrefixTransformer,
     fit_normalized_pca_projection,
     transform_normalized_pca_projection,
+    validate_embedding_matrix,
 )
 from visualization_constants import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -50,6 +52,7 @@ def project_embeddings(
     metric: str,
     spread: float,
     densmap: bool,
+    normalize_pca_output: bool = False,
     cluster_target: np.ndarray | None = None,
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -63,6 +66,7 @@ def project_embeddings(
         metric=metric,
         spread=spread,
         densmap=densmap,
+        normalize_pca_output=normalize_pca_output,
         cluster_target=cluster_target,
         cluster_target_metric=cluster_target_metric,
         cluster_target_weight=cluster_target_weight,
@@ -80,6 +84,7 @@ def fit_projection_model(
     metric: str,
     spread: float,
     densmap: bool,
+    normalize_pca_output: bool = False,
     cluster_target: np.ndarray | None = None,
     cluster_target_metric: str | None = None,
     cluster_target_weight: float = DEFAULT_CLUSTER_TARGET_WEIGHT,
@@ -98,11 +103,13 @@ def fit_projection_model(
             metric=metric,
             spread=spread,
             densmap=densmap,
+            normalize_pca_output=normalize_pca_output,
             cluster_target=cluster_target,
             cluster_target_metric=cluster_target_metric,
             cluster_target_weight=cluster_target_weight,
             seed=seed,
         )
+        setattr(selection.umap, "_visualization_normalize_pca_output", normalize_pca_output)
         return (
             PcaPrefixTransformer(
                 selection.pca,
@@ -135,7 +142,13 @@ def fit_projection_model(
         target_metric=target_metric,
         target_weight=target_weight,
     )
-    reduced = reducer.fit_transform(fitted.normalized_prefix(), y=target)
+    pca_features = (
+        fitted.normalized_prefix()
+        if normalize_pca_output
+        else fitted.projected
+    )
+    setattr(reducer, "_visualization_normalize_pca_output", normalize_pca_output)
+    reduced = reducer.fit_transform(pca_features, y=target)
     return fitted.pca, reducer, reduced
 
 
@@ -212,16 +225,27 @@ def _make_umap_reducer(
 def transform_projection(
     embeddings: np.ndarray,
     *,
-    pca: PCA,
+    pca: PCA | PcaPrefixTransformer,
     reducer: Any,
 ) -> np.ndarray:
     """Project a new batch using a previously fitted PCA+UMAP model."""
 
-    pca_features = transform_normalized_pca_projection(
-        embeddings,
-        pca,
-        name="embeddings",
+    normalize_pca_output = bool(
+        getattr(reducer, "_visualization_normalize_pca_output", True)
     )
+    if normalize_pca_output:
+        pca_features = transform_normalized_pca_projection(
+            embeddings,
+            pca,
+            name="embeddings",
+        )
+    else:
+        matrix = validate_embedding_matrix(
+            embeddings,
+            name="embeddings",
+            expected_features=int(pca.n_features_in_),
+        )
+        pca_features = np.asarray(pca.transform(normalize(matrix, norm="l2")))
     reduced = np.asarray(reducer.transform(pca_features), dtype=np.float64)
     if reduced.ndim != 2 or reduced.shape[1] != 2:
         raise ValueError("UMAP transform must return two-dimensional coordinates")

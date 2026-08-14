@@ -123,9 +123,7 @@ class VisualizationPcaDimensionSelectionTests(unittest.TestCase):
             seed=42,
         )
         fake_umap = _FakeUmap()
-        expected_coordinates = fake_umap.fit_transform(
-            fitted.normalized_prefix(8)
-        )
+        expected_coordinates = fake_umap.fit_transform(fitted.projected[:, :8])
         fake_selection = SimpleNamespace(
             pca=fitted.pca,
             selected_dimension=8,
@@ -160,7 +158,7 @@ class VisualizationPcaDimensionSelectionTests(unittest.TestCase):
         )
         np.testing.assert_allclose(
             transformed,
-            fake_umap.transform(fitted.normalized_prefix(8)[:5]),
+            fake_umap.transform(fitted.projected[:5, :8]),
             atol=1e-12,
         )
 
