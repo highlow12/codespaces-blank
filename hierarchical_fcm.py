@@ -8,6 +8,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from clustering_defaults import (
+    DEFAULT_FAST_FUZZIFIER_VALUES,
+    DEFAULT_PIPELINE_FUZZIFIER,
+)
 from clustering_types import HierarchicalModel, HierarchicalResult, HierarchyNodeModel
 from consensus_fcm import (
     DEFAULT_CONSENSUS_MIN_ROWS,
@@ -32,7 +36,11 @@ from fcm_validity import (
     _validate_fcm_selection_parameters,
     select_fcm_cluster_count,
 )
-from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
+from fast_fcm import (
+    FastFcmConfig,
+    select_fast_fcm_cluster_count,
+    select_stable_fuzzifier,
+)
 from pca_dimension_search import (
     DEFAULT_K_VALUES,
     DEFAULT_MAX_COMPONENTS,
@@ -88,7 +96,7 @@ def run_hierarchical_pca_fcm(
     pca_k_values: tuple[int, ...] = DEFAULT_K_VALUES,
     pca_minimum_preservation_gain: float = DEFAULT_MINIMUM_PRESERVATION_GAIN,
     seed: int = 42,
-    m: float = 2.0,
+    m: float | None = None,
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
     include_conditional_memberships: bool = False,
@@ -98,7 +106,7 @@ def run_hierarchical_pca_fcm(
     fast_refine_n_init: int = 3,
     fast_refine_top_k: int = 2,
     fast_stability_target: float = 0.85,
-    fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
+    fast_m_values: tuple[float, ...] = DEFAULT_FAST_FUZZIFIER_VALUES,
     fast_reuse_scout_m: bool = True,
     consensus_k_selection: bool = True,
     consensus_min_rows: int = DEFAULT_CONSENSUS_MIN_ROWS,
@@ -127,7 +135,7 @@ def run_hierarchical_pca_fcm(
         selection_method=selection_method,
         min_xb_relative_improvement=min_xb_relative_improvement,
         xb_worsening_patience=xb_worsening_patience,
-        m=m,
+        m=DEFAULT_PIPELINE_FUZZIFIER if m is None else m,
         max_iter=max_fcm_iter,
         tol=fcm_tol,
     )
@@ -183,6 +191,19 @@ def run_hierarchical_pca_fcm(
         minimum_preservation_gain=pca_minimum_preservation_gain,
         seed=seed,
     )
+    fuzzifier_probe_metrics: list[dict[str, Any]] = []
+    if not fast_mode and m is None:
+        selected_m, fuzzifier_probe_metrics = select_stable_fuzzifier(
+            Xp,
+            min_child_size=min_child_size,
+            max_membership_gap=max_membership_gap,
+            distance_z=distance_z,
+            selection_method=selection_method,
+            seed=seed,
+            config=fast_config,
+        )
+    else:
+        selected_m = DEFAULT_PIPELINE_FUZZIFIER if m is None else float(m)
     projection_support = pca_projection_support(X, pca)
     projection_support_threshold = calibrate_pca_projection_support_threshold(
         X,
@@ -242,6 +263,10 @@ def run_hierarchical_pca_fcm(
         depth=0,
         size=X.shape[0],
     )
+    root["fuzzifier_selection"] = (
+        "fast_per_node" if fast_mode else "automatic_probe" if m is None else "fixed"
+    )
+    root["fuzzifier_probe_metrics"] = fuzzifier_probe_metrics
 
     def make_root_fallback(reason: str) -> None:
         valid_rows = ~projection_outliers
@@ -305,7 +330,7 @@ def run_hierarchical_pca_fcm(
                     min_xb_relative_improvement=min_xb_relative_improvement,
                     xb_worsening_patience=xb_worsening_patience,
                     seed=selection_seed,
-                    m=m,
+                    m=selected_m,
                     config=consensus_config,
                 )
             )
@@ -322,7 +347,7 @@ def run_hierarchical_pca_fcm(
                 min_xb_relative_improvement=min_xb_relative_improvement,
                 xb_worsening_patience=xb_worsening_patience,
                 seed=selection_seed,
-                m=m,
+                m=selected_m,
                 max_iter=max_fcm_iter,
                 tol=fcm_tol,
             )
@@ -362,6 +387,7 @@ def run_hierarchical_pca_fcm(
             return
 
         node["selected_k"] = int(best.n_clusters)
+        node["selected_m"] = float(best.m)
         node["selected_silhouette"] = float(best.silhouette)
         node["selected_xie_beni"] = float(best.xie_beni)
         node["selected_partition_coefficient"] = float(
@@ -649,7 +675,8 @@ def run_hierarchical_pca_fcm(
             None if pca_selection is None else pca_selection.to_dict()
         ),
         "seed": int(seed),
-        "fuzzifier": float(m),
+        "fuzzifier": float(selected_m),
+        "fuzzifier_requested": "auto" if m is None else float(m),
         "max_fcm_iter": int(max_fcm_iter),
         "fcm_tol": float(fcm_tol),
         "include_conditional_memberships": bool(

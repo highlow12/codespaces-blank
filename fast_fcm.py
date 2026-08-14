@@ -14,6 +14,7 @@ from typing import Any
 
 import numpy as np
 
+from clustering_defaults import DEFAULT_FAST_FUZZIFIER_VALUES
 from clustering_types import FCMKCandidate
 from fcm_core import DEFAULT_FCM_MIN_CENTER_SEPARATION
 from fcm_validity import (
@@ -41,7 +42,7 @@ class FastFcmConfig:
     max_refine_n_init: int = 10
     stability_target: float = 0.85
     refine_score_margin: float = 0.15
-    m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4)
+    m_values: tuple[float, ...] = DEFAULT_FAST_FUZZIFIER_VALUES
     minimum_probe_stability: float = 0.80
     min_center_separation: float = DEFAULT_FCM_MIN_CENTER_SEPARATION
 
@@ -93,7 +94,7 @@ def _scout_m(
     seed: int,
     config: FastFcmConfig,
 ) -> tuple[float, list[dict[str, Any]]]:
-    """Choose the largest fuzzifier that produces a stable two-way probe."""
+    """Choose the first configured fuzzifier with a stable two-way probe."""
 
     records: list[dict[str, Any]] = []
     for m_index, m in enumerate(config.m_values):
@@ -130,6 +131,33 @@ def _scout_m(
         ):
             return float(m), records
     return float(config.m_values[-1]), records
+
+
+def select_stable_fuzzifier(
+    X: np.ndarray,
+    *,
+    min_child_size: int,
+    max_membership_gap: float,
+    distance_z: float,
+    selection_method: str,
+    seed: int,
+    config: FastFcmConfig | None = None,
+) -> tuple[float, list[dict[str, Any]]]:
+    """Select m on a deterministic sample without enabling fast K selection."""
+
+    chosen = config or FastFcmConfig()
+    chosen.validate()
+    sample = _deterministic_sample(X, chosen.sample_size, seed)
+    return _scout_m(
+        sample,
+        min_child_size=min_child_size,
+        min_clusters=2,
+        max_membership_gap=max_membership_gap,
+        distance_z=distance_z,
+        selection_method=selection_method,
+        seed=seed,
+        config=chosen,
+    )
 
 
 def _scout_candidate_ks(

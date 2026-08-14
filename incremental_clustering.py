@@ -21,6 +21,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from clustering_defaults import (
+    DEFAULT_FAST_FUZZIFIER_VALUES,
+    DEFAULT_PIPELINE_FUZZIFIER,
+)
 from consensus_fcm import DEFAULT_CONSENSUS_MIN_ROWS
 from embedding_cache import cache_record_count, load_embeddings_from_cache
 from visualization_constants import (
@@ -938,7 +942,7 @@ def _cluster_config(
     membership_refresh_min_center_movement: float,
     membership_refresh_min_influence: float,
     max_xb_relative_degradation: float,
-    fuzzifier: float,
+    fuzzifier: float | None,
     max_fcm_iter: int,
     fcm_tol: float,
     embedding_storage_dtype: str,
@@ -1033,7 +1037,10 @@ def _cluster_config(
             pca_minimum_preservation_gain
         ),
         "seed": int(seed),
-        "m": float(fuzzifier),
+        "m": float(
+            DEFAULT_PIPELINE_FUZZIFIER if fuzzifier is None else fuzzifier
+        ),
+        "m_auto": fuzzifier is None,
         "max_fcm_iter": int(max_fcm_iter),
         "fcm_tol": float(fcm_tol),
         "embedding_storage_dtype": storage_dtype_name,
@@ -1187,7 +1194,11 @@ def _hierarchy_fit_parameters(config: dict[str, Any]) -> dict[str, Any]:
         "forced_noise_ratio": float(
             config.get("forced_noise_ratio", DEFAULT_FORCED_NOISE_RATIO)
         ),
-        "m": float(config.get("m", 2.0)),
+        "m": (
+            None
+            if bool(config.get("m_auto", False))
+            else float(config.get("m", 2.0))
+        ),
         "max_fcm_iter": int(config.get("max_fcm_iter", 200)),
         "fcm_tol": float(config.get("fcm_tol", 1e-6)),
         "include_conditional_memberships": bool(
@@ -1712,6 +1723,8 @@ def _fit_hierarchy(
         raise RuntimeError("Hierarchical clustering did not return a reusable model")
     config["pca_components_selected"] = int(result.model.pca.n_components_)
     result_config = result.tree.get("config", {})
+    if "fuzzifier" in result_config:
+        config["m"] = float(result_config["fuzzifier"])
     if result_config.get("pca_selection") is not None:
         config["pca_selection"] = result_config["pca_selection"]
     return result.model, result.tree, result.assignments
@@ -1783,7 +1796,7 @@ def fit_incremental_state(
         DEFAULT_MEMBERSHIP_REFRESH_MIN_INFLUENCE
     ),
     max_xb_relative_degradation: float = DEFAULT_MAX_XB_RELATIVE_DEGRADATION,
-    fuzzifier: float = 2.0,
+    fuzzifier: float | None = None,
     max_fcm_iter: int = 200,
     fcm_tol: float = 1e-6,
     embedding_storage_dtype: str = DEFAULT_EMBEDDING_STORAGE_DTYPE,
@@ -1796,7 +1809,7 @@ def fit_incremental_state(
     fast_refine_n_init: int = 3,
     fast_refine_top_k: int = 2,
     fast_stability_target: float = 0.85,
-    fast_m_values: tuple[float, ...] = (2.0, 1.8, 1.6, 1.4),
+    fast_m_values: tuple[float, ...] = DEFAULT_FAST_FUZZIFIER_VALUES,
     fast_reuse_scout_m: bool = True,
     consensus_k_selection: bool = True,
     consensus_min_rows: int = DEFAULT_CONSENSUS_MIN_ROWS,
@@ -3228,8 +3241,11 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--fuzzifier",
         type=float,
-        default=2.0,
-        help="Default FCM fuzzifier m (fast mode can adapt it per node).",
+        default=None,
+        help=(
+            "Fix the FCM fuzzifier m; omit to select it automatically. "
+            "Fast mode adapts it per node."
+        ),
     )
     parser.add_argument("--max-fcm-iter", type=int, default=200)
     parser.add_argument("--fcm-tol", type=float, default=1e-6)
@@ -3273,7 +3289,7 @@ def _add_cluster_args(parser: argparse.ArgumentParser) -> None:
         "--fast-m",
         type=float,
         nargs="+",
-        default=[2.0, 1.8, 1.6, 1.4],
+        default=list(DEFAULT_FAST_FUZZIFIER_VALUES),
         help="Fuzzifier fallback schedule used by --fast.",
     )
     parser.add_argument(

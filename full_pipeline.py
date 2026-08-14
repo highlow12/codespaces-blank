@@ -16,6 +16,10 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from clustering_defaults import (
+    DEFAULT_FAST_FUZZIFIER_VALUES,
+    DEFAULT_PIPELINE_FUZZIFIER,
+)
 from cluster_visualization import (
     DEFAULT_CLUSTER_TARGET_WEIGHT,
     build_cluster_supervision,
@@ -29,6 +33,7 @@ from consensus_fcm import (
 )
 from embedding_data import load_embeddings_from_json
 from fast_fcm import FastFcmConfig, select_fast_fcm_cluster_count
+from fast_fcm import select_stable_fuzzifier
 from fcm_core import (
     fit_clustering_pca,
     sfcm_memberships_from_centers,
@@ -72,7 +77,7 @@ class AutoPcaSfcmState:
     selected_clusters: int
     cluster_selection_reason: str
     cluster_selection_metrics: list[dict[str, Any]]
-    m: float = 2.0
+    m: float = DEFAULT_PIPELINE_FUZZIFIER
     fast_mode: bool = False
     generation: int = 0
     processed_batches: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -128,7 +133,7 @@ def fit_auto_pca_sfcm(
     max_clusters: int = 8,
     min_child_size: int = 2,
     seed: int = 42,
-    m: float = 2.0,
+    m: float | None = None,
     fast_mode: bool = False,
     fast_config: FastFcmConfig | None = None,
     consensus_k_selection: bool = True,
@@ -139,6 +144,18 @@ def fit_auto_pca_sfcm(
 
     values, frame = _validate_data(embeddings, metadata)
     projected, pca, _selection = fit_clustering_pca(values, seed=seed)
+    fuzzifier_metrics: list[dict[str, Any]] = []
+    resolved_m = DEFAULT_PIPELINE_FUZZIFIER if m is None else float(m)
+    if not fast_mode and m is None:
+        resolved_m, fuzzifier_metrics = select_stable_fuzzifier(
+            projected,
+            min_child_size=min_child_size,
+            max_membership_gap=0.10,
+            distance_z=3.5,
+            selection_method="multi_metric",
+            seed=seed,
+            config=fast_config,
+        )
     if consensus_min_rows < 1:
         raise ValueError("consensus_min_rows must be positive")
     if fast_mode:
@@ -160,7 +177,7 @@ def fit_auto_pca_sfcm(
                 min_child_size=min_child_size,
                 selection_method="multi_metric",
                 seed=seed,
-                m=m,
+                m=resolved_m,
                 config=consensus_config,
             )
         )
@@ -172,12 +189,12 @@ def fit_auto_pca_sfcm(
             min_child_size=min_child_size,
             selection_method="multi_metric",
             seed=seed,
-            m=m,
+            m=resolved_m,
         )
     if best is None:
         # A one-cluster result is the only valid automatic answer when the
         # data cannot support two children under the requested constraints.
-        result = spherical_fcm(projected, n_clusters=1, m=m, seed=seed)
+        result = spherical_fcm(projected, n_clusters=1, m=resolved_m, seed=seed)
         selected_clusters = 1
         selection_reason = f"single_cluster_fallback:{selection_reason}"
     else:
@@ -192,7 +209,7 @@ def fit_auto_pca_sfcm(
         assignments=assignments,
         selected_clusters=selected_clusters,
         cluster_selection_reason=selection_reason,
-        cluster_selection_metrics=selection_metrics,
+        cluster_selection_metrics=[*fuzzifier_metrics, *selection_metrics],
         m=float(result.m),
         fast_mode=fast_mode,
         generation=0,
@@ -612,7 +629,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--fast-m",
         type=float,
         nargs="+",
-        default=[2.0, 1.8, 1.6, 1.4],
+        default=list(DEFAULT_FAST_FUZZIFIER_VALUES),
         help="Fuzzifier search schedule used by --fast.",
     )
     return parser

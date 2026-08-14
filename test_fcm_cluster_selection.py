@@ -251,6 +251,11 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
 
         self.assertIsNotNone(result.model)
         self.assertEqual(len(result.assignments), len(self.features))
+        self.assertEqual(result.tree["config"]["fuzzifier_requested"], "auto")
+        self.assertEqual(
+            result.tree["root"]["fuzzifier_selection"], "automatic_probe"
+        )
+        self.assertTrue(result.tree["root"]["fuzzifier_probe_metrics"])
 
     def test_hierarchy_reuses_selected_distance_artifact(self) -> None:
         with patch(

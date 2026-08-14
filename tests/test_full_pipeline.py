@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from inspect import signature
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -18,6 +19,7 @@ from full_pipeline import (
     update_auto_pca_sfcm,
 )
 from fast_fcm import FastFcmConfig
+from incremental_clustering import build_parser as build_incremental_parser
 
 
 class FullPipelineTest(unittest.TestCase):
@@ -260,6 +262,26 @@ class FullPipelineTest(unittest.TestCase):
 
         self.assertTrue(args.fast)
         self.assertEqual(args.fast_m, [1.9, 1.5])
+
+    def test_pipeline_defaults_use_benchmarked_fuzzifier(self) -> None:
+        args = build_parser().parse_args(
+            ["--input-json", "embeddings.json"]
+        )
+
+        self.assertEqual(args.fast_m, [1.2, 1.4, 1.6, 1.8, 2.0])
+        self.assertEqual(FastFcmConfig().m_values, (1.2, 1.4, 1.6, 1.8, 2.0))
+        self.assertIsNone(signature(fit_auto_pca_sfcm).parameters["m"].default)
+        incremental_args = build_incremental_parser().parse_args(
+            [
+                "fit",
+                "--input-json",
+                "embeddings.json",
+                "--state-output",
+                "state.pkl",
+            ]
+        )
+        self.assertIsNone(incremental_args.fuzzifier)
+        self.assertEqual(incremental_args.fast_m, [1.2, 1.4, 1.6, 1.8, 2.0])
 
     def test_parser_can_disable_default_consensus_k_selection(self) -> None:
         args = build_parser().parse_args(
