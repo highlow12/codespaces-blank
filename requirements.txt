@@ -4,4 +4,5 @@ pandas>=2.2,<3
 scikit-learn>=1.5,<2
 matplotlib>=3.9,<4
 umap-learn>=0.5.7,<0.6
+pacmap>=0.9,<1
 datasets>=3,<5
