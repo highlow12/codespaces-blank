@@ -11,6 +11,8 @@ FCM, `multi_metric` K 선택과 표본 합의, 노이즈 판정, 약지도 UMAP,
 
 ## 보존된 과거 자료
 
+- `HDBSCAN_BOTTOM_UP_RESEARCH.md`: HDBSCAN leaf와 PCA 의미공간 bottom-up 병합을
+  결합한 속도·품질 연구, 현재 결과와 후속 검증 계획
 - `PROJECT_DECISION_HISTORY.md`: 프로젝트 의사결정과 과거 성능 비교
 - `PCA_DIMENSION_SELECTION.md`: 고정 PCA 후보 평가와 자동 선택 근거
 - `TAG_EMBEDDING_EXPERIMENT.md`: 태그 임베딩 실험

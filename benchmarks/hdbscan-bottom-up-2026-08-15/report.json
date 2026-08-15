@@ -1,0 +1,539 @@
+{
+  "configuration": {
+    "input_json": "dbpedia_gemini_embeddings.json.gz",
+    "samples": 3000,
+    "embedding_dimensions": 3072,
+    "pca_components": 96,
+    "post_pca_l2": true,
+    "umap_components": 20,
+    "umap_neighbors": 30,
+    "umap_min_dist": 0.0,
+    "umap_metric": "euclidean",
+    "hdbscan_min_cluster_size": 40,
+    "hdbscan_min_samples": 2,
+    "hdbscan_cluster_selection_method": "eom",
+    "seed": 42,
+    "noise_policy": "retain label -1 at every hierarchy cut",
+    "merge_space": "L2-normalized PCA space",
+    "merge_distance": "cosine distance between soft leaf centers",
+    "merge_linkage": "membership-mass-weighted average linkage"
+  },
+  "runtime_sec": 36.84276750399977,
+  "pca_explained_variance_ratio": 0.4733687889821844,
+  "hdbscan": {
+    "leaf_count": 24,
+    "noise_count": 100,
+    "noise_ratio": 0.03333333333333333,
+    "membership_mass": [
+      69.39355987563015,
+      86.67964378907486,
+      111.49123070326611,
+      165.8487474409594,
+      122.12824377249468,
+      62.90151126535307,
+      81.25528585001705,
+      79.89231975866198,
+      107.26673937912001,
+      93.14443156928779,
+      182.0918655949204,
+      97.8704115242071,
+      125.70988104727108,
+      158.0942259024612,
+      80.04280551849988,
+      78.37414801094687,
+      73.18839162238316,
+      79.70912082790667,
+      80.12191188806568,
+      81.33401162336882,
+      96.25717807547773,
+      71.41295956417592,
+      83.85206256913555,
+      112.60455280402351
+    ]
+  },
+  "truth_cluster_counts": {
+    "top": 6,
+    "middle": 17,
+    "leaf": 18
+  },
+  "matched_cut_metrics": {
+    "6": {
+      "top": {
+        "nmi": 0.716248889707494,
+        "ari": 0.6493426823953206,
+        "predicted_clusters": 6,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "middle": {
+        "nmi": 0.625803043701763,
+        "ari": 0.3475094611319329,
+        "predicted_clusters": 6,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "leaf": {
+        "nmi": 0.6475092338713727,
+        "ari": 0.36465916517676095,
+        "predicted_clusters": 6,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      }
+    },
+    "17": {
+      "top": {
+        "nmi": 0.6295313857855727,
+        "ari": 0.37410135908506437,
+        "predicted_clusters": 17,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "middle": {
+        "nmi": 0.7945472499653552,
+        "ari": 0.642133983178614,
+        "predicted_clusters": 17,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "leaf": {
+        "nmi": 0.8102591276811721,
+        "ari": 0.6805690104716828,
+        "predicted_clusters": 17,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      }
+    },
+    "18": {
+      "top": {
+        "nmi": 0.6468406913527651,
+        "ari": 0.38716289632762674,
+        "predicted_clusters": 18,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "middle": {
+        "nmi": 0.8068131044189986,
+        "ari": 0.6709140594237051,
+        "predicted_clusters": 18,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "leaf": {
+        "nmi": 0.8221762254175008,
+        "ari": 0.7122401280524004,
+        "predicted_clusters": 18,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      }
+    },
+    "24": {
+      "top": {
+        "nmi": 0.628339227922144,
+        "ari": 0.329625274879386,
+        "predicted_clusters": 24,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "middle": {
+        "nmi": 0.8205517706116457,
+        "ari": 0.7007074578994781,
+        "predicted_clusters": 24,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      },
+      "leaf": {
+        "nmi": 0.8351202833772484,
+        "ari": 0.7477415378349709,
+        "predicted_clusters": 24,
+        "noise_count": 100,
+        "noise_ratio": 0.03333333333333333
+      }
+    }
+  },
+  "best_label_informed_cuts": {
+    "top": {
+      "nmi": 0.716248889707494,
+      "ari": 0.6493426823953206,
+      "predicted_clusters": 6,
+      "noise_count": 100,
+      "noise_ratio": 0.03333333333333333,
+      "quality_mean": 0.6827957860514073,
+      "cut_clusters": 6
+    },
+    "middle": {
+      "nmi": 0.8205517706116457,
+      "ari": 0.7007074578994781,
+      "predicted_clusters": 24,
+      "noise_count": 100,
+      "noise_ratio": 0.03333333333333333,
+      "quality_mean": 0.760629614255562,
+      "cut_clusters": 24
+    },
+    "leaf": {
+      "nmi": 0.8351202833772484,
+      "ari": 0.7477415378349709,
+      "predicted_clusters": 24,
+      "noise_count": 100,
+      "noise_ratio": 0.03333333333333333,
+      "quality_mean": 0.7914309106061097,
+      "cut_clusters": 24
+    }
+  },
+  "largest_merge_gaps": [
+    {
+      "clusters": 23,
+      "distance_before": 0.19487625561593758,
+      "distance_after": 0.39092237569851196,
+      "distance_gap": 0.19604612008257438
+    },
+    {
+      "clusters": 21,
+      "distance_before": 0.39534267538942724,
+      "distance_after": 0.5202001552629111,
+      "distance_gap": 0.12485747987348383
+    },
+    {
+      "clusters": 8,
+      "distance_before": 0.8597388320927971,
+      "distance_after": 0.9413606037883284,
+      "distance_gap": 0.08162177169553131
+    },
+    {
+      "clusters": 14,
+      "distance_before": 0.649489521206733,
+      "distance_after": 0.7238998703197994,
+      "distance_gap": 0.07441034911306643
+    },
+    {
+      "clusters": 18,
+      "distance_before": 0.573654119662405,
+      "distance_after": 0.6280574322295982,
+      "distance_gap": 0.05440331256719322
+    }
+  ],
+  "merges": [
+    {
+      "node": 24,
+      "left": 16,
+      "right": 17,
+      "distance": 0.19487625561593758,
+      "mass": 152.89751245028984,
+      "leaves": [
+        16,
+        17
+      ]
+    },
+    {
+      "node": 25,
+      "left": 5,
+      "right": 6,
+      "distance": 0.39092237569851196,
+      "mass": 144.15679711537013,
+      "leaves": [
+        5,
+        6
+      ]
+    },
+    {
+      "node": 26,
+      "left": 14,
+      "right": 18,
+      "distance": 0.39534267538942724,
+      "mass": 160.16471740656556,
+      "leaves": [
+        14,
+        18
+      ]
+    },
+    {
+      "node": 27,
+      "left": 20,
+      "right": 21,
+      "distance": 0.5202001552629111,
+      "mass": 167.67013763965366,
+      "leaves": [
+        20,
+        21
+      ]
+    },
+    {
+      "node": 28,
+      "left": 11,
+      "right": 12,
+      "distance": 0.5475579126042085,
+      "mass": 223.5802925714782,
+      "leaves": [
+        11,
+        12
+      ]
+    },
+    {
+      "node": 29,
+      "left": 0,
+      "right": 1,
+      "distance": 0.573654119662405,
+      "mass": 156.073203664705,
+      "leaves": [
+        0,
+        1
+      ]
+    },
+    {
+      "node": 30,
+      "left": 13,
+      "right": 22,
+      "distance": 0.6280574322295982,
+      "mass": 241.94628847159674,
+      "leaves": [
+        13,
+        22
+      ]
+    },
+    {
+      "node": 31,
+      "left": 23,
+      "right": 24,
+      "distance": 0.629334766749345,
+      "mass": 265.5020652543134,
+      "leaves": [
+        16,
+        17,
+        23
+      ]
+    },
+    {
+      "node": 32,
+      "left": 4,
+      "right": 25,
+      "distance": 0.6494298533680715,
+      "mass": 266.2850408878648,
+      "leaves": [
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "node": 33,
+      "left": 15,
+      "right": 19,
+      "distance": 0.649489521206733,
+      "mass": 159.70815963431568,
+      "leaves": [
+        15,
+        19
+      ]
+    },
+    {
+      "node": 34,
+      "left": 26,
+      "right": 31,
+      "distance": 0.7238998703197994,
+      "mass": 425.66678266087894,
+      "leaves": [
+        14,
+        16,
+        17,
+        18,
+        23
+      ]
+    },
+    {
+      "node": 35,
+      "left": 9,
+      "right": 10,
+      "distance": 0.7709496868367853,
+      "mass": 275.23629716420817,
+      "leaves": [
+        9,
+        10
+      ]
+    },
+    {
+      "node": 36,
+      "left": 28,
+      "right": 30,
+      "distance": 0.7919902224729306,
+      "mass": 465.52658104307494,
+      "leaves": [
+        11,
+        12,
+        13,
+        22
+      ]
+    },
+    {
+      "node": 37,
+      "left": 2,
+      "right": 29,
+      "distance": 0.8343975537783743,
+      "mass": 267.5644343679711,
+      "leaves": [
+        0,
+        1,
+        2
+      ]
+    },
+    {
+      "node": 38,
+      "left": 27,
+      "right": 35,
+      "distance": 0.8506139681681223,
+      "mass": 442.9064348038618,
+      "leaves": [
+        9,
+        10,
+        20,
+        21
+      ]
+    },
+    {
+      "node": 39,
+      "left": 3,
+      "right": 8,
+      "distance": 0.8597388320927971,
+      "mass": 273.1154868200794,
+      "leaves": [
+        3,
+        8
+      ]
+    },
+    {
+      "node": 40,
+      "left": 7,
+      "right": 38,
+      "distance": 0.9413606037883284,
+      "mass": 522.7987545625238,
+      "leaves": [
+        7,
+        9,
+        10,
+        20,
+        21
+      ]
+    },
+    {
+      "node": 41,
+      "left": 33,
+      "right": 39,
+      "distance": 0.9848300707650038,
+      "mass": 432.8236464543951,
+      "leaves": [
+        3,
+        8,
+        15,
+        19
+      ]
+    },
+    {
+      "node": 42,
+      "left": 32,
+      "right": 37,
+      "distance": 1.0034081589570365,
+      "mass": 533.8494752558358,
+      "leaves": [
+        0,
+        1,
+        2,
+        4,
+        5,
+        6
+      ]
+    },
+    {
+      "node": 43,
+      "left": 40,
+      "right": 42,
+      "distance": 1.0484985159668319,
+      "mass": 1056.6482298183596,
+      "leaves": [
+        0,
+        1,
+        2,
+        4,
+        5,
+        6,
+        7,
+        9,
+        10,
+        20,
+        21
+      ]
+    },
+    {
+      "node": 44,
+      "left": 41,
+      "right": 43,
+      "distance": 1.0719602437492992,
+      "mass": 1489.4718762727548,
+      "leaves": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        15,
+        19,
+        20,
+        21
+      ]
+    },
+    {
+      "node": 45,
+      "left": 34,
+      "right": 36,
+      "distance": 1.0820571804286516,
+      "mass": 891.1933637039539,
+      "leaves": [
+        11,
+        12,
+        13,
+        14,
+        16,
+        17,
+        18,
+        22,
+        23
+      ]
+    },
+    {
+      "node": 46,
+      "left": 44,
+      "right": 45,
+      "distance": 1.1032241701216425,
+      "mass": 2380.6652399767086,
+      "leaves": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23
+      ]
+    }
+  ]
+}

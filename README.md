@@ -97,6 +97,47 @@ Gemini 데이터에서 빠르게 초기 상태를 적합합니다. `dbpedia_labe
   --fast
 ```
 
+원래 HDBSCAN noise 문서에 대해 대표점(근사 메도이드) 거리와 클러스터 내 최근접
+5개 문서 거리의 소프트 소속도를 비교하려면 다음을 사용합니다.
+
+```bash
+./.venv/bin/python hdbscan_soft_pipeline.py \
+  --input-json dbpedia_gemini_embeddings.json.gz \
+  --dataset-sample-size 100 \
+  --dataset-sample-seed 42 \
+  --pca-components 8 \
+  --min-cluster-size 5 \
+  --min-samples 3 \
+  --output-dir results/hdbscan_soft
+```
+
+`assignments.csv`에는 원래 HDBSCAN 라벨과 대표점 기준 최종 `cluster`, 두 방식의
+추천 라벨·최대 소속도·각 membership 열이 기록됩니다. 대표점 방식만 최종 라벨에
+반영하며, 기본 임계값 `0.60` 미만은 noise(`-1`)로 유지합니다. 이 값들은 HDBSCAN이
+제공하는 자체 확률이 아니라, PCA·L2 정규화 공간의 코사인 거리로 계산한 사후 비교
+지표입니다.
+
+### HDBSCAN 소프트 소속도 비교 실행 기록 (2026-08-15)
+
+위 명령의 Gemini 데이터셋 100건 표본(`seed=42`, PCA 8차원, `min_cluster_size=5`,
+`min_samples=3`)을 한 번 실행한 결과는 다음과 같습니다.
+
+| 항목 | 결과 |
+| --- | ---: |
+| HDBSCAN hard cluster 수 | 9 |
+| 원래 noise 문서 수 | 12 |
+| 대표점 방식 재배정 수 (`>= 0.60`) | 0 |
+| 최근접점 방식 재배정 수 (`>= 0.60`) | 0 |
+| noise 추천 라벨 일치율 | 50.0% |
+| 평균 confidence 차이 (대표점 − 최근접점) | 0.0555 |
+| 평균 절대 confidence 차이 | 0.0611 |
+
+이 작은 표본과 기본 임계값에서는 두 방법 모두 원래 noise를 보수적으로 유지했습니다.
+이는 품질 일반화 결과가 아니라 파이프라인이 실제 데이터에서 동작하는지 확인한
+스모크 실행 기록입니다. 세부 문서별 결과와 클러스터별 메도이드는
+[`assignments.csv`](results/hdbscan_soft/assignments.csv)와
+[`summary.json`](results/hdbscan_soft/summary.json)에 저장되어 있습니다.
+
 증분 처리 비용을 측정하려면 다음을 사용합니다.
 
 ```bash
