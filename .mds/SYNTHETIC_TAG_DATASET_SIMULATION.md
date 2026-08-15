@@ -1,5 +1,10 @@
 # 합성 태그 데이터셋 생성 및 3,000개 시뮬레이션
 
+> 이 문서는 2026-08-09 합성 데이터 생성·평가 기록이다. fixed `K=10` sweep의
+> 결론은 [`../benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md`](../benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md)를
+> 참조한다. 운영 기본값과 태그 결합 정책은 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)를
+> 우선하며, 현재 기본 경로는 content-only다.
+
 이 문서는 태그를 노트의 정답 라벨로 직접 사용하지 않고, 숨은 concept
 공간을 노트 임베딩과 관측 태그가 각각 불완전하게 관측하는 상황을 만들기
 위한 합성 데이터 생성 방법과 첫 시뮬레이션 결과를 기록한다.
@@ -127,4 +132,3 @@ semantic 구조를 흐렸다. `weight=0.5`는 태그 결합 조건 중 가장 �
 - `synthetic_notes_3000.npz`: 임베딩, 관측 태그 임베딩, 숨은 root membership
 - `synthetic_notes_3000.json.gz`: 노트별 embedding과 true/observed tag 메타데이터
 - `report_pca96.json`: PCA-96 비교 결과
-

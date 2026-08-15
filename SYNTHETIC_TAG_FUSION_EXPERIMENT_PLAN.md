@@ -1,5 +1,11 @@
 # 합성 데이터 기반 태그 융합 실험 계획서
 
+> 상태 (2026-08-15): fixed `K=10`의 content-noise × tag-corruption × tag-weight
+> sweep은 완료되었으며 결과는
+> [`benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md`](benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md)에
+> 보존한다. 아직 완료하지 않은 범위는 K를 모르는 계층 경로의 재검증과 실제 운영
+> 태그 기반 평가다. 현재 기본 경로에는 early fusion을 넣지 않는다.
+
 ## 1. 목적과 판단 기준
 
 이 계획의 목적은 **태그가 유용한가**를 단일 점수로 판정하는 것이 아니라,

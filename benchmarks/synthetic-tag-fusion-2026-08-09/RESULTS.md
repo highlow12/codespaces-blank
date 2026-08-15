@@ -1,5 +1,9 @@
 # Synthetic tag fusion results — 2026-08-09
 
+> Historical fixed-`K=10` result. These numbers remain the reproducible result
+> for this sweep; they do not enable early tag fusion in the current production
+> path. See [`../../README.md`](../../README.md) for the current default.
+
 ## 실행 범위
 
 전체 sweep은 3개 seed, content noise 5개, tag corruption multiplier 5개,

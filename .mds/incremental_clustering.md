@@ -3,7 +3,8 @@
 현재 알고리즘의 전체 명세는 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)를
 참조한다. 이 문서는 명령 예시와 증분 동작을 보충한다.
 
-`incremental_clustering.py`는 자동 선택된 클러스터링 PCA + 구면 FCM과
+`incremental_clustering.py`는 자동 선택된 클러스터링 PCA + 안정성 기반 fuzzifier
+선택 + 구면 FCM과
 자동 선택된 시각화 PCA + UMAP 모델을 상태 파일로 저장하고, 이후 임베딩을
 기존 클러스터에 배정한다. 신규 배치의 natural-noise 비율은 최소 표본 수 단위로
 누적한 뒤 EWMA로 평활화한다. 평활 비율이 `--noise-threshold`를 초과하면 누적
@@ -13,13 +14,15 @@
 각각 k-NN 보존율로 선택하는 것이다. 선택된 실제 차원은 상태 파일의
 `pca_components_selected`, `visual_pca_components_selected`에 저장된다. 고정
 차원이 필요하면 `--pca-components N`, `--visual-pca-components N`을 지정한다.
+`--fuzzifier`를 생략하면 `1.2, 1.4, 1.6, 1.8, 2.0` 후보의 안정성 probe로 `m`을
+선택한다. 고정값이 필요하면 `--fuzzifier M`을 지정한다.
 
 AG News 검증에서는 라벨별 1,000개가 묶여 있는 원본 특성을 고려해 각 라벨에서 100개씩 신규 배치로 추출했다. 따라서 초기 3,600개와 신규 400개 모두 네 라벨을 균등하게 포함한다.
 
 ## 초기 90% 학습
 
 ```bash
-python incremental_clustering.py fit \
+./.venv/bin/python incremental_clustering.py fit \
   --input-json results_test/ag_news_embeddings_4x1000.json \
   --start 0 --limit 3600 \
   --dataset-sample-size 800 \
@@ -34,7 +37,7 @@ python incremental_clustering.py fit \
 ## 신규 10% 업데이트
 
 ```bash
-python incremental_clustering.py update \
+./.venv/bin/python incremental_clustering.py update \
   --state results_incremental/ag_news_90.state.pkl \
   --input-json results_test/ag_news_embeddings_4x1000.json \
   --start 3600 --limit 400 \
@@ -73,7 +76,7 @@ densMAP은 신규 점 변환을 지원하지 않으므로 증분 모드에서는
 초기 `fit` 명령에서 주기를 변경할 수 있다.
 
 ```bash
-python incremental_clustering.py fit \
+./.venv/bin/python incremental_clustering.py fit \
   ... \
   --center-updates-before-membership-refresh 10 \
   --membership-refresh-min-center-movement 0.01 \
@@ -170,7 +173,7 @@ relative_improvement(K) = (XB(K-1) - XB(K)) / abs(XB(K-1))
 XB 악화 후 추가로 확인할 K 개수는 기본 2개다. 다음처럼 변경할 수 있다.
 
 ```bash
-python incremental_clustering.py fit \
+./.venv/bin/python incremental_clustering.py fit \
   ... \
   --selection-method multi_metric \
   --xb-worsening-patience 3

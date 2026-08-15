@@ -1,5 +1,11 @@
 # Python 알고리즘 최적화 및 JavaScript 이식 계획
 
+> 상태 (2026-08-15): JavaScript/TypeScript 구현은 아직 이 작업 트리에 없다. 이
+> 문서는 2026-08-09의 이식 계획과 당시 Python 기준선을 보존하며, 현재 Python
+> 알고리즘의 계약은 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)를 우선한다.
+> 특히 자동 PCA·fuzzifier 선택, `multi_metric` K 선택과 표본 합의는 이 문서의
+> 고정 PCA 예시보다 최신이다.
+
 ## 1. 목표와 전제
 
 먼저 Python 기준 구현에서 알고리즘과 출력 계약을 고정한다. 결과를 바꾸지 않는
@@ -27,7 +33,7 @@ Python 단계에서는 각 최적화 전후의 수치 동등성과 품질을 fix
 `main`의 `0fc857b`에서 다음 고정 표본을 `cProfile`로 측정했다.
 
 ```bash
-python -m cProfile -o /tmp/codespaces_perf_main.prof \
+./.venv/bin/python -m cProfile -o /tmp/codespaces_perf_main.prof \
   incremental_clustering.py fit \
   --input-json dbpedia_gemini_embeddings.json.gz \
   --dataset-sample-size 300 --dataset-sample-seed 42 \

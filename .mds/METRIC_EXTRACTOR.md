@@ -5,7 +5,7 @@
 여러 조건을 평가할 수 있다.
 
 ```bash
-python extract_clustering_metrics.py \
+./.venv/bin/python extract_clustering_metrics.py \
   --assignments \
     /path/to/assignments_content_only.csv \
     /path/to/assignments_content_plus_tag.csv \

@@ -1,5 +1,9 @@
 # Synthetic tag fusion benchmark
 
+> Historical, fixed-`K=10` benchmark (2026-08-09). It is not the production
+> clustering configuration; the current content-only default is documented in
+> [`../../README.md`](../../README.md).
+
 This directory contains the reproducible content-noise × tag-corruption × tag-weight sweep.
 
 - report: `report.json`

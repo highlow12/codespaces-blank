@@ -13,6 +13,8 @@
 - `incremental_clustering.py`: 초기 적합, 증분 업데이트, 상태 저장, CLI
 - `hierarchical_fcm.py`: 재귀 계층 분할과 할당 결과 생성
 - `fcm_core.py`: 정규화 PCA와 구면 FCM
+- `fast_fcm.py`: 안정성 probe 기반 fuzzifier 선택과 빠른 scout/refine K 탐색
+- `consensus_fcm.py`: 큰 노드의 표본 합의 K 선택
 - `fcm_validity.py`: 후보 K 평가와 선택
 - `fcm_document_classification.py`: core·boundary·noise 판정
 - `pca_dimension_search.py`: PCA 접두 부분과 k-NN 보존율 평가
@@ -29,6 +31,7 @@
 JSON 임베딩과 메타데이터
   → 입력 검증 및 ID 정렬
   → 정규화 PCA 차원 자동 선택
+  → 안정성 probe로 fuzzifier 선택
   → 선택된 PCA 공간에서 재귀 구면 FCM
   → 각 노드의 K 선택과 노이즈·경계 판정
   → 계층별 소프트 소속도와 경로 소속도 생성
@@ -55,7 +58,7 @@ JSON 임베딩과 메타데이터
 ### 3.1 초기 적합
 
 ```bash
-python incremental_clustering.py fit \
+./.venv/bin/python incremental_clustering.py fit \
   --input-json dbpedia_gemini_embeddings.json.gz \
   --state-output results/model.state.pkl \
   --assignments-output results/model_assignments.csv \
@@ -70,7 +73,7 @@ python incremental_clustering.py fit \
 반복적인 클러스터링 실험에서는 다음처럼 UMAP을 생략할 수 있다.
 
 ```bash
-python incremental_clustering.py fit \
+./.venv/bin/python incremental_clustering.py fit \
   --input-json dbpedia_gemini_embeddings.json.gz \
   --state-output results/scout.state.pkl \
   --fast \
@@ -83,7 +86,7 @@ python incremental_clustering.py fit \
 ### 3.2 증분 업데이트
 
 ```bash
-python incremental_clustering.py update \
+./.venv/bin/python incremental_clustering.py update \
   --state results/model.state.pkl \
   --input-json new_embeddings.json \
   --state-output results/model_updated.state.pkl \
@@ -122,10 +125,10 @@ python incremental_clustering.py update \
 | 후보 K | `2`부터 `4`까지, 노드 크기로 추가 제한 |
 | 최소 최대 소속도 | `0.20` |
 | 최대 소속도 차이 | `0.10` |
-| 전역 강제 노이즈 비율 | `0.01` |
+| 전역 강제 노이즈 비율 | `0.0` (기본 비활성) |
 | 거리 이상치 배수 | `3.5` |
 | K 선택 방식 | `multi_metric` |
-| 퍼지화 지수 `m` | `2.0` |
+| 퍼지화 지수 `m` | `--fuzzifier` 생략 시 안정성 probe; 후보 `1.2, 1.4, 1.6, 1.8, 2.0` |
 | FCM 최대 반복 | `200` |
 | FCM 수렴 허용오차 | `1e-6` |
 | 시드 | `42` |
@@ -134,10 +137,11 @@ python incremental_clustering.py update \
 | 선택 대상 최소 중심 이동 | `0.01` |
 | 선택 대상 최소 영향도 | `0.05` |
 | 계층 XB 악화 재클러스터 기준 | 기준 XB 대비 `0.05` 이상 |
-| UMAP 이웃 수 | `15` |
-| UMAP `min_dist` | `0.02` |
-| UMAP 거리 | `cosine` |
-| UMAP `spread` | `0.85` |
+| 표본 합의 K 선택 | `multi_metric`·노드 500건 이상에서 20% 표본 최대 5개, 3표 다수결 |
+| UMAP 이웃 수 | `24` |
+| UMAP `min_dist` | `1.0` |
+| UMAP 거리 | `euclidean` |
+| UMAP `spread` | `1.8` |
 | 약지도 목표 가중치 | `0.01` |
 | 증분 UMAP `densmap` | `False` |
 
@@ -197,20 +201,26 @@ PCA는 최대 후보 폭으로 한 번만 적합하며, 후보마다 같은 PCA 
 클러스터링 PCA 결과를 다시 단위 벡터로 취급한다. 각 후보 K에 대해 다음을
 수행한다.
 
-1. `kmeans++`로 중심을 초기화하고 중심을 L2 정규화한다.
-2. 중심까지의 유클리드 거리로 소프트 소속도를 초기화한다.
+1. `sklearn.cluster.kmeans_plusplus`로 중심을 초기화하고 중심을 L2 정규화한다.
+2. 단위 구면의 제곱 chord distance `max(2 - 2·x·c, 0)`로 소프트 소속도를 초기화한다.
 3. `membership ** m`을 가중치로 중심을 계산한다.
 4. 각 중심을 다시 L2 정규화한다.
-5. 새 거리로 소속도를 갱신한다.
+5. 새 제곱거리로 소속도를 갱신한다.
 6. 최대 소속도 변화가 `tol`보다 작으면 종료한다.
 
-입력과 중심이 모두 단위 구면에 있으므로 유클리드 거리 순위는 코사인
-거리 순위와 대응한다. 별도의 코사인 FCM 분기를 사용하지 않는다.
+입력과 중심이 모두 단위 구면에 있으므로 제곱 chord distance 순위는 코사인
+거리 순위와 대응한다. 제곱근을 구하지 않으므로 membership과 후보 평가에서
+불필요한 계산을 피한다.
 
 기본 일반 경로는 재시작을 `10`회 시도하고, 최대 `30`회까지 시도할 수
 있다. 유효한 재시작은 모든 클러스터가 최소 자식 크기를 만족하고 중심 간
 최소 거리가 `1e-3` 이상인 결과다. 유효한 결과 중 FCM 목적 함수가 가장
 작은 결과를 선택하며, 유효 재시작 사이의 평균 ARI를 안정성 지표로 저장한다.
+
+`--fuzzifier`를 생략한 일반 경로는 최대 1,000개 행의 결정적 표본에서 2-way
+probe를 실행한다. 후보 `1.2, 1.4, 1.6, 1.8, 2.0`을 순서대로 확인해 재시작
+안정성이 `0.80` 이상인 첫 값을 전체 계층에 사용하고, 없으면 마지막 후보를
+사용한다. `--fuzzifier M`은 이 선택을 고정값으로 대체한다.
 
 ### 6.2 후보 K와 기본 `multi_metric` 선택
 
@@ -288,11 +298,13 @@ threshold = median(cluster_distances)
 있는 샘플은 `boundary`, 그 밖의 샘플은 `core`다. 자연 노이즈는 하위 재귀에
 전달하지 않는다.
 
-### 7.2 전역 강제 노이즈
+### 7.2 선택적 전역 강제 노이즈
 
 각 샘플에 대해 낮은 신뢰도, 작은 상위 두 소속도 차이, 중심 거리의 백분위
-순위를 결합한 `noise_score`를 계산한다. 기본적으로 전체 문서의 상위 1%를
-강제 노이즈로 추가한다. 동점은 문서 ID 순으로 결정한다.
+순위를 결합한 `noise_score`를 계산한다. 기본값 `--forced-noise-ratio 0`은
+강제 노이즈를 추가하지 않으며 자연 노이즈와 PCA-support evidence만 사용한다.
+양수를 명시하면 해당 비율의 상위 샘플을 추가로 강제 노이즈로 판정하고,
+동점은 문서 ID 순으로 결정한다.
 
 결과에서는 자연 노이즈와 강제 노이즈를 각각
 `is_natural_noise`, `is_forced_noise`로 구분한다. 강제 노이즈만 해당하는
@@ -323,8 +335,8 @@ P(0/1) = P(0) × P(0/1 | 0)
 기본 목표 가중치는 `0.01`이다. 이 가중치는 원본 임베딩의 기하 구조를
 대체하지 않고 경계 정보를 약하게 보조한다.
 
-기본 UMAP 설정은 `n_components=2`, `n_neighbors=15`, `min_dist=0.02`,
-`metric=cosine`, `spread=0.85`, 시드 `42`다. 모델은 초기 적합 때 한 번만
+기본 UMAP 설정은 `n_components=2`, `n_neighbors=24`, `min_dist=1.0`,
+`metric=euclidean`, `spread=1.8`, 시드 `42`다. 모델은 초기 적합 때 한 번만
 학습하고, 신규 문서는 같은 PCA 접두 부분과 UMAP 모델의 `transform`으로
 투영한다.
 
@@ -365,8 +377,8 @@ center = L2Normalize(sum(weighted_sum) / sum(weight))
 - 자연 노이즈는 최소 20개 표본 단위의 EWMA로 평활화하며, 기본 `5%` 진입과
   `2.5%` 해제 threshold를 사용한다. 경보가 활성화되면 전체 재클러스터링한다.
 - 재클러스터링 뒤 3회 업데이트 동안 noise/XB 트리거를 억제한다.
-- 강제 노이즈 1%는 긴급 재클러스터링 판단에는 포함하지 않고, 결과 표시에
-  적용한다.
+- 옵션으로 요청한 강제 노이즈만 결과 표시에 적용하며, 긴급 재클러스터링
+  판단에는 포함하지 않는다. 기본값은 강제 노이즈를 요청하지 않는다.
 - 재클러스터링해도 시각화 PCA·UMAP 모델과 기존 좌표는 다시 학습하지 않는다.
 
 업데이트 결과에는 `reclustered`, `membership_refreshed`,
@@ -377,10 +389,11 @@ center = L2Normalize(sum(weighted_sum) / sum(weight))
 
 `--fast`는 최종 실험보다 반복 개발에 적합한 제한 경로다.
 
-1. 노드마다 최대 `600`개를 시드 기반으로 표본 추출한다.
-2. `m=[2.0, 1.8, 1.6, 1.4]`를 순서대로 조사해 안정적인 퍼지화 지수를 찾는다.
-3. 표본에서 최대 K `4`까지 탐색하고, 점수가 좋은 K 하나만 전체 노드에서
-   정밀화한다.
+1. 노드마다 최대 `1,000`개를 시드 기반으로 표본 추출한다.
+2. `m=[1.2, 1.4, 1.6, 1.8, 2.0]`를 순서대로 probe해 첫 안정값을 찾는다. 안정적인
+   부모의 `m`은 자식에서 우선 재사용하고, K scout가 불안정할 때만 다시 probe한다.
+3. 표본에서 후보 K를 탐색하고, 기본적으로 점수가 좋은 상위 두 K만 전체 노드에서
+   정밀화한다. 점수 차가 충분히 크면 하나만 정밀화한다.
 4. 정밀화 재시작 안정성이 `0.85`보다 낮으면 재시작 수를 늘리며 최대 `10`회
    수준까지 확장한다.
 5. 반환되는 최종 후보의 라벨·중심·지표는 전체 노드 기준으로 계산한다.
@@ -430,11 +443,18 @@ pickle 상태에는 다음을 포함한다.
 
 현재 기본값을 한 줄로 요약하면 다음과 같다.
 
-> 자동 선택 클러스터링 PCA(기본 후보 32부터) + 재귀 구면 FCM
-> (`multi_metric`, K 최대 4) + 자동 선택 시각화 PCA(기본 후보 16부터)
+> 자동 선택 클러스터링 PCA(기본 후보 32부터) + 안정성 기반 자동 `m` + 재귀 구면 FCM
+> (`multi_metric`, K 최대 4, 큰 노드는 표본 합의) + 자동 선택 시각화 PCA(기본 후보 16부터)
 > + 소프트 경로 목표 가중치 0.01 + 고정 좌표 증분 업데이트
 
 PCA-256과 PCA-64는 과거 데이터에서 평가한 고정 후보이며, 현재 코드의
 자동 선택 결과를 대체하지 않는다. 지표 가중치도 과거 문서의 XB·PC·PE
 조합이 아니라 이 문서 6.2절의 XB·실루엣·재시작 안정성·수정 PC 조합을
 사용한다.
+
+2026-08-15 Gemini 3,000건 fuzzifier 비교에서 일반 자동 경로는 세 seed 모두
+`m=1.2`를 선택했다. fast 자동 경로는 일반 자동 경로보다 평균 약 2.03배 빨랐고,
+해당 비교의 외부 top/leaf NMI·ARI 비가중 평균도 더 높았다. 이는 기본 후보 순서와
+fast 경로를 선택한 실험 근거이며, 데이터셋 일반화 주장은 아니다. 원시 결과는
+[`production-m-fuzzifier` 보고서](../benchmarks/production-m-fuzzifier-2026-08-15/report.json)에
+있다.

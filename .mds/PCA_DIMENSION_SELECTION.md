@@ -1,5 +1,9 @@
 # PCA 차원 선택 기록
 
+> 현재 CLI 기본값과 UMAP 설정은 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)를
+> 기준으로 한다. 아래 AG News의 고정 차원 수치와 비교는 보존용 실험 기록이며,
+> Gemini 운영 경로의 고정 PCA 기본값을 뜻하지 않는다.
+
 이 문서는 AG News 768차원 임베딩에서 클러스터링과 UMAP 시각화에 사용할
 PCA 차원을 선택한 과정과 결과를 보존한다. 분석 작업 트리는 이후 제거하지만,
 아래의 기준과 수치는 `main`에 남긴다.
@@ -49,8 +53,8 @@ PCA 차원을 선택한 과정과 결과를 보존한다. 분석 작업 트리�
 
 - 입력: 4,000개, 원본 임베딩 768차원
 - PCA 입력: L2 정규화된 원본 임베딩
-- UMAP: `n_components=2`, `n_neighbors=15`, `min_dist=0.02`,
-  `metric=cosine`, `spread=0.85`, `densmap=False`
+- UMAP: `n_components=2`, `n_neighbors=24`, `min_dist=1.0`,
+  `metric=euclidean`, `spread=1.8`, `densmap=False`
 - UMAP 시드: 42 (차원 간 직접 비교)
 - 이웃 비교: 각 점의 k-NN 집합에 대해 `|교집합| / k`와 Jaccard 계산
 - k 값: 15, 30

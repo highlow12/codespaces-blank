@@ -1,5 +1,10 @@
 # Python 성능 최적화 Backlog 및 작업 트래커
 
+> 이 문서는 2026-08-08~09의 측정과 후속 후보를 보존한다. 여기의 완료 상태와
+> 기준 시간은 당시 커밋·환경에 고정된 값이며, 최신 알고리즘 기본값은
+> [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md), 최신 `m` 비교는 루트 `README.md`를
+> 우선한다.
+
 이 문서는 `JS_PERFORMANCE_OPTIMIZATION_PLAN.md`에 아직 명시되지 않은 Python
 실행 경로의 최적화 후보를 기록하고 추적한다. 알고리즘 결과나 출력 계약을
 바꾸는 작업은 반드시 Gemini 데이터의 품질·수치 회귀 검증을 먼저 통과해야 한다.

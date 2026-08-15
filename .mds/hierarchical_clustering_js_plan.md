@@ -1,5 +1,10 @@
 # 계층형 PCA + 구면 FCM 클러스터링/시각화 JS 이식 기획서
 
+> 상태 (2026-08-15): 구현 전 기획서다. 이 문서의 고정 PCA, 실루엣 K 선택,
+> 강제 노이즈 quota는 당시 제안이며 현재 Python 기본값이 아니다. 실제 이식의
+> 기준 계약은 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)의 자동 PCA·자동
+> fuzzifier·`multi_metric`/표본 합의·기본 강제 노이즈 비율 `0`을 먼저 따른다.
+
 ## 1. 목적
 
 현재 Python 구현의 핵심 파이프라인만 JavaScript/TypeScript로 이식한다.
@@ -290,10 +295,12 @@ threshold = median + distanceZ * robustScale
 무한대로 두므로 경계 후보는 `boundary`가 된다.
 
 세 신호의 노드 내 백분위 순위를 기하평균한 `noise_score`도 계산한다.
-클러스터링 완료 후 전체 문서에서 점수가 높은 상위 1%를 추가 노이즈로
-선정한다. 이 규칙은 클러스터 구조 학습에는 영향을 주지 않으며, 동점은 문서
-ID 오름차순으로 결정한다. 임계값 기반 노이즈와 순위 기반 노이즈는 각각
-`is_natural_noise`, `is_forced_noise`로 구분한다.
+현재 Python 기본값은 강제 노이즈를 추가하지 않는다. 이식에서 강제 quota를
+지원한다면 `forcedNoiseRatio=0`을 기본값으로 두고, 명시적으로 양수를 요청한
+경우에만 점수 상위 문서를 추가 노이즈로 선정한다. 이 규칙은 클러스터 구조
+학습에는 영향을 주지 않으며, 동점은 문서 ID 오름차순으로 결정한다. 임계값
+기반 노이즈와 순위 기반 노이즈는 각각 `is_natural_noise`, `is_forced_noise`로
+구분한다.
 
 노이즈가 된 샘플은 이후 하위 재귀 클러스터링에 전달하지 않는다.
 

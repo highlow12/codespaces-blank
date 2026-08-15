@@ -1,9 +1,9 @@
 # `.mds` 문서 안내
 
 현재 알고리즘의 기준 문서는 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)다.
-`incremental_clustering.py fit/update`의 자동 PCA 선택, 재귀 구면 FCM,
-`multi_metric` K 선택, 노이즈 판정, 약지도 UMAP, 온라인 중심 갱신과 고정 좌표
-증분 업데이트를 설명한다.
+`incremental_clustering.py fit/update`의 자동 PCA·fuzzifier 선택, 재귀 구면
+FCM, `multi_metric` K 선택과 표본 합의, 노이즈 판정, 약지도 UMAP, 온라인 중심
+갱신과 고정 좌표 증분 업데이트를 설명한다.
 
 이 디렉터리의 나머지 문서는 과거 실험·설계 결정·비교를 보존하기 위한 자료다.
 현재 기본 경로는 문서마다 다를 수 있으므로 새 구현이나 운영 설정을 확인할
@@ -22,7 +22,11 @@
 - `incremental_clustering.md`: 증분 사용법의 초기 문서
 - `FAST_FCM.md`: 빠른 FCM 탐색의 초기 사용 예
 - `METRIC_EXTRACTOR.md`: 지표 전용 평가 도구 설명
-- `next_tesk.md`: 미완료 작업 메모
+- `next_tesk.md`: 완료된 증분 리팩터 작업 메모
+
+`MAIN_OPTIMIZATION_REVIEW.md`와 `benchmarks/` 아래 결과는 특정 커밋·환경에서
+고정한 재현 기록이다. 최신 기본값과 최신 fuzzifier 비교는
+`CURRENT_ALGORITHM.md` 및 루트 `README.md`를 우선한다.
 
 이 디렉터리는 의도적으로 Git에서 무시되므로 현재 작업 트리에만 남고, 새로
 만드는 Git 작업 트리에는 체크아웃되지 않는다.

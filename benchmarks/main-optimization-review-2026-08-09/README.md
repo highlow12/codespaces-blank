@@ -1,5 +1,9 @@
 # Main optimization review — 2026-08-09
 
+> Historical comparison: “current” in this directory means commit `0c4613a`,
+> not the current workspace. See [`../../README.md`](../../README.md) for the
+> active configuration and later benchmark results.
+
 This directory contains the raw output of a 64-run comparison between
 pre-optimization commit `a10d936` and main commit `0c4613a`.
 
@@ -17,4 +21,3 @@ Headline p50 results:
 The deterministic synthetic generators and complete orchestration command live in
 `benchmark_main_optimization_review.py`. The Korean analysis and limitations are in
 `.mds/MAIN_OPTIMIZATION_REVIEW.md`.
-

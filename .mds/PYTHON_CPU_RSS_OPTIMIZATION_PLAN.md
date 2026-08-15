@@ -1,5 +1,9 @@
 # Python CPU·RSS 공동 최적화 실행 계획
 
+> 계획 기준일: 2026-08-09. 이미 완료된 최적화와 당시의 후보를 보존하는 문서다.
+> 새 성능 작업은 현재 코드·CLI를 먼저 확인하고 [`CURRENT_ALGORITHM.md`](CURRENT_ALGORITHM.md)의
+> 기본 설정 및 Gemini 3,000건 데이터셋으로 다시 기준선을 측정한다.
+
 ## 목적과 원칙
 
 이 계획은 `incremental_clustering.py`의 실행 시간을 줄이면서 peak RSS도 함께
