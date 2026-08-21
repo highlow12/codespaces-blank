@@ -149,6 +149,33 @@ Gemini 데이터에서 빠르게 초기 상태를 적합합니다. `dbpedia_labe
   --output-json /tmp/incremental-benchmark.json
 ```
 
+### Discovery와 membership 분리 비교 (Phase 1–3)
+
+최종 파이프라인의 첫 검증 단계는 `L2 normalize → PCA → UMAP 20D → HDBSCAN leaf`
+발견 결과를 두 방식으로 비교합니다. Native 방식은
+`all_points_membership_vectors()`를 그대로 저장하고, Proposed 방식은 post-PCA
+정규화를 하지 않은 PCA semantic space에서 고정 exact-kNN과 confidence-weighted
+label propagation을 사용합니다. PCA 차원은 아래 명령처럼 `--pca-components`를
+생략하면 기존 kNN preservation 기반으로 자동 선택됩니다.
+
+```bash
+./.venv/bin/python hdbscan_membership_comparison_pipeline.py \
+  --input-json dbpedia_gemini_embeddings.json.gz \
+  --output-dir results/hdbscan_membership_comparison \
+  --dataset-sample-size 100 \
+  --dataset-sample-seed 42 \
+  --umap-n-neighbors 8 \
+  --min-cluster-size 5 \
+  --min-samples 3 \
+  --neighbor-count 8 \
+  --seed 42
+```
+
+`assignments.csv`, `boundary_cases.csv`, `summary.json`에 두 방법의 membership,
+unexplained mass, 비교 통계와 사람 검토 후보를 저장합니다. 현재 구현은 Phase 1–3
+검증 범위이며 adaptive neighborhood, HNSW, semantic hierarchy, incremental
+insertion은 아직 포함하지 않습니다.
+
 ## 다음 연구 작업
 
 태그 융합은 아직 제품 경로에 반영하지 않았습니다. fixed `K=10` 합성 sweep에서는
