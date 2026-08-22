@@ -9,11 +9,13 @@ that a report can be reproduced without loading the 1,925 chunk vectors.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import csv
 import gzip
 import hashlib
 import itertools
 import json
+import multiprocessing as mp
 import tarfile
 import io
 from dataclasses import dataclass
@@ -22,7 +24,7 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import hdbscan
 import numpy as np
-from sklearn.decomposition import PCA
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.metrics import adjusted_rand_score, balanced_accuracy_score, f1_score, normalized_mutual_info_score
 from sklearn.neighbors import NearestNeighbors
 from umap import UMAP
@@ -33,6 +35,7 @@ DEFAULT_SEEDS = (42, 43, 44)
 DEFAULT_MIN_CLUSTER_SIZES = (18, 24, 30)
 DEFAULT_MIN_SAMPLES = (3, 5, 8)
 DEFAULT_NEIGHBOR_COUNTS = (8, 15, 24)
+PROJECTION_MODES = ("centered-pca", "uncentered-svd")
 
 
 def _validate_rows(embeddings: np.ndarray, metadata: Sequence[Mapping[str, Any]], *, split: str | None = None) -> tuple[np.ndarray, list[dict[str, Any]]]:
@@ -62,7 +65,9 @@ def _majority(values: Iterable[str]) -> str | None:
 
 @dataclass
 class DiscoveryState:
-    pca: PCA
+    # Kept under the historical ``pca`` name for API compatibility.  In
+    # ``uncentered-svd`` mode this is a TruncatedSVD transformer.
+    pca: PCA | TruncatedSVD
     umap: UMAP
     clusterer: Any
     pca_discovery: np.ndarray
@@ -114,6 +119,7 @@ def fit_discovery(
     pca_components: int = 256,
     umap_components: int = 20,
     umap_n_neighbors: int = 15,
+    projection_mode: str = "centered-pca",
 ) -> DiscoveryState:
     matrix, rows = _validate_rows(embeddings, metadata)
     if any(row.get("split") not in (None, "discovery") for row in rows):
@@ -122,9 +128,18 @@ def fit_discovery(
         raise ValueError("discovery requires at least three rows")
     if min_cluster_size < 2 or min_samples < 1:
         raise ValueError("invalid HDBSCAN parameters")
-    pca_dim = min(int(pca_components), matrix.shape[0] - 1, matrix.shape[1])
+    if projection_mode not in PROJECTION_MODES:
+        raise ValueError(f"projection_mode must be one of {PROJECTION_MODES}")
+    # PCA centers the discovery matrix before decomposition.  TruncatedSVD
+    # deliberately does not center its input, preserving the raw normalized
+    # embedding origin requested by the uncentered benchmark.
+    sample_limit = matrix.shape[0] - 1 if projection_mode == "centered-pca" else matrix.shape[0]
+    pca_dim = min(int(pca_components), sample_limit, matrix.shape[1])
     pca_dim = max(1, pca_dim)
-    pca = PCA(n_components=pca_dim, svd_solver="full", random_state=seed).fit(matrix)
+    if projection_mode == "centered-pca":
+        pca: PCA | TruncatedSVD = PCA(n_components=pca_dim, svd_solver="full", random_state=seed).fit(matrix)
+    else:
+        pca = TruncatedSVD(n_components=pca_dim, algorithm="randomized", n_iter=7, random_state=seed).fit(matrix)
     pca_features = np.asarray(pca.transform(matrix), dtype=np.float64)
     neighbors = min(max(2, int(umap_n_neighbors)), len(rows) - 1)
     u_dim = min(max(1, int(umap_components)), max(1, len(rows) - 2))
@@ -142,7 +157,7 @@ def fit_discovery(
             value = _majority(str(row.get(field, "")) for row in selected)
             if value is not None:
                 target[cluster] = value
-    return DiscoveryState(pca, mapper, clusterer, pca_features, umap_features, labels, probabilities, mappings[0], mappings[1], mappings[2], rows, {"seed": int(seed), "min_cluster_size": int(min_cluster_size), "min_samples": int(min_samples), "pca_components": int(pca_dim), "umap_components": int(u_dim), "umap_n_neighbors": int(neighbors), "cluster_selection_method": "leaf"})
+    return DiscoveryState(pca, mapper, clusterer, pca_features, umap_features, labels, probabilities, mappings[0], mappings[1], mappings[2], rows, {"seed": int(seed), "min_cluster_size": int(min_cluster_size), "min_samples": int(min_samples), "projection_mode": projection_mode, "pca_components": int(pca_dim), "umap_components": int(u_dim), "umap_n_neighbors": int(neighbors), "cluster_selection_method": "leaf"})
 
 
 def _exact_to_new(state: DiscoveryState, pca_features: np.ndarray, neighbor_count: int) -> np.ndarray:
@@ -252,15 +267,134 @@ def choose_calibration(results: Sequence[Mapping[str, Any]]) -> Mapping[str, Any
     return sorted(results, key=lambda item: (-round(float(item["mean_leaf_nmi"]), 12), float(item["mean_noise_rate"]), int(item["complexity"]), tuple(item["sort_key"])))[0]
 
 
-def calibration_sweep(discovery_embeddings: np.ndarray, discovery_metadata: Sequence[Mapping[str, Any]], calibration_embeddings: np.ndarray, calibration_metadata: Sequence[Mapping[str, Any]], *, seeds: Sequence[int] = DEFAULT_SEEDS, min_cluster_sizes: Sequence[int] = DEFAULT_MIN_CLUSTER_SIZES, min_samples_values: Sequence[int] = DEFAULT_MIN_SAMPLES, neighbor_counts: Sequence[int] = DEFAULT_NEIGHBOR_COUNTS, pca_components: int = 256, umap_components: int = 20, umap_n_neighbors: int = 15) -> tuple[list[dict[str, Any]], Mapping[str, Any]]:
+def _calibration_group(
+    arguments: tuple[
+        int,
+        int,
+        int,
+        np.ndarray,
+        list[dict[str, Any]],
+        np.ndarray,
+        list[dict[str, Any]],
+        tuple[int, ...],
+        int,
+        int,
+        int,
+        str,
+    ]
+) -> list[dict[str, Any]]:
+    """Fit one discovery state and evaluate all requested neighbor counts."""
+    (
+        seed,
+        min_size,
+        min_samples,
+        discovery_embeddings,
+        discovery_metadata,
+        calibration_embeddings,
+        calibration_metadata,
+        neighbor_counts,
+        pca_components,
+        umap_components,
+        umap_n_neighbors,
+        projection_mode,
+    ) = arguments
+    state = fit_discovery(
+        discovery_embeddings,
+        discovery_metadata,
+        seed=seed,
+        min_cluster_size=min_size,
+        min_samples=min_samples,
+        pca_components=pca_components,
+        umap_components=umap_components,
+        umap_n_neighbors=umap_n_neighbors,
+        projection_mode=projection_mode,
+    )
+    noise_rate = float(np.mean(state.labels < 0))
     rows: list[dict[str, Any]] = []
-    for seed, min_size, min_samples, neighbors in itertools.product(seeds, min_cluster_sizes, min_samples_values, neighbor_counts):
-        state = fit_discovery(discovery_embeddings, discovery_metadata, seed=seed, min_cluster_size=min_size, min_samples=min_samples, pca_components=pca_components, umap_components=umap_components, umap_n_neighbors=umap_n_neighbors)
-        evaluation = evaluate_split(state, calibration_embeddings, calibration_metadata, neighbor_count=min(neighbors, len(discovery_metadata)))
+    for neighbors in neighbor_counts:
+        evaluation = evaluate_split(
+            state,
+            calibration_embeddings,
+            calibration_metadata,
+            neighbor_count=min(neighbors, len(discovery_metadata)),
+        )
         native_nmi = float(evaluation["native"]["leaf_nmi"])
         exact_nmi = float(evaluation["exact_knn"]["leaf_nmi"])
-        noise_rate = float(np.mean(state.labels < 0))
-        rows.append({"seed": int(seed), "min_cluster_size": int(min_size), "min_samples": int(min_samples), "neighbor_count": int(neighbors), "native_leaf_nmi": native_nmi, "exact_knn_leaf_nmi": exact_nmi, "mean_leaf_nmi": (native_nmi + exact_nmi) / 2.0, "mean_noise_rate": noise_rate, "complexity": int(min_size + min_samples + neighbors), "sort_key": [int(seed), int(min_size), int(min_samples), int(neighbors)]})
+        rows.append(
+            {
+                "seed": int(seed),
+                "min_cluster_size": int(min_size),
+                "min_samples": int(min_samples),
+                "neighbor_count": int(neighbors),
+                "native_leaf_nmi": native_nmi,
+                "exact_knn_leaf_nmi": exact_nmi,
+                "mean_leaf_nmi": (native_nmi + exact_nmi) / 2.0,
+                "mean_noise_rate": noise_rate,
+                "complexity": int(min_size + min_samples + neighbors),
+                "sort_key": [int(seed), int(min_size), int(min_samples), int(neighbors)],
+            }
+        )
+    return rows
+
+
+def calibration_sweep(
+    discovery_embeddings: np.ndarray,
+    discovery_metadata: Sequence[Mapping[str, Any]],
+    calibration_embeddings: np.ndarray,
+    calibration_metadata: Sequence[Mapping[str, Any]],
+    *,
+    seeds: Sequence[int] = DEFAULT_SEEDS,
+    min_cluster_sizes: Sequence[int] = DEFAULT_MIN_CLUSTER_SIZES,
+    min_samples_values: Sequence[int] = DEFAULT_MIN_SAMPLES,
+    neighbor_counts: Sequence[int] = DEFAULT_NEIGHBOR_COUNTS,
+    pca_components: int = 256,
+    umap_components: int = 20,
+    umap_n_neighbors: int = 15,
+    projection_mode: str = "centered-pca",
+    jobs: int = 1,
+) -> tuple[list[dict[str, Any]], Mapping[str, Any]]:
+    """Run calibration with one fit per (seed, size, samples) configuration.
+
+    Neighbor counts only affect out-of-sample membership evaluation.  They
+    therefore share the discovery fit.  Process executor ``map`` preserves
+    group order, keeping serial and parallel output deterministic.
+    """
+    if jobs < 1:
+        raise ValueError("jobs must be positive")
+    seed_values = tuple(int(value) for value in seeds)
+    size_values = tuple(int(value) for value in min_cluster_sizes)
+    sample_values = tuple(int(value) for value in min_samples_values)
+    neighbor_values = tuple(int(value) for value in neighbor_counts)
+    discovery_rows = [dict(row) for row in discovery_metadata]
+    calibration_rows = [dict(row) for row in calibration_metadata]
+    groups = [
+        (
+            seed,
+            min_size,
+            min_samples,
+            np.asarray(discovery_embeddings),
+            discovery_rows,
+            np.asarray(calibration_embeddings),
+            calibration_rows,
+            neighbor_values,
+            int(pca_components),
+            int(umap_components),
+            int(umap_n_neighbors),
+            str(projection_mode),
+        )
+        for seed, min_size, min_samples in itertools.product(seed_values, size_values, sample_values)
+    ]
+    if jobs == 1 or len(groups) <= 1:
+        grouped_rows = [_calibration_group(group) for group in groups]
+    else:
+        # Python 3.14 defaults to ``forkserver`` on this Linux environment;
+        # that start method requires a filesystem socket and is unavailable
+        # in some restricted runners.  ``fork`` is safe here because workers
+        # only receive immutable NumPy inputs and run independent fits, while
+        # keeping the execution bounded by the requested worker count.
+        with ProcessPoolExecutor(max_workers=int(jobs), mp_context=mp.get_context("fork")) as executor:
+            grouped_rows = list(executor.map(_calibration_group, groups))
+    rows = [row for group in grouped_rows for row in group]
     return rows, choose_calibration(rows)
 
 
@@ -350,6 +484,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--pca-components", type=int, default=256)
     parser.add_argument("--umap-components", type=int, default=20)
     parser.add_argument("--umap-n-neighbors", type=int, default=15)
+    parser.add_argument("--projection-mode", choices=PROJECTION_MODES, default="centered-pca", help="discovery projection: centered PCA (default) or uncentered TruncatedSVD")
+    parser.add_argument("--jobs", type=int, default=1, help="maximum parallel discovery fits")
     return parser
 
 
@@ -367,8 +503,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     discovery = embeddings[split_indices["discovery"]]
     calibration = embeddings[split_indices["calibration"]]
     test = embeddings[split_indices["test"]]
-    sweep, selected = calibration_sweep(discovery, discovery_meta, calibration, calibration_meta, pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors)
-    state = fit_discovery(discovery, discovery_meta, seed=int(selected["seed"]), min_cluster_size=int(selected["min_cluster_size"]), min_samples=int(selected["min_samples"]), pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors)
+    sweep, selected = calibration_sweep(discovery, discovery_meta, calibration, calibration_meta, pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors, projection_mode=args.projection_mode, jobs=args.jobs)
+    state = fit_discovery(discovery, discovery_meta, seed=int(selected["seed"]), min_cluster_size=int(selected["min_cluster_size"]), min_samples=int(selected["min_samples"]), pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors, projection_mode=args.projection_mode)
     effective_neighbors = min(int(selected["neighbor_count"]), len(discovery_meta))
     test_prediction = predict_memberships(state, test, neighbor_count=effective_neighbors)
     test_result = evaluate_split(state, test, test_meta, neighbor_count=effective_neighbors)

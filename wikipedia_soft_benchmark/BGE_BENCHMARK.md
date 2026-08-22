@@ -18,12 +18,15 @@ The checkpoint records the canonical input SHA-256, model revision, pooling,
 dimension, and completed rows.  An interrupted run can be resumed with
 `--resume`; a changed input is rejected.
 
-The hierarchy command fits PCA, UMAP, and leaf-HDBSCAN on discovery documents
-only.  Calibration sweeps seeds `42,43,44`, cluster sizes `18,24,30`, sample
-counts `3,5,8`, and exact-kNN widths `8,15,24`.  The selection score is the
-mean of native and exact-kNN leaf NMI; ties use discovery noise, complexity,
-and numeric configuration order.  Test rows are transformed only after the
-selection is fixed.
+The hierarchy command fits a projection, UMAP, and leaf-HDBSCAN on discovery
+documents only.  It defaults to centered PCA; pass
+`--projection-mode uncentered-svd` to use `TruncatedSVD` directly on the raw
+normalized embeddings without subtracting the discovery mean.  Calibration
+sweeps seeds `42,43,44`, cluster sizes `18,24,30`, sample counts `3,5,8`, and
+exact-kNN widths `8,15,24`.  The selection score is the mean of native and
+exact-kNN leaf NMI; ties use discovery noise, complexity, and numeric
+configuration order.  Test rows are transformed only after the selection is
+fixed.
 
 ```bash
 ./.venv/bin/python wikipedia_hierarchy_benchmark.py \
