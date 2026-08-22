@@ -476,3 +476,39 @@ def fit_hdbscan_membership_comparison(
         configuration=configuration,
         runtime_seconds=runtime_seconds,
     )
+
+
+# Split-aware API ---------------------------------------------------------
+# Kept in this established module so callers of the original comparison API
+# can migrate to out-of-sample prediction without changing their import path.
+def fit_discovery_state(
+    embeddings: np.ndarray,
+    discovery_metadata: Sequence[dict[str, Any]],
+    **kwargs: Any,
+) -> Any:
+    """Fit PCA -> UMAP -> leaf-HDBSCAN using discovery rows only."""
+    from wikipedia_soft_benchmark.hierarchy_benchmark import fit_discovery
+
+    return fit_discovery(embeddings, discovery_metadata, **kwargs)
+
+
+def predict_native_memberships(
+    discovery_state: Any,
+    embeddings: np.ndarray,
+) -> np.ndarray:
+    """Return HDBSCAN native memberships for rows absent from discovery."""
+    from wikipedia_soft_benchmark.hierarchy_benchmark import predict_memberships
+
+    return predict_memberships(discovery_state, embeddings, neighbor_count=1).native
+
+
+def predict_exact_knn_memberships(
+    discovery_state: Any,
+    embeddings: np.ndarray,
+    *,
+    neighbor_count: int = DEFAULT_NEIGHBOR_COUNT,
+) -> np.ndarray:
+    """Return independent PCA exact-kNN affinities against discovery rows."""
+    from wikipedia_soft_benchmark.hierarchy_benchmark import predict_memberships
+
+    return predict_memberships(discovery_state, embeddings, neighbor_count=neighbor_count).exact_knn

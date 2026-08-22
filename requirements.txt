@@ -7,3 +7,6 @@ matplotlib>=3.9,<4
 umap-learn>=0.5.7,<0.6
 pacmap>=0.9,<1
 datasets>=3,<5
+transformers>=4.45,<5
+# CPU inference is the supported benchmark path; CUDA is not required.
+torch>=2.4,<3
