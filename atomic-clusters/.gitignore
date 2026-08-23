@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src/wasm/
+wasm-core/target/
+wasm-core/pkg/
+*.log

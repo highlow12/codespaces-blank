@@ -1,0 +1,7 @@
+.atomic-clusters-view { padding: 12px; overflow: auto; }
+.atomic-clusters-view h3 { margin: 0 0 8px; }
+.atomic-clusters-status { color: var(--text-muted); margin-bottom: 12px; }
+.atomic-clusters-node { border: 1px solid var(--background-modifier-border); border-radius: 6px; padding: 8px; margin: 6px 0; }
+.atomic-clusters-node button { margin: 2px 4px 2px 0; }
+.atomic-clusters-progress { height: 4px; background: var(--background-modifier-border); }
+.atomic-clusters-progress > span { display: block; height: 100%; background: var(--interactive-accent); transition: width 120ms; }
