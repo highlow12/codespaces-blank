@@ -1,4 +1,5 @@
 import unittest
+import inspect
 from unittest.mock import patch
 
 import numpy as np
@@ -13,6 +14,10 @@ from wikipedia_soft_benchmark.hierarchy_benchmark import (
 
 
 class WikipediaHierarchyBenchmarkTests(unittest.TestCase):
+    def test_exact_neighbor_backend_is_the_default(self):
+        self.assertEqual(inspect.signature(fit_discovery).parameters["neighbor_backend"].default, "exact")
+        self.assertEqual(inspect.signature(calibration_sweep).parameters["neighbor_backend"].default, "exact")
+
     def test_cli_parses_jobs(self):
         args = build_parser().parse_args(
             ["--embedding-dir", "embeddings", "--output-dir", "output", "--jobs", "3"]
@@ -49,15 +54,35 @@ class WikipediaHierarchyBenchmarkTests(unittest.TestCase):
         class FakeState:
             labels = np.array([0, 0, 1, 1])
 
-        discovery = np.zeros((4, 3), dtype=np.float32)
-        calibration = np.zeros((2, 3), dtype=np.float32)
+        class FakeTransformer:
+            def transform(self, values):
+                return np.zeros((len(values), 2), dtype=np.float64)
+
+        class FakeNeighborIndex:
+            def query(self, values, count, *, exclude_self=False):
+                return (
+                    np.zeros((len(values), count), dtype=np.float64),
+                    np.zeros((len(values), count), dtype=np.int64),
+                )
+
+        class FakePrepared:
+            pca = FakeTransformer()
+            umap = FakeTransformer()
+            neighbor_index = FakeNeighborIndex()
+
+        prepared = FakePrepared()
+
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
         metadata = [{"split": "discovery", "leaf": "a", "parent": "p", "top": "t"}] * 4
         calibration_metadata = [{"split": "calibration", "leaf": "a", "parent": "p", "top": "t"}] * 2
 
         def fake_evaluate(*args, **kwargs):
             return {"native": {"leaf_nmi": 0.5}, "exact_knn": {"leaf_nmi": 0.25}}
 
-        with patch("wikipedia_soft_benchmark.hierarchy_benchmark.fit_discovery", return_value=FakeState()) as fit, patch(
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._prepare_discovery_projection", return_value=prepared) as prepare, patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark._state_from_prepared_projection", return_value=FakeState()
+        ) as fit, patch(
             "wikipedia_soft_benchmark.hierarchy_benchmark.evaluate_split", side_effect=fake_evaluate
         ):
             rows, selected = calibration_sweep(
@@ -70,9 +95,99 @@ class WikipediaHierarchyBenchmarkTests(unittest.TestCase):
                 min_samples_values=(1,),
                 neighbor_counts=(1, 2, 3),
             )
+        self.assertEqual(prepare.call_count, 1)
         self.assertEqual(fit.call_count, 1)
         self.assertEqual([row["neighbor_count"] for row in rows], [1, 2, 3])
         self.assertEqual(selected["neighbor_count"], 1)
+
+    def test_calibration_prepares_projection_once_for_all_hdbscan_combinations(self):
+        class FakeState:
+            labels = np.array([0, 0, 1, 1])
+
+        class FakeTransformer:
+            def transform(self, values):
+                return np.zeros((len(values), 2), dtype=np.float64)
+
+        class FakeNeighborIndex:
+            def query(self, values, count, *, exclude_self=False):
+                return (
+                    np.zeros((len(values), count), dtype=np.float64),
+                    np.zeros((len(values), count), dtype=np.int64),
+                )
+
+        class FakePrepared:
+            pca = FakeTransformer()
+            umap = FakeTransformer()
+            neighbor_index = FakeNeighborIndex()
+
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
+        metadata = [{"split": "discovery", "leaf": "a", "parent": "p", "top": "t"}] * 4
+        calibration_metadata = [{"split": "calibration", "leaf": "a", "parent": "p", "top": "t"}] * 2
+
+        def fake_evaluate(*args, **kwargs):
+            return {"native": {"leaf_nmi": 0.5}, "exact_knn": {"leaf_nmi": 0.25}}
+
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._prepare_discovery_projection", return_value=FakePrepared()) as prepare, patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark._state_from_prepared_projection", return_value=FakeState()
+        ) as fit, patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark.evaluate_split", side_effect=fake_evaluate
+        ):
+            rows, _ = calibration_sweep(
+                discovery,
+                metadata,
+                calibration,
+                calibration_metadata,
+                seeds=(42,),
+                min_cluster_sizes=(2, 3, 4),
+                min_samples_values=(1, 2, 3),
+                neighbor_counts=(1,),
+            )
+
+        self.assertEqual(len(rows), 9)
+        self.assertEqual(prepare.call_count, 1)
+        self.assertEqual(fit.call_count, 9)
+
+    def test_calibration_can_return_and_reuse_selected_state_and_projection(self):
+        class FakeState:
+            labels = np.array([0, 0, 1, 1])
+
+        class FakeTransformer:
+            def transform(self, values):
+                return np.zeros((len(values), 2), dtype=np.float64)
+
+        class FakeNeighborIndex:
+            def query(self, values, count, *, exclude_self=False):
+                return np.zeros((len(values), count)), np.zeros((len(values), count), dtype=np.int64)
+
+        class FakePrepared:
+            pca = FakeTransformer()
+            umap = FakeTransformer()
+            neighbor_index = FakeNeighborIndex()
+            timing_sec = {"pca_fit_transform_sec": 1.0}
+
+        prepared = FakePrepared()
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
+        metadata = [{"split": "discovery", "leaf": "a", "parent": "p", "top": "t"}] * 4
+        calibration_metadata = [{"split": "calibration", "leaf": "a", "parent": "p", "top": "t"}] * 2
+
+        def fake_evaluate(*args, **kwargs):
+            return {"native": {"leaf_nmi": 0.5}, "exact_knn": {"leaf_nmi": 0.25}}
+
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._prepare_discovery_projection", return_value=prepared), patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark._state_from_prepared_projection", return_value=FakeState()
+        ) as fit, patch("wikipedia_soft_benchmark.hierarchy_benchmark.evaluate_split", side_effect=fake_evaluate):
+            result = calibration_sweep(
+                discovery, metadata, calibration, calibration_metadata,
+                seeds=(42,), min_cluster_sizes=(2,), min_samples_values=(1,),
+                neighbor_counts=(1,), return_prepared=True,
+            )
+        rows, selected, artifacts = result
+        self.assertIs(artifacts.prepared_projection, prepared)
+        self.assertIs(artifacts.selected_state, fit.return_value)
+        self.assertTrue(artifacts.timing_sec["pca_fit_transform_sec"] == 1.0)
+        self.assertEqual(selected["seed"], 42)
 
     def test_discovery_fit_rejects_calibration_or_test_rows(self):
         rng = np.random.default_rng(8)

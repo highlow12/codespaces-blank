@@ -19,6 +19,21 @@ DBpedia 문서 임베딩을 대상으로 **Spherical Fuzzy C-Means(SFCM)** 기�
 - 태그는 곧바로 임베딩에 합치지 않고, 검증 전까지 metadata·prior·reranking 후보 채널로 분리합니다.
 - 증분 업데이트는 전체 문서를 매번 다시 계산하지 않습니다. 중심 이동의 영향이 충분한 문서와 새로 추가·수정된 문서만 membership을 갱신하고, 자연 noise 또는 XB 품질 저하가 감지될 때 전체 재클러스터링을 수행합니다.
 
+### Wikipedia HDBSCAN 이웃 검색 결론
+
+Wikipedia 720건 품질 검증에서 exact-kNN과 PyNNDescent ANN의 선택 leaf가
+99% 이상 일치했지만, 100~10,000건 단일 실행의 인덱스 구축·메모리 비용까지
+포함하면 exact-kNN이 더 빠르고 작았습니다. 따라서 현재 HDBSCAN 기본값은
+`neighbor_backend="exact"`이며, PyNNDescent는 반복 query가 훨씬 많거나 더 큰
+데이터에서 별도로 검증하는 실험용 옵션으로만 유지합니다. ANN을 사용하려면
+`fit_discovery(..., neighbor_backend="pynndescent")` 또는 해당 벤치마크의 CLI
+옵션을 명시적으로 지정해야 합니다.
+
+Calibration은 discovery별 PCA·이웃 인덱스·UMAP을 한 번만 적합하고, 선택된
+HDBSCAN state와 projection을 held-out test에 재사용합니다. 비교 벤치마크의
+`run.json`에는 PCA, neighbor index/query, UMAP fit/transform, HDBSCAN calibration
+및 selected-state reuse, FCM, 시각화의 wall time과 stage peak RSS가 각각 기록됩니다.
+
 ## 선택의 타임라인
 
 프로젝트에서 지금까지 선택한 방향과 그 판단 근거입니다.

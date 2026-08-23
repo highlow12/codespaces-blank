@@ -228,6 +228,9 @@ def run_pipeline(args: argparse.Namespace) -> dict[str, Any]:
         min_cluster_size=args.min_cluster_size,
         min_samples=args.min_samples,
         neighbor_count=args.neighbor_count,
+        neighbor_backend=args.neighbor_backend,
+        neighbor_graph_neighbors=args.neighbor_graph_neighbors,
+        neighbor_query_epsilon=args.neighbor_query_epsilon,
         seed=args.seed,
     )
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -287,6 +290,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-cluster-size", type=int, default=DEFAULT_MIN_CLUSTER_SIZE)
     parser.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
     parser.add_argument("--neighbor-count", type=int, default=DEFAULT_NEIGHBOR_COUNT)
+    parser.add_argument("--neighbor-backend", choices=("exact", "pynndescent"), default="exact")
+    parser.add_argument("--neighbor-graph-neighbors", type=int, default=32)
+    parser.add_argument("--neighbor-query-epsilon", type=float, default=0.1)
     return parser
 
 

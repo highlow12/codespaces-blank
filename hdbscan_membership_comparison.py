@@ -13,8 +13,9 @@ from typing import Any, Sequence
 
 import hdbscan
 import numpy as np
-from sklearn.neighbors import NearestNeighbors
 from umap import UMAP
+
+from pca_neighbor_search import PcaNeighborIndex, build_pca_neighbor_index
 
 from pca_dimension_search import (
     DEFAULT_K_VALUES,
@@ -67,6 +68,7 @@ class HdbscanMembershipComparisonResult:
     pca_selection: PcaDimensionSelection
     configuration: dict[str, Any]
     runtime_seconds: dict[str, float]
+    neighbor_index: PcaNeighborIndex | None = None
 
     @property
     def cluster_count(self) -> int:
@@ -217,8 +219,19 @@ def propagate_exact_knn_memberships(
     probabilities: np.ndarray,
     *,
     neighbor_count: int = DEFAULT_NEIGHBOR_COUNT,
+    neighbor_backend: str = "exact",
+    neighbor_index: PcaNeighborIndex | None = None,
+    random_state: int = 42,
+    graph_neighbors: int = 32,
+    query_epsilon: float = 0.1,
 ) -> ExactKnnPropagationResult:
-    """Propagate HDBSCAN leaf confidence through fixed exact kNN neighborhoods."""
+    """Propagate HDBSCAN leaf confidence through fixed PCA-space kNN neighborhoods.
+
+    ``neighbor_backend='exact'`` preserves the historical brute-force path;
+    ``'pynndescent'`` uses a deterministic Euclidean NNDescent index.  A
+    supplied index is reused, which is important when evaluating several k
+    values against the same discovery projection.
+    """
 
     features = validate_embedding_matrix(pca_features, name="pca_features")
     n_samples = features.shape[0]
@@ -232,27 +245,20 @@ def propagate_exact_knn_memberships(
             f"got {neighbor_count} for {n_samples} samples"
         )
 
-    neighbors_model = NearestNeighbors(
-        n_neighbors=neighbor_count + 1,
-        metric="euclidean",
-        algorithm="brute",
-    ).fit(features)
-    distances, raw_indices = neighbors_model.kneighbors(
-        features, return_distance=True
+    if neighbor_index is None:
+        neighbor_index = build_pca_neighbor_index(
+            features,
+            backend=neighbor_backend,
+            max_neighbors=neighbor_count,
+            graph_neighbors=graph_neighbors,
+            random_state=random_state,
+            query_epsilon=query_epsilon,
+        )
+    elif neighbor_index.backend != neighbor_backend:
+        raise ValueError("neighbor_index backend does not match neighbor_backend")
+    selected_distances, selected_indices = neighbor_index.query(
+        features, neighbor_count, exclude_self=True
     )
-    selected_indices = np.empty((n_samples, neighbor_count), dtype=np.int64)
-    selected_distances = np.empty((n_samples, neighbor_count), dtype=np.float64)
-    for row_index, (row_distances, row_indices) in enumerate(
-        zip(distances, raw_indices, strict=True)
-    ):
-        mask = row_indices != row_index
-        if int(np.sum(mask)) < neighbor_count:
-            raise ValueError(
-                "exact kNN could not select enough non-self neighbors for row "
-                f"{row_index}"
-            )
-        selected_indices[row_index] = row_indices[mask][:neighbor_count]
-        selected_distances[row_index] = row_distances[mask][:neighbor_count]
     if not np.all(np.isfinite(selected_distances)):
         raise ValueError("exact kNN distances must contain only finite values")
 
@@ -345,6 +351,9 @@ def fit_hdbscan_membership_comparison(
     min_cluster_size: int = DEFAULT_MIN_CLUSTER_SIZE,
     min_samples: int = DEFAULT_MIN_SAMPLES,
     neighbor_count: int = DEFAULT_NEIGHBOR_COUNT,
+    neighbor_backend: str = "exact",
+    neighbor_graph_neighbors: int = 32,
+    neighbor_query_epsilon: float = 0.1,
     seed: int = 42,
 ) -> HdbscanMembershipComparisonResult:
     """Fit discovery and both membership methods on one embedding matrix."""
@@ -426,11 +435,24 @@ def fit_hdbscan_membership_comparison(
     discovery_seconds = time.perf_counter() - discovery_started
 
     propagation_started = time.perf_counter()
+    neighbor_index = build_pca_neighbor_index(
+        pca_features,
+        backend=neighbor_backend,
+        max_neighbors=neighbor_count,
+        graph_neighbors=neighbor_graph_neighbors,
+        random_state=42,
+        query_epsilon=neighbor_query_epsilon,
+    )
     exact_knn = propagate_exact_knn_memberships(
         pca_features,
         leaf_labels,
         probabilities,
         neighbor_count=neighbor_count,
+        neighbor_backend=neighbor_backend,
+        neighbor_index=neighbor_index,
+        random_state=42,
+        graph_neighbors=neighbor_graph_neighbors,
+        query_epsilon=neighbor_query_epsilon,
     )
     propagation_seconds = time.perf_counter() - propagation_started
     runtime_seconds = {
@@ -454,7 +476,10 @@ def fit_hdbscan_membership_comparison(
         "min_cluster_size": int(min_cluster_size),
         "min_samples": int(min_samples),
         "neighbor_count": int(neighbor_count),
-        "neighbor_search": "exact_brute_force",
+        "neighbor_search": neighbor_backend,
+        "neighbor_graph_neighbors": int(neighbor_graph_neighbors),
+        "neighbor_random_state": 42,
+        "neighbor_query_epsilon": float(neighbor_query_epsilon),
         "distance_metric": "euclidean",
         "local_sigma": "median_positive_selected_neighbor_distance",
         "membership_weight": "exp(-(distance / sigma)^2)",
@@ -475,6 +500,7 @@ def fit_hdbscan_membership_comparison(
         pca_selection=selection,
         configuration=configuration,
         runtime_seconds=runtime_seconds,
+        neighbor_index=neighbor_index,
     )
 
 

@@ -1,0 +1,33 @@
+{
+  "dataset": {
+    "type": "replicated",
+    "rows": 10000,
+    "quality_eligible": false
+  },
+  "timing_sec": {
+    "calibration_and_fit": 340.7711029330003,
+    "index_build": 0.8197853949995988,
+    "calibration_query": 1.2145691920004538,
+    "test_query": 0.07547630000044592
+  },
+  "selected": {
+    "seed": 42,
+    "min_cluster_size": 18,
+    "min_samples": 3,
+    "neighbor_count": 24,
+    "native_leaf_nmi": 0.6020377320345071,
+    "exact_knn_leaf_nmi": 0.5309110037952844,
+    "pynndescent_leaf_nmi": 0.5309110037952844,
+    "neighbor_backend": "pynndescent",
+    "mean_leaf_nmi": 0.5664743679148958,
+    "mean_noise_rate": 0.016833333333333332,
+    "complexity": 45,
+    "sort_key": [
+      42,
+      18,
+      3,
+      24
+    ]
+  },
+  "quality_use_prohibited": true
+}

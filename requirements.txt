@@ -5,6 +5,7 @@ scikit-learn>=1.5,<2
 hdbscan>=0.8.40,<0.9
 matplotlib>=3.9,<4
 umap-learn>=0.5.7,<0.6
+pynndescent>=0.5.13,<1
 pacmap>=0.9,<1
 datasets>=3,<5
 transformers>=4.45,<5
