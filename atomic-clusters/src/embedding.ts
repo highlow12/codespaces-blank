@@ -10,8 +10,18 @@ export interface EmbeddingProvider {
 
 export type EmbeddingNoteLogger = (entry: EmbeddingLogEntry) => void;
 
+function errorMessages(error: unknown): string[] {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 4; depth++) {
+    messages.push(current instanceof Error ? current.message : String(current));
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return messages.filter(Boolean);
+}
+
 function safeError(error: unknown, note?: NoteRecord): string {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = errorMessages(error).join(": ");
   if (note && (note.content && message.includes(note.content) || note.title && message.includes(note.title))) return "Embedding provider error (message redacted)";
   return message.replace(/((?:^|[?&\s])(?:key|token|secret|authorization)=)[^&\s]+/gi, "$1[redacted]").slice(0, 500);
 }
@@ -38,14 +48,26 @@ export const LOCAL_MODEL_DESCRIPTOR = {
   tokenizerUrl: "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
 } as const;
 
+export const LOCAL_ORT_MJS_ASSET = "ort-wasm-simd-threaded.mjs";
+export const LOCAL_ORT_WASM_ASSET = "ort-wasm-simd-threaded.wasm";
+
+export interface LocalOrtAssetOverrides { mjs?: string; wasm?: string; wasmBinary?: ArrayBuffer; revoke?: () => void; }
 let localOrtAssetPrefix: string | null = null;
+let localOrtAssetOverrides: LocalOrtAssetOverrides | undefined;
 
 /** Configure the directory containing the bundled ORT .mjs/.wasm assets. */
-export function configureLocalOrtAssets(prefix: string): void {
+export function configureLocalOrtAssets(prefix: string, overrides?: LocalOrtAssetOverrides): void {
+  localOrtAssetOverrides?.revoke?.();
   localOrtAssetPrefix = prefix.endsWith("/") ? prefix : `${prefix}/`;
+  localOrtAssetOverrides = overrides;
 }
 
 export function getLocalOrtAssetPrefix(): string | null { return localOrtAssetPrefix; }
+
+export function disposeLocalOrtAssets(): void {
+  localOrtAssetOverrides?.revoke?.();
+  localOrtAssetOverrides = undefined;
+}
 
 export interface LocalModelArtifact {
   descriptor: typeof LOCAL_MODEL_DESCRIPTOR;
@@ -290,7 +312,10 @@ export async function defaultLocalRuntimeFactory(artifact: LocalModelArtifact): 
   if (override) return override;
   if (!localOrtAssetPrefix) throw new LocalInferenceBackendError("Local ORT assets are not configured for this vault/plugin installation.");
   ort.env.wasm.numThreads = 1;
-  ort.env.wasm.wasmPaths = localOrtAssetPrefix;
+  ort.env.wasm.wasmPaths = localOrtAssetOverrides?.mjs
+    ? { mjs: localOrtAssetOverrides.mjs, ...(localOrtAssetOverrides.wasm ? { wasm: localOrtAssetOverrides.wasm } : {}) }
+    : localOrtAssetPrefix;
+  if (localOrtAssetOverrides?.wasmBinary) ort.env.wasm.wasmBinary = localOrtAssetOverrides.wasmBinary;
   const tokenizer = new UnigramTokenizer(new TextDecoder().decode(artifact.tokenizer));
   return new OrtEmbeddingRuntime(ort, tokenizer);
 }

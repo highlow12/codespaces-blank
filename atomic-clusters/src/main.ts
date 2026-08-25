@@ -1,5 +1,5 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
-import { configureLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, SecretResolver, VaultLocalModelStorage } from "./embedding";
+import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { ClusterResultStore, EmbeddingCache, EmbeddingLogStore, NoteStore } from "./storage";
 import { AtomicClustersSettingTab } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
@@ -31,7 +31,11 @@ export default class AtomicClustersPlugin extends Plugin {
     // Obsidian may eval-load the plugin bundle, so loader-relative paths can
     // point into electron.asar. Resolve assets from the actual vault instead.
     const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & { getBasePath?: () => string };
-    try { configureLocalOrtAssets(resolveLocalOrtAssetPrefix(adapter.getBasePath?.(), this.manifest.dir, this.manifest.id)); } catch { /* Local inference reports a useful error if this cannot be resolved. */ }
+    try {
+      const prefix = resolveLocalOrtAssetPrefix(adapter.getBasePath?.(), this.manifest.dir, this.manifest.id);
+      configureLocalOrtAssets(prefix);
+      await this.configureRendererOrtAssets(adapter, prefix);
+    } catch { /* Local inference reports a useful error if this cannot be resolved. */ }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings> || {});
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf));
@@ -42,7 +46,19 @@ export default class AtomicClustersPlugin extends Plugin {
     this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog()));
   }
 
-  async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; }
+  async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; disposeLocalOrtAssets(); }
+
+  private async configureRendererOrtAssets(adapter: { exists(path: string): Promise<boolean>; readBinary(path: string): Promise<ArrayBuffer> }, prefix: string): Promise<void> {
+    const manifestDir = this.manifest.dir?.replace(/\\/g, "/").replace(/\/$/, "");
+    const pluginDir = manifestDir?.startsWith(".obsidian/plugins/") ? manifestDir : `.obsidian/plugins/${this.manifest.id}`;
+    const mjsPath = `${pluginDir}/${LOCAL_ORT_MJS_ASSET}`;
+    const wasmPath = `${pluginDir}/${LOCAL_ORT_WASM_ASSET}`;
+    if (!(await adapter.exists(mjsPath)) || !(await adapter.exists(wasmPath))) return;
+    if (typeof Blob === "undefined" || typeof URL.createObjectURL !== "function") return;
+    const [mjsBytes, wasmBinary] = await Promise.all([adapter.readBinary(mjsPath), adapter.readBinary(wasmPath)]);
+    const mjsUrl = URL.createObjectURL(new Blob([mjsBytes], { type: "text/javascript" }));
+    configureLocalOrtAssets(prefix, { mjs: mjsUrl, wasmBinary, revoke: () => URL.revokeObjectURL(mjsUrl) });
+  }
 
   private async buildClusters(): Promise<void> {
     if (this.running) { new Notice("Atomic Clusters is already running."); return; }
@@ -97,10 +113,10 @@ export default class AtomicClustersPlugin extends Plugin {
       progress.fail(cancelled ? "Clustering cancelled" : `Build failed: ${message}`);
       const status = cancelled ? "cancelled" : "failed";
       const failedLog: EmbeddingRunLog = persistedRunLog
-        ? { ...persistedRunLog, completedAt: new Date().toISOString(), status, error: safeRunError(message), ...(persistedRunLog.stage === "embedding" ? {} : { stage: "clustering" }) }
-        : { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: runTotal, ...counts(), entries: logEntries, status, stage: "embedding", error: safeRunError(message) };
+        ? { ...persistedRunLog, completedAt: new Date().toISOString(), status, error: safeRunError(error), ...(persistedRunLog.stage === "embedding" ? {} : { stage: "clustering" }) }
+        : { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: runTotal, ...counts(), entries: logEntries, status, stage: "embedding", error: safeRunError(error) };
       await logStore.save(failedLog).catch(() => undefined);
-      if (!cancelled) new Notice(`Atomic Clusters failed: ${message}`);
+      if (!cancelled) new Notice(`Atomic Clusters failed: ${safeRunError(error)}`);
     }
     finally { this.running = false; this.operationProgress = null; }
   }
@@ -140,7 +156,15 @@ export default class AtomicClustersPlugin extends Plugin {
   private confirmGeminiTransmission(count: number): Promise<boolean> { return new Promise((resolve) => new GeminiTransmissionModal(this.app, count, resolve).open()); }
 }
 
-function safeRunError(message: string): string { return message.replace(/((?:^|[?&\s])(?:key|token|secret|authorization)=)[^&\s]+/gi, "$1[redacted]").slice(0, 500); }
+function safeRunError(error: unknown): string {
+  const messages: string[] = [];
+  let current: unknown = error;
+  for (let depth = 0; current && depth < 4; depth++) {
+    messages.push(current instanceof Error ? current.message : String(current));
+    current = (current as { cause?: unknown })?.cause;
+  }
+  return messages.filter(Boolean).join(": ").replace(/((?:^|[?&\s])(?:key|token|secret|authorization)=)[^&\s]+/gi, "$1[redacted]").slice(0, 500);
+}
 
 class GeminiTransmissionModal extends Modal {
   private settled = false;

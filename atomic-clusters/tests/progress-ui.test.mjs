@@ -6,6 +6,7 @@ test("installed plugin exposes persistent progress for model and clustering flow
   const settings = await readFile(new URL("../src/settings.ts", import.meta.url), "utf8");
   const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
   const progress = await readFile(new URL("../src/progress.ts", import.meta.url), "utf8");
+  const embedding = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
   const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
   assert.match(settings, /<progress|createEl\("progress"/);
   assert.match(settings, /setBusy\(true\)/);
@@ -22,6 +23,11 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(main, /embedding-log\.json/);
   assert.match(main, /No embedding log is available yet/);
   assert.match(main, /Could not open embedding log/);
+  assert.match(main, /readBinary/);
+  assert.match(main, /createObjectURL/);
+  assert.match(main, /disposeLocalOrtAssets/);
+  assert.match(main, /current = \(current as \{ cause\?: unknown \}\)\?\.cause/);
+  assert.match(embedding, /wasmBinary/);
   assert.doesNotMatch(main, /class EmbeddingLogModal/);
   assert.doesNotMatch(main, /atomic-clusters-log-table/);
   assert.match(settings, /Open embedding log/);

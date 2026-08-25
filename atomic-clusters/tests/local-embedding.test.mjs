@@ -8,7 +8,7 @@ async function loadEmbedding() {
   const stubbed = source
     .replace('import { requestUrl } from "obsidian";', 'const requestUrl = async ({ url }) => ({ arrayBuffer: new TextEncoder().encode(url.includes("tokenizer") ? "tokenizer" : "onnx").buffer });')
     .replace('import * as ort from "onnxruntime-web/wasm";', 'const ort = { env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };');
-  const result = await transform(stubbed, { loader: "ts", format: "esm", target: "es2020" });
+  const result = await transform(`${stubbed}\nexport { ort };`, { loader: "ts", format: "esm", target: "es2020" });
   return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
 }
 
@@ -63,11 +63,12 @@ test("local provider logs per-note failures without exposing content or vectors"
     { path: "bad.md", title: "Bad", content: "secret note", hash: "b", mtime: 2 }
   ];
   const entries = [];
-  const provider = new LocalEmbeddingProvider(settings, async (texts) => { if (texts[0].includes("Bad")) throw new Error("provider failed secret=should-not-leak"); return [new Array(384).fill(0.1)]; });
+  const provider = new LocalEmbeddingProvider(settings, async (texts) => { if (texts[0].includes("Bad")) { const error = new Error("provider failed secret=should-not-leak"); error.cause = new Error("backend detail"); throw error; } return [new Array(384).fill(0.1)]; });
   const vectors = await provider.embed(notes, undefined, (entry) => entries.push(entry));
   assert.equal(vectors.length, 1);
   assert.deepEqual(entries.map((entry) => [entry.path, entry.status]), [["ok.md", "success"], ["bad.md", "failure"]]);
   assert.match(entries[1].error, /redacted/);
+  assert.match(entries[1].error, /backend detail/);
   assert.doesNotMatch(JSON.stringify(entries), /private content|secret note|should-not-leak/);
   assert.ok(entries.every((entry) => entry.provider === "local" && entry.model.includes("multilingual-e5-small") && typeof entry.timestamp === "string" && typeof entry.durationMs === "number"));
 });
@@ -111,6 +112,24 @@ test("default factory uses bundled Unigram tokenizer and ORT runtime without an 
   assert.equal(vectors.length, 1);
   assert.equal(vectors[0].length, 2);
   assert.ok(Math.abs(Math.hypot(...vectors[0]) - 1) < 1e-6);
+});
+
+test("default factory wires renderer-safe ORT blob module and wasm binary overrides", async () => {
+  const { ort: __ort, configureLocalOrtAssets, defaultLocalRuntimeFactory } = await loadEmbedding();
+  const wasmBinary = new ArrayBuffer(8);
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/", { mjs: "blob:atomic-ort-module", wasmBinary });
+  const tokenizer = JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["hello", -0.2], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] });
+  await defaultLocalRuntimeFactory({ model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer });
+  assert.deepEqual(__ort.env.wasm.wasmPaths, { mjs: "blob:atomic-ort-module" });
+  assert.equal(__ort.env.wasm.wasmBinary, wasmBinary);
+});
+
+test("ORT blob override is revoked when the plugin unloads", async () => {
+  const { configureLocalOrtAssets, disposeLocalOrtAssets } = await loadEmbedding();
+  let revoked = 0;
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/", { mjs: "blob:atomic-ort-module", revoke: () => revoked++ });
+  disposeLocalOrtAssets();
+  assert.equal(revoked, 1);
 });
 
 test("ORT assets resolve from a Windows vault path with spaces and manifest.dir", async () => {
