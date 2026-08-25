@@ -2,6 +2,7 @@ import * as Obsidian from "obsidian";
 import { App, Modal, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { LocalModelManager, LocalModelProgress, LocalRuntimeProgress } from "./embedding";
 import { PluginSettings } from "./types";
+import { TitleModelManager, TitleModelProgress, TitleModelStatus } from "./title";
 
 export interface ClusterRunControls {
   build(): Promise<void>;
@@ -10,9 +11,10 @@ export interface ClusterRunControls {
 }
 
 export type LocalRuntimeTest = (onProgress: (progress: LocalRuntimeProgress) => void) => Promise<void>;
+export type TitleRuntimeTest = (onProgress: (progress: TitleModelProgress) => void) => Promise<void>;
 
 export class AtomicClustersSettingTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest) { super(app, plugin); }
+  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly titleModels: TitleModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest, private readonly testTitleRuntime: TitleRuntimeTest, private readonly confirmTitleDownload: () => Promise<boolean>) { super(app, plugin); }
   display(): void {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Atomic Clusters" });
     new Setting(containerEl).setName("Embedding provider").setDesc("Gemini sends note text to Google; Local keeps inference on this device.").addDropdown((dropdown) => dropdown.addOption("gemini", "Gemini API").addOption("local", "Local multilingual-e5-small").setValue(this.settings.embeddingProvider).onChange(async (value) => { this.settings.embeddingProvider = value as PluginSettings["embeddingProvider"]; await this.save(); this.display(); }));
@@ -23,6 +25,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     if (this.settings.clusteringRuntime === "pyodide") new Setting(containerEl).setName("Pyodide URL").setDesc("Optional pyodide.js URL. Leave blank to use the pinned CDN runtime.").addText((text) => text.setValue(this.settings.pyodideUrl || "").setPlaceholder("https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js").onChange(async (value) => { this.settings.pyodideUrl = value.trim(); await this.save(); }));
     new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = value.split(",").map((item) => item.trim()).filter(Boolean); await this.save(); }));
     this.renderClusterRunControl(containerEl);
+    this.renderTitleModelControl(containerEl);
     if (this.settings.embeddingProvider === "local") {
       new Setting(containerEl).setName("Local execution backend").setDesc("Auto tries WebGPU first and falls back to the WASM CPU backend when unavailable. WebGPU can be faster but depends on the graphics driver.").addDropdown((dropdown) => dropdown.addOption("auto", "Auto (WebGPU → WASM CPU)").addOption("webgpu", "WebGPU only").addOption("wasm", "WASM CPU only").setValue(this.settings.localExecutionProvider || "auto").onChange(async (value) => { this.settings.localExecutionProvider = value as PluginSettings["localExecutionProvider"]; await this.save(); }));
       const modelSetting = new Setting(containerEl).setName("Local multilingual-e5-small").setDesc("Download once with explicit consent; inference uses the installed files without network access.");
@@ -45,6 +48,28 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
       void refresh();
     }
     new Setting(containerEl).setName("Embedding log").setDesc("Open the latest per-note embedding diagnostics in the operating system's default text editor.").addButton((button) => button.setButtonText("Open embedding log").onClick(() => { void this.openEmbeddingLog().catch(() => undefined); }));
+  }
+
+  private renderTitleModelControl(containerEl: HTMLElement): void {
+    new Setting(containerEl).setName("Cluster title model").setDesc("Optional offline Qwen2.5-0.5B-Instruct Q4F16 WebGPU model. Titles are generated after a cluster result is saved; missing or failed title inference never fails clustering.").addToggle((toggle) => toggle.setValue(this.settings.clusterTitlesEnabled !== false).onChange(async (value) => { this.settings.clusterTitlesEnabled = value; await this.save(); }));
+    const setting = new Setting(containerEl).setName("Title model files").setDesc("Download requires explicit consent. The manifest is written last and integrity is checked only with Check model.");
+    const statusSetting = new Setting(containerEl).setName("Title model status").setDesc("Checking…");
+    const progress = statusSetting.controlEl.createEl("progress", { cls: "atomic-clusters-model-progress", attr: { max: "1", value: "0" } });
+    const statusEl = statusSetting.controlEl.createDiv({ cls: "atomic-clusters-model-status", text: "Checking…" });
+    const controls: Array<{ setDisabled(disabled: boolean): unknown }> = [];
+    const setBusy = (busy: boolean) => controls.forEach((control) => control.setDisabled(busy));
+    const update = (value: TitleModelProgress) => { progress.value = Math.max(0, Math.min(1, value.progress)); statusEl.setText(`${value.phase} · ${Math.round(value.progress * 100)}%${value.detail ? ` · ${value.detail}` : ""}`); };
+    const refresh = async (verify = false) => { try { const state: TitleModelStatus = verify ? await this.titleModels.verifyStatus() : await this.titleModels.status(); statusEl.setText(state === "installed" ? (verify ? "Installed and integrity verified" : "Installed (manifest ready; use Check model to verify integrity)") : state === "incomplete" ? "Incomplete download — download again" : state === "corrupt" ? "Corrupt — delete and download again" : "Missing — download to enable titles"); progress.value = state === "installed" ? 1 : 0; } catch (error) { statusEl.setText(`Status check failed: ${safeUiError(error)}`); progress.value = 0; } };
+    let check: { setDisabled(disabled: boolean): unknown };
+    setting.addButton((button) => { check = button; return button.setButtonText("Check model").onClick(async () => { setBusy(true); try { await refresh(true); } finally { setBusy(false); } }); }); controls.push(check!);
+    let download: { setDisabled(disabled: boolean): unknown };
+    setting.addButton((button) => { download = button; return button.setButtonText("Download").onClick(async () => { setBusy(true); try { await this.titleModels.downloadModel(this.confirmTitleDownload, update); } catch (error) { statusEl.setText(`${error instanceof Error && error.message.includes("cancelled") ? "Download cancelled" : `Download failed: ${safeUiError(error)}`}`); } finally { setBusy(false); await refresh(); } }); }); controls.push(download!);
+    let remove: { setDisabled(disabled: boolean): unknown };
+    setting.addButton((button) => { remove = button; return button.setButtonText("Delete").onClick(async () => { setBusy(true); try { await this.titleModels.deleteModel(); statusEl.setText("Deleted"); progress.value = 0; } catch (error) { statusEl.setText(`Delete failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(remove!);
+    let test: { setDisabled(disabled: boolean): unknown };
+    setting.addButton((button) => { test = button; return button.setButtonText("Test runtime").onClick(async () => { setBusy(true); try { await this.testTitleRuntime(update); statusEl.setText("Title runtime ready (WebGPU)"); progress.value = 1; } catch (error) { statusEl.setText(`Runtime test failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(test!);
+    new Setting(containerEl).setName("Title language").setDesc("Auto follows the dominant language in representative notes.").addText((text) => text.setValue(this.settings.clusterTitleLanguage || "auto").setPlaceholder("auto").onChange(async (value) => { this.settings.clusterTitleLanguage = value.trim() || "auto"; await this.save(); }));
+    void refresh();
   }
 
   private renderClusterRunControl(containerEl: HTMLElement): void {

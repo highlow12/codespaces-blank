@@ -25,14 +25,16 @@ export class ClusterExplorerView extends ItemView {
       const merge = merges.get(id);
       if (!merge) {
         const node = parent.createDiv({ cls: "atomic-clusters-node" }); node.createEl("strong", { text: `Leaf cluster ${id}` });
-        const files = this.result!.ids.filter((_, index) => this.result!.leafLabels[index] === id).slice(0, 3);
+        const title = this.result!.titles?.[String(id)];
+        node.querySelector("strong")?.setText(`${title ? `${title} · ` : ""}Leaf ${id}`);
+        const files = this.result!.ids.map((path, index) => ({ path, index })).filter((item) => this.result!.leafLabels[item.index] === id).sort((a, b) => (this.result!.probabilities[b.index] || 0) - (this.result!.probabilities[a.index] || 0) || a.path.localeCompare(b.path)).slice(0, 3).map((item) => item.path);
         const representative = node.createDiv({ text: files.length ? "Representative notes:" : "No representative notes" });
         representative.addClass("atomic-clusters-status");
         for (const path of files) node.createEl("button", { text: path, attr: { type: "button" } }).addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false));
         return;
       }
       const details = parent.createEl("details", { cls: "atomic-clusters-node" }) as HTMLDetailsElement; details.open = depth === 0;
-      details.createEl("summary", { text: `Merge ${merge.id} · distance ${merge.distance.toFixed(3)}` });
+      details.createEl("summary", { text: `${this.result!.titles?.[String(merge.id)] ? `${this.result!.titles![String(merge.id)]} · ` : ""}Merge ${merge.id} · distance ${merge.distance.toFixed(3)}` });
       renderNode(merge.left, details, depth + 1); renderNode(merge.right, details, depth + 1);
     };
     if (this.result.hierarchy.root !== null) renderNode(this.result.hierarchy.root, list, 0);

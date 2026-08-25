@@ -100,7 +100,7 @@ export interface DiscoveryResult {
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
   if (input.length < 3) {
-    return { schemaVersion: 1, ids, leafLabels: input.map(() => -1), probabilities: input.map(() => 0), outlierProxy: input.map(() => 1), pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 }, hierarchy: { leaves: [], merges: [], root: null }, timings: { totalMs: 0 } };
+    return { schemaVersion: 2, ids, leafLabels: input.map(() => -1), probabilities: input.map(() => 0), outlierProxy: input.map(() => 1), pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 }, hierarchy: { leaves: [], merges: [], root: null }, timings: { totalMs: 0 } };
   }
   const kernel = options.kernel || jsKernel;
   const progress = options.onProgress || (() => undefined);
@@ -132,7 +132,7 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   progress("hierarchy", 0.9);
   progress("complete", 1);
   return {
-    schemaVersion: 1, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
+    schemaVersion: 2, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
     outlierProxy: hdbscan.outlierProxy, pca: selectedPca, hierarchy,
     timings: { totalMs: Date.now() - started }
   };

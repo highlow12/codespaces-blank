@@ -17,6 +17,9 @@ export interface PluginSettings {
   /** Optional Python reference runtime; WASM remains the desktop default. */
   clusteringRuntime?: "wasm" | "pyodide";
   pyodideUrl?: string;
+  /** Generate titles for every leaf and merge node after a successful build. */
+  clusterTitlesEnabled?: boolean;
+  clusterTitleLanguage?: "auto" | string;
 }
 
 export interface NoteRecord {
@@ -124,8 +127,30 @@ export interface HierarchyTree {
   root: number | null;
 }
 
+export type ClusterTitleStatus = "generated" | "cached" | "failed" | "skipped";
+
+/** Metadata persisted with a v2 result.  It intentionally contains no note text. */
+export interface ClusterTitleGeneration {
+  modelRevision: string;
+  promptVersion: string;
+  language: string;
+  inputFingerprint: string;
+  backend?: "webgpu" | "unavailable";
+  generatedAt?: string;
+  statuses: Record<string, ClusterTitleStatus>;
+  durationsMs?: Record<string, number>;
+  errors?: Record<string, string>;
+}
+
+export interface ClusterTitleCacheEntry {
+  key: string;
+  title: string;
+  nodeMembersFingerprint: string;
+  savedAt: string;
+}
+
 export interface ClusterResult {
-  schemaVersion: 1;
+  schemaVersion: 1 | 2;
   ids: string[];
   leafLabels: number[];
   probabilities: number[];
@@ -133,6 +158,9 @@ export interface ClusterResult {
   pca: PcaSelection;
   hierarchy: HierarchyTree;
   timings: Record<string, number>;
+  /** Node id (leaf label or merge id) to the normalized display title. */
+  titles?: Record<string, string>;
+  titleGeneration?: ClusterTitleGeneration;
 }
 
 export type WorkerRequest =
