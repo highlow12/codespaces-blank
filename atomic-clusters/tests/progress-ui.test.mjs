@@ -13,6 +13,9 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(main, /new AtomicClustersProgress/);
   assert.match(main, /cache scan/);
   assert.match(main, /EmbeddingLogStore/);
+  assert.match(main, /freshEmbeddingFailed/);
+  assert.match(main, /status: embeddingError \? "failed" : "completed"/);
+  assert.match(main, /stage: "clustering"/);
   assert.match(main, /open-embedding-log/);
   assert.match(main, /shell\.openPath/);
   assert.match(main, /getBasePath/);
@@ -38,6 +41,7 @@ test("embedding log contract contains diagnostics but no payload fields", async 
   assert.match(storage, /embedding-log\.json/);
   assert.match(storage, /async load\(\): Promise<EmbeddingRunLog \| null>/);
   assert.match(types, /status\?: "completed" \| "failed" \| "cancelled"/);
+  assert.match(types, /stage\?: "embedding" \| "clustering"/);
   assert.match(types, /error\?: string/);
   assert.doesNotMatch(main, /entry\.content|entry\.vector/);
   assert.doesNotMatch(main, /EmbeddingLogModal|atomic-clusters-log-table/);

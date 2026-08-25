@@ -12,6 +12,12 @@ async function loadEmbedding() {
   return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
 }
 
+async function loadOrtAssets() {
+  const source = await readFile(new URL("../src/ort-assets.ts", import.meta.url), "utf8");
+  const result = await transform(source, { loader: "ts", format: "esm", target: "es2020", platform: "node" });
+  return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
+}
+
 class MemoryStorage {
   files = new Map();
   async exists(path) { return this.files.has(path); }
@@ -66,6 +72,15 @@ test("local provider logs per-note failures without exposing content or vectors"
   assert.ok(entries.every((entry) => entry.provider === "local" && entry.model.includes("multilingual-e5-small") && typeof entry.timestamp === "string" && typeof entry.durationMs === "number"));
 });
 
+test("local provider fails fast on systemic ONNX backend initialization errors", async () => {
+  const { LocalEmbeddingProvider, LocalInferenceBackendError } = await loadEmbedding();
+  const notes = Array.from({ length: 3 }, (_, index) => ({ path: `${index}.md`, title: `${index}`, content: "note", hash: `${index}`, mtime: index }));
+  let attempts = 0;
+  const provider = new LocalEmbeddingProvider({ localModel: "multilingual-e5-small" }, undefined, { async load() { return { model: new ArrayBuffer(1), tokenizer: new ArrayBuffer(1) }; } }, async () => ({ async embed() { attempts++; throw new LocalInferenceBackendError("ORT asset load failed"); } }));
+  await assert.rejects(() => provider.embed(notes), /ORT asset load failed/);
+  assert.equal(attempts, 1);
+});
+
 test("ORT runtime mean-pools masked tokens and emits unit vectors", async () => {
   const { OrtEmbeddingRuntime } = await loadEmbedding();
   const fakeSession = { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run() { return { last_hidden_state: { dims: [1, 2, 2], data: new Float32Array([3, 0, 0, 4]) } }; } };
@@ -88,7 +103,8 @@ test("ORT runtime reports every inference batch", async () => {
 });
 
 test("default factory uses bundled Unigram tokenizer and ORT runtime without an override", async () => {
-  const { defaultLocalRuntimeFactory } = await loadEmbedding();
+  const { configureLocalOrtAssets, defaultLocalRuntimeFactory } = await loadEmbedding();
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/");
   const tokenizer = JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["hello", -0.2], ["world", -0.3], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] });
   const runtime = await defaultLocalRuntimeFactory({ model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer });
   const vectors = await runtime.embed(["hello world"], { model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer });
@@ -97,11 +113,21 @@ test("default factory uses bundled Unigram tokenizer and ORT runtime without an 
   assert.ok(Math.abs(Math.hypot(...vectors[0]) - 1) < 1e-6);
 });
 
-test("desktop CJS bundle can point ORT at its adjacent plugin assets", async () => {
+test("ORT assets resolve from a Windows vault path with spaces and manifest.dir", async () => {
+  const { resolveLocalOrtAssetPrefix } = await loadOrtAssets();
+  const prefix = resolveLocalOrtAssetPrefix("C:\\Users\\Alice\\Vault With Spaces", ".obsidian\\plugins\\atomic-clusters", "atomic-clusters");
+  assert.equal(prefix, "file:///C:/Users/Alice/Vault%20With%20Spaces/.obsidian/plugins/atomic-clusters/");
+  const fallback = resolveLocalOrtAssetPrefix("C:\\Users\\Alice\\Vault With Spaces", "atomic-clusters", "atomic-clusters");
+  assert.equal(fallback, prefix);
+});
+
+test("desktop bundle resolves ORT assets from vault instead of eval-loader __dirname", async () => {
   const { configureLocalOrtAssets, getLocalOrtAssetPrefix } = await loadEmbedding();
   configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters");
   assert.equal(getLocalOrtAssetPrefix(), "file:///vault/.obsidian/plugins/atomic-clusters/");
   const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
-  assert.match(main, /pathToFileURL\(`\$\{__dirname\}\/`\)\.href/);
+  assert.doesNotMatch(main, /__dirname/);
+  assert.match(main, /this\.manifest\.dir/);
+  assert.match(main, /getBasePath/);
   assert.match(main, /configureLocalOrtAssets/);
 });

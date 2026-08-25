@@ -38,14 +38,14 @@ export const LOCAL_MODEL_DESCRIPTOR = {
   tokenizerUrl: "https://huggingface.co/intfloat/multilingual-e5-small/resolve/main/tokenizer.json"
 } as const;
 
-let localOrtAssetPrefix = "./";
+let localOrtAssetPrefix: string | null = null;
 
 /** Configure the directory containing the bundled ORT .mjs/.wasm assets. */
 export function configureLocalOrtAssets(prefix: string): void {
   localOrtAssetPrefix = prefix.endsWith("/") ? prefix : `${prefix}/`;
 }
 
-export function getLocalOrtAssetPrefix(): string { return localOrtAssetPrefix; }
+export function getLocalOrtAssetPrefix(): string | null { return localOrtAssetPrefix; }
 
 export interface LocalModelArtifact {
   descriptor: typeof LOCAL_MODEL_DESCRIPTOR;
@@ -138,6 +138,11 @@ export interface LocalTokenBatch { inputIds: number[][]; attentionMask: number[]
 export interface LocalTokenizer { encode(texts: string[], maxLength: number): LocalTokenBatch; }
 export interface LocalInferenceRuntime { embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]>; }
 
+/** Errors raised while initializing/loading the ONNX backend must not be retried per note. */
+export class LocalInferenceBackendError extends Error {
+  constructor(message: string, cause?: unknown) { super(message); this.name = "LocalInferenceBackendError"; if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause; }
+}
+
 interface UnigramEntry { token: string; id: number; score: number; length: number; }
 
 /** Minimal offline tokenizer for the SentencePiece Unigram tokenizer used by e5-small. */
@@ -185,7 +190,9 @@ export class UnigramTokenizer implements LocalTokenizer {
 export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
   constructor(private readonly ort: { Tensor: new (type: string, data: ArrayLike<number> | BigInt64Array, dims: number[]) => any; InferenceSession: { create(model: ArrayBuffer): Promise<any> } }, private readonly tokenizer: LocalTokenizer, private readonly batchSize = 16, private readonly maxLength = 512) {}
   async embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]> {
-    const session = await this.ort.InferenceSession.create(artifact.model);
+    let session: any;
+    try { session = await this.ort.InferenceSession.create(artifact.model); }
+    catch (error) { throw new LocalInferenceBackendError("Local ONNX backend initialization failed; verify the bundled ORT assets and installed model.", error); }
     const output: number[][] = [];
     for (let start = 0; start < texts.length; start += this.batchSize) {
       const batch = texts.slice(start, start + this.batchSize);
@@ -281,6 +288,7 @@ export async function defaultLocalRuntimeFactory(artifact: LocalModelArtifact): 
   // required for a normal model-download -> offline-embed flow.
   const override = (globalThis as typeof globalThis & { __ATOMIC_CLUSTERS_LOCAL_ONNX__?: LocalInferenceRuntime }).__ATOMIC_CLUSTERS_LOCAL_ONNX__;
   if (override) return override;
+  if (!localOrtAssetPrefix) throw new LocalInferenceBackendError("Local ORT assets are not configured for this vault/plugin installation.");
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.wasmPaths = localOrtAssetPrefix;
   const tokenizer = new UnigramTokenizer(new TextDecoder().decode(artifact.tokenizer));
@@ -322,7 +330,13 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       const runtime = await this.runtimeFactory(artifact);
       const started = performance.now();
       try { const vectors = await runtime.embed(texts, artifact, (done) => reportProgress(done)); if (vectors.length !== notes.length) throw new Error("Local embedding runtime returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); }
-      catch { result.length = 0; await recoverIndividually((index) => runtime.embed([texts[index]], artifact)); }
+      catch (error) {
+        // Backend initialization/asset failures are systemic. Retrying every
+        // note would only repeat the same failure hundreds of times. Runtime
+        // implementations may opt into isolation for input-specific errors.
+        if (error instanceof LocalInferenceBackendError) throw error;
+        result.length = 0; await recoverIndividually((index) => runtime.embed([texts[index]], artifact));
+      }
     }
     reportProgress(notes.length);
     return result;

@@ -8,9 +8,9 @@ import { NodeClusteringWorker } from "./worker-client";
 import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
 import { isAbsolute, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 import { shell } from "electron";
 import { AtomicClustersProgress } from "./progress";
+import { resolveLocalOrtAssetPrefix } from "./ort-assets";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
@@ -28,9 +28,10 @@ export default class AtomicClustersPlugin extends Plugin {
   private operationProgress: AtomicClustersProgress | null = null;
 
   async onload(): Promise<void> {
-    // Obsidian desktop loads main.js as a CommonJS plugin module. Resolve the
-    // ORT assets beside that bundle instead of relying on document cwd.
-    configureLocalOrtAssets(pathToFileURL(`${__dirname}/`).href);
+    // Obsidian may eval-load the plugin bundle, so loader-relative paths can
+    // point into electron.asar. Resolve assets from the actual vault instead.
+    const adapter = this.app.vault.adapter as typeof this.app.vault.adapter & { getBasePath?: () => string };
+    try { configureLocalOrtAssets(resolveLocalOrtAssetPrefix(adapter.getBasePath?.(), this.manifest.dir, this.manifest.id)); } catch { /* Local inference reports a useful error if this cannot be resolved. */ }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings> || {});
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf));
@@ -48,12 +49,15 @@ export default class AtomicClustersPlugin extends Plugin {
     this.running = true;
     const progress = new AtomicClustersProgress("Atomic Clusters");
     this.operationProgress = progress;
-    const startedAt = new Date().toISOString(); const logEntries: EmbeddingLogEntry[] = []; let logSaved = false;
+    const startedAt = new Date().toISOString(); const logEntries: EmbeddingLogEntry[] = []; let persistedRunLog: EmbeddingRunLog | null = null; let runTotal = 0;
+    const logStore = new EmbeddingLogStore(this.app.vault);
+    const counts = () => ({ succeeded: logEntries.filter((entry) => entry.status === "success").length, failed: logEntries.filter((entry) => entry.status === "failure").length, cached: logEntries.filter((entry) => entry.status === "cached").length });
     let runProvider = this.settings.embeddingProvider; let runModel = this.settings.embeddingProvider === "gemini" ? this.settings.geminiModel : `${this.settings.localModel}@2024-05-01`;
     try {
       progress.update({ phase: "cache scan", progress: 0.02, detail: "Scanning Markdown notes" });
       const notes = await new NoteStore(this.app.vault).collect(this.settings.excludedFolders);
       if (!notes.length) throw new Error("No Markdown notes found in the selected vault folders.");
+      runTotal = notes.length;
       progress.update({ phase: "cache scan", progress: 0.1, detail: `Scanned ${notes.length} notes` });
       const cache = new EmbeddingCache(this.app.vault); const entries = await cache.load();
       const provider = this.settings.embeddingProvider === "gemini"
@@ -66,12 +70,19 @@ export default class AtomicClustersPlugin extends Plugin {
       let processedFresh = 0;
       const embedded = fresh.length ? await provider.embed(fresh, (done, total) => progress.update({ phase: "embedding", progress: 0.15 + (total ? done / total * 0.55 : 0), detail: `${done}/${total} notes processed` }), (entry) => { logEntries.push(entry); processedFresh++; progress.update({ phase: "embedding", progress: 0.15 + (processedFresh / Math.max(1, fresh.length)) * 0.55, detail: `${entry.status === "failure" ? "Failed" : "Embedded"}: ${entry.path}` }); }) : [];
       embedded.forEach((item) => entries.set(`${item.provider}:${item.model}:${item.path}`, item)); await cache.save(entries.values());
-      const runLog: EmbeddingRunLog = { version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: notes.length, succeeded: logEntries.filter((entry) => entry.status === "success").length, failed: logEntries.filter((entry) => entry.status === "failure").length, cached: logEntries.filter((entry) => entry.status === "cached").length, entries: logEntries, status: "completed" };
-      await new EmbeddingLogStore(this.app.vault).save(runLog);
-      logSaved = true;
-      progress.update({ phase: "cache save", progress: 0.72, detail: `${runLog.succeeded} embedded · ${runLog.failed} failed · ${runLog.cached} cached` });
       const activeNotes = notes.filter((note) => cache.get(note, provider.id, provider.model, entries));
-      if (!activeNotes.length) throw new Error("No notes have usable embeddings; fix the failed notes and run the build again.");
+      const freshEmbeddingFailed = fresh.length > 0 && embedded.length === 0;
+      const embeddingError = freshEmbeddingFailed
+        ? "All notes requiring fresh embeddings failed; fix the embedding provider or model and run the build again."
+        : !activeNotes.length ? "No notes have usable embeddings; fix the failed notes and run the build again." : undefined;
+      const embeddingCounts = counts();
+      persistedRunLog = { version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: notes.length, ...embeddingCounts, entries: logEntries, status: embeddingError ? "failed" : "completed", stage: "embedding", ...(embeddingError ? { error: safeRunError(embeddingError) } : {}) };
+      await logStore.save(persistedRunLog);
+      progress.update({ phase: "cache save", progress: 0.72, detail: `${persistedRunLog.succeeded} embedded · ${persistedRunLog.failed} failed · ${persistedRunLog.cached} cached` });
+      if (embeddingError) throw new Error(embeddingError);
+      // The persisted log currently describes a completed embedding phase;
+      // remember that subsequent failures belong to clustering.
+      persistedRunLog = { ...persistedRunLog, stage: "clustering" };
       const vectors = activeNotes.map((note) => cache.get(note, provider.id, provider.model, entries)?.vector);
       if (vectors.some((vector) => !vector)) throw new Error("Embedding cache is incomplete; please run the build again.");
       const ids = activeNotes.map((note) => note.path);
@@ -80,7 +91,17 @@ export default class AtomicClustersPlugin extends Plugin {
       const config: ClusteringConfig = { minClusterSize: this.settings.minClusterSize, minSamples: this.settings.minSamples, umapNeighbors: this.settings.umapNeighbors, umapMinDist: this.settings.umapMinDist, pcaVarianceTarget: this.settings.pcaVarianceTarget, seed: 42 };
       this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.75 + value * 0.24, detail: `Clustering ${Math.round(value * 100)}%` }); });
       await new ClusterResultStore(this.app.vault).save(this.latestResult); await this.publishResult(this.latestResult); progress.complete(`Built ${this.latestResult.hierarchy.leaves.length} clusters`);
-    } catch (error) { const message = error instanceof Error ? error.message : String(error); const cancelled = message === "Clustering cancelled" || message.includes("cancelled"); progress.fail(cancelled ? "Clustering cancelled" : `Build failed: ${message}`); if (!logSaved) { const runLog: EmbeddingRunLog = { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: logEntries.length, succeeded: logEntries.filter((entry) => entry.status === "success").length, failed: logEntries.filter((entry) => entry.status === "failure").length, cached: logEntries.filter((entry) => entry.status === "cached").length, entries: logEntries, status: cancelled ? "cancelled" : "failed", error: safeRunError(message) }; await new EmbeddingLogStore(this.app.vault).save(runLog).catch(() => undefined); } if (!cancelled) new Notice(`Atomic Clusters failed: ${message}`); }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const cancelled = message === "Clustering cancelled" || message.includes("cancelled");
+      progress.fail(cancelled ? "Clustering cancelled" : `Build failed: ${message}`);
+      const status = cancelled ? "cancelled" : "failed";
+      const failedLog: EmbeddingRunLog = persistedRunLog
+        ? { ...persistedRunLog, completedAt: new Date().toISOString(), status, error: safeRunError(message), ...(persistedRunLog.stage === "embedding" ? {} : { stage: "clustering" }) }
+        : { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: runTotal, ...counts(), entries: logEntries, status, stage: "embedding", error: safeRunError(message) };
+      await logStore.save(failedLog).catch(() => undefined);
+      if (!cancelled) new Notice(`Atomic Clusters failed: ${message}`);
+    }
     finally { this.running = false; this.operationProgress = null; }
   }
 
