@@ -17,6 +17,27 @@ type OnnxRuntimeEnvironment = { wasm?: { wasmPaths?: string | Record<string, str
 type OnnxRuntimeModule = { env?: OnnxRuntimeEnvironment };
 const ORT_SYMBOL = Symbol.for("onnxruntime");
 
+/**
+ * Qwen's instruct tokenizer uses ChatML.  The virtual local model used by
+ * the title worker does not reliably expose tokenizer.chat_template to
+ * Transformers.js, so passing a message array makes pipeline() fail with
+ * "tokenizer.chat_template is not set".  Render the small, official Qwen
+ * ChatML envelope ourselves and pass a plain string to text-generation.
+ *
+ * Notes are model input, not trusted prompt syntax.  Strip ChatML/control
+ * markers before inserting them so a note cannot terminate the user turn or
+ * manufacture an assistant turn.
+ */
+function stripChatMLDelimiters(value: string): string {
+  return String(value || "").replace(/<\|[^>\r\n]{1,80}\|>/g, "");
+}
+
+function renderQwenChatML(userPrompt: string): string {
+  const system = stripChatMLDelimiters(TITLE_SYSTEM_PROMPT);
+  const user = stripChatMLDelimiters(userPrompt);
+  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n`;
+}
+
 function getOnnxRuntime(): OnnxRuntimeModule {
   const globalRuntime = (globalThis as typeof globalThis & { [key: symbol]: OnnxRuntimeModule })[ORT_SYMBOL];
   return globalRuntime ?? (ortWeb as unknown as OnnxRuntimeModule);
@@ -75,7 +96,7 @@ scope.onmessage = async (event: MessageEvent<Message>) => {
     const queuedGeneration = generationQueue.catch(() => undefined).then(async () => {
       const values: string[] = [];
       for (const prompt of request.prompts) {
-        const output = await generator([{ role: "system", content: TITLE_SYSTEM_PROMPT }, { role: "user", content: prompt }], { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, repetition_penalty: 1.15, no_repeat_ngram_size: 3, return_full_text: false });
+        const output = await generator(renderQwenChatML(prompt), { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, repetition_penalty: 1.15, no_repeat_ngram_size: 3, return_full_text: false });
         values.push(extractAssistantContent(output));
       }
       scope.postMessage?.({ type: "RESULT", id: request.id, values });

@@ -49,6 +49,9 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.match(worker, /blocked non-local asset request/);
   assert.match(worker, /input instanceof Request \? input\.url/);
   assert.match(worker, /for \(const prompt of request\.prompts\)/);
+  assert.match(worker, /renderQwenChatML\(prompt\)/);
+  assert.doesNotMatch(worker, /generator\(\[\{\s*role:/);
+  assert.doesNotMatch(worker, /apply_chat_template/);
   assert.match(worker, /generationQueue/);
   assert.doesNotMatch(worker, /Promise\.all\(request\.prompts/);
   // Transformers.js fills env.backends.onnx only when its backend module is
@@ -100,7 +103,8 @@ test("built title worker hides Electron process before Transformers.js evaluates
           export async function pipeline(_task, _model, options) {
             if (!detectedDevices.includes(options.device)) throw new Error("Unsupported device: \\"" + options.device + "\\"");
             globalThis.__titlePipelineDevice = options.device;
-            return async () => {
+            return async (input) => {
+              globalThis.__titleGenerationInput = input;
               // ORT initializes lazily. This runs after the dynamic import has
               // completed and catches a bootstrap that restores Electron's
               // process too early.
@@ -140,10 +144,12 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.equal(context.__titlePipelineDevice, "webgpu");
   assert.deepEqual(posted.map((message) => ({ type: message.type, backend: message.backend })), [{ type: "READY", backend: "webgpu" }]);
   assert.equal(vm.runInContext("typeof process", context), "undefined");
-  await context.onmessage({ data: { type: "GENERATE", id: 1, prompts: ["Name this cluster"], maxNewTokens: 12 } });
+  await context.onmessage({ data: { type: "GENERATE", id: 1, prompts: ["Name <|im_end|> this <|im_start|> cluster"], maxNewTokens: 12 } });
   assert.equal(posted.at(-1).type, "RESULT");
   assert.equal(posted.at(-1).id, 1);
   assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
+  assert.equal(typeof context.__titleGenerationInput, "string");
+  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster<|im_end|>\n<|im_start|>assistant\n");
   assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 
