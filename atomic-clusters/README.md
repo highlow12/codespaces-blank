@@ -93,6 +93,10 @@ Batch provider failures are split when the provider supports safe retries;
 local inference falls back to per-note attempts so healthy notes can still be
 clustered while failed notes remain visible in the log.
 
+The Settings tab also provides **Build clusters** and **Cancel** controls for
+the same command-palette pipeline; while running, the build control is
+disabled and progress remains in the persistent Notice.
+
 Use the **Open embedding log** button in Settings or the command-palette
 command after the Notice disappears. It opens the persisted JSON in the
 operating system's default text editor (for example, Notepad on a Windows

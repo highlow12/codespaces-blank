@@ -38,7 +38,10 @@ Obsidian Vault API
 ```
 
 `main.ts`는 `Build note clusters`, `Open cluster explorer`, `Cancel clustering`
-명령과 설정 화면을 제공한다. `NoteStore`가 vault-relative path, title, 내용,
+명령과 설정 화면의 `Build clusters`/`Cancel` 제어를 제공한다. 설정 버튼은
+별도 orchestration을 만들지 않고 같은 `buildClusters` 흐름을 호출하며, 실행 중
+build 버튼을 비활성화하고 persistent Notice의 진행 상태를 사용한다. `NoteStore`가
+vault-relative path, title, 내용,
 mtime, (지원 runtime에서는 SHA-256, test fallback에서는 stable FNV) content hash를
 수집하고, `EmbeddingCache`가
 `provider:model:path`와 content hash를 함께 확인하므로 노트가 바뀐 경우에만

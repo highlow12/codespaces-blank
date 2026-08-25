@@ -3,8 +3,14 @@ import { App, Modal, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { LocalModelManager, LocalModelProgress } from "./embedding";
 import { PluginSettings } from "./types";
 
+export interface ClusterRunControls {
+  build(): Promise<void>;
+  cancel(): void;
+  isRunning(): boolean;
+}
+
 export class AtomicClustersSettingTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>) { super(app, plugin); }
+  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls) { super(app, plugin); }
   display(): void {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Atomic Clusters" });
     new Setting(containerEl).setName("Embedding provider").setDesc("Gemini sends note text to Google; Local keeps inference on this device.").addDropdown((dropdown) => dropdown.addOption("gemini", "Gemini API").addOption("local", "Local multilingual-e5-small").setValue(this.settings.embeddingProvider).onChange(async (value) => { this.settings.embeddingProvider = value as PluginSettings["embeddingProvider"]; await this.save(); this.display(); }));
@@ -14,6 +20,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Clustering runtime").setDesc("Pyodide runs the Python reference API in a browser worker and loads its runtime on first use.").addDropdown((dropdown) => dropdown.addOption("wasm", "WASM (default)").addOption("pyodide", "Pyodide Python reference").setValue(this.settings.clusteringRuntime || "wasm").onChange(async (value) => { this.settings.clusteringRuntime = value as PluginSettings["clusteringRuntime"]; await this.save(); }));
     if (this.settings.clusteringRuntime === "pyodide") new Setting(containerEl).setName("Pyodide URL").setDesc("Optional pyodide.js URL. Leave blank to use the pinned CDN runtime.").addText((text) => text.setValue(this.settings.pyodideUrl || "").setPlaceholder("https://cdn.jsdelivr.net/pyodide/v0.27.2/full/pyodide.js").onChange(async (value) => { this.settings.pyodideUrl = value.trim(); await this.save(); }));
     new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = value.split(",").map((item) => item.trim()).filter(Boolean); await this.save(); }));
+    this.renderClusterRunControl(containerEl);
     if (this.settings.embeddingProvider === "local") {
       const modelSetting = new Setting(containerEl).setName("Local multilingual-e5-small").setDesc("Download once with explicit consent; inference uses the installed files without network access.");
       const statusSetting = new Setting(containerEl).setName("Local model status").setDesc("Installation progress and integrity status.");
@@ -32,6 +39,22 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
       void refresh();
     }
     new Setting(containerEl).setName("Embedding log").setDesc("Open the latest per-note embedding diagnostics in the operating system's default text editor.").addButton((button) => button.setButtonText("Open embedding log").onClick(() => { void this.openEmbeddingLog().catch(() => undefined); }));
+  }
+
+  private renderClusterRunControl(containerEl: HTMLElement): void {
+    const setting = new Setting(containerEl).setName("Build clusters").setDesc("Run the configured embedding and clustering pipeline. Progress remains visible in one persistent Notice while the job is running.");
+    const statusEl = setting.controlEl.createDiv({ cls: "atomic-clusters-model-status", text: "Ready" });
+    let buildButton: { setDisabled(disabled: boolean): unknown; setButtonText(text: string): unknown } | undefined;
+    let cancelButton: { setDisabled(disabled: boolean): unknown } | undefined;
+    const refresh = () => {
+      const running = this.clusterRun.isRunning();
+      if (buildButton) { buildButton.setDisabled(running); buildButton.setButtonText(running ? "Building…" : "Build clusters"); }
+      cancelButton?.setDisabled(!running);
+      statusEl.setText(running ? "Running — see the persistent progress Notice." : "Ready");
+    };
+    setting.addButton((button) => { buildButton = button; return button.setButtonText("Build clusters").onClick(() => { if (this.clusterRun.isRunning()) return; try { const run = this.clusterRun.build(); refresh(); void run.catch((error) => { statusEl.setText(`Build failed: ${safeUiError(error)}`); }).finally(refresh); } catch (error) { statusEl.setText(`Build failed: ${safeUiError(error)}`); refresh(); } }); });
+    setting.addButton((button) => { cancelButton = button; return button.setButtonText("Cancel").setDisabled(true).onClick(() => { if (!this.clusterRun.isRunning()) return; this.clusterRun.cancel(); refresh(); }); });
+    refresh();
   }
 
   private renderSecretStorageControl(containerEl: HTMLElement): void {

@@ -1,7 +1,7 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
 import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { ClusterResultStore, EmbeddingCache, EmbeddingLogStore, NoteStore } from "./storage";
-import { AtomicClustersSettingTab } from "./settings";
+import { AtomicClustersSettingTab, ClusterRunControls } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
 import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, PluginSettings } from "./types";
 import { NodeClusteringWorker } from "./worker-client";
@@ -43,7 +43,8 @@ export default class AtomicClustersPlugin extends Plugin {
     this.addCommand({ id: "open-cluster-explorer", name: "Open cluster explorer", callback: () => void this.openExplorer() });
     this.addCommand({ id: "open-embedding-log", name: "Open embedding log", callback: () => void this.openEmbeddingLog() });
     this.addCommand({ id: "cancel-clustering", name: "Cancel clustering", callback: () => this.cancelClustering() });
-    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog()));
+    const clusterRun: ClusterRunControls = { build: () => this.buildClusters(), cancel: () => this.cancelClustering(), isRunning: () => this.running };
+    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun));
   }
 
   async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; disposeLocalOrtAssets(); }
