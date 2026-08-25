@@ -76,7 +76,14 @@ async function run() {
     plugin.onResolve({ filter: /^\.\/pyodide-worker-source$/ }, () => ({ path: "pyodide-worker-source", namespace: "embedded-pyodide-worker" }));
     plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-worker" }, () => ({ contents: `export default ${JSON.stringify(pyodideWorkerSource)};`, loader: "js" }));
   } };
-  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
+  // The package export points at ort.webgpu.bundle.min.mjs, whose embedded
+  // Emscripten factory evaluates new URL(..., import.meta.url) even when
+  // wasmBinary is supplied. Use the non-bundle build so the renderer-safe
+  // JSEP module is loaded through wasmPaths and transformed into a Blob.
+  const ortWebGpuAliasPlugin = { name: "onnxruntime-webgpu-renderer-safe", setup(plugin) {
+    plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: resolve("node_modules/onnxruntime-web/dist/ort.webgpu.mjs") }));
+  } };
+  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
   if (process.argv.includes("--watch")) {
     const buildContext = await context(mainBuild);
     await buildContext.watch();

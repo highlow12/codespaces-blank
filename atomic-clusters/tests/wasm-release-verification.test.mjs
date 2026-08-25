@@ -18,4 +18,6 @@ test("release build invokes the practical verifier after checking asset presence
   assert.match(source, /requireWasm/);
   assert.match(source, /ort-wasm-simd-threaded\.jsep\.mjs/);
   assert.match(source, /ort-wasm-simd-threaded\.jsep\.wasm/);
+  assert.match(source, /onnxruntime-webgpu-renderer-safe/);
+  assert.match(source, /ort\.webgpu\.mjs/);
 });
