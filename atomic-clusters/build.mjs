@@ -75,7 +75,11 @@ async function run() {
   const titleOrtAliasPlugin = { name: "transformers-title-onnxruntime-web", setup(plugin) {
     plugin.onResolve({ filter: /^atomic-clusters-title-onnxruntime-web$/ }, () => ({ path: transformersOrtWeb }));
   } };
-  const titleWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/title-worker.ts"], plugins: [titleOrtAliasPlugin], write: false });
+  // The bootstrap seeds the shared ORT Web runtime and temporarily hides
+  // Electron's process global before Transformers.js is evaluated. Do not
+  // point this entry directly at title-worker.ts: static imports would make
+  // Transformers.js run before that setup code.
+  const titleWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/title-worker-bootstrap.ts"], plugins: [titleOrtAliasPlugin], write: false });
   const titleWorkerSource = new TextDecoder().decode(titleWorkerBuild.outputFiles[0].contents);
   const pyodideWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/pyodide-worker.ts"], plugins: [wasmBootstrap, pyodideCorePlugin], write: false });
   const pyodideWorkerSource = new TextDecoder().decode(pyodideWorkerBuild.outputFiles[0].contents);

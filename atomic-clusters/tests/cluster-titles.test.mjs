@@ -1,8 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { transform } from "esbuild";
+import { build, transform } from "esbuild";
 import { createHash } from "node:crypto";
+import vm from "node:vm";
 
 async function loadTitle() {
   let source = await readFile(new URL("../src/title.ts", import.meta.url), "utf8");
@@ -52,6 +53,61 @@ test("title build aliases the explicit ORT import to Transformers.js' pinned run
   assert.match(build, /transformersOrtWeb/);
   assert.match(build, /onnxruntime-web\/dist\/ort\.webgpu\.mjs/);
   assert.match(build, /titleOrtAliasPlugin/);
+});
+
+test("built title worker hides Electron process before Transformers.js evaluates", async () => {
+  const fakeRuntimePlugin = {
+    name: "fake-title-runtime",
+    setup(plugin) {
+      plugin.onResolve({ filter: /^atomic-clusters-title-onnxruntime-web$/ }, () => ({ path: "fake-ort", namespace: "fake-title-runtime" }));
+      plugin.onLoad({ filter: /.*/, namespace: "fake-title-runtime" }, () => ({
+        loader: "js",
+        contents: `export const env = { wasm: {} }; export const InferenceSession = {};`
+      }));
+      plugin.onResolve({ filter: /^@huggingface\/transformers$/ }, () => ({ path: "fake-transformers", namespace: "fake-title-transformers" }));
+      plugin.onLoad({ filter: /.*/, namespace: "fake-title-transformers" }, () => ({
+        loader: "js",
+        contents: `
+          const hasRuntimeOverride = Symbol.for("onnxruntime") in globalThis;
+          const detectedDevices = !hasRuntimeOverride && typeof process === "undefined" && typeof navigator !== "undefined" && "gpu" in navigator ? ["webgpu", "wasm"] : ["dml", "cpu"];
+          globalThis.__titleDetectedDevices = detectedDevices;
+          export const env = { backends: { onnx: { wasm: {} } } };
+          export async function pipeline(_task, _model, options) {
+            if (!detectedDevices.includes(options.device)) throw new Error("Unsupported device: \\"" + options.device + "\\"");
+            globalThis.__titlePipelineDevice = options.device;
+            return async () => [{ generated_text: "WebGPU title" }];
+          }
+        `
+      }));
+    }
+  };
+  const result = await build({
+    bundle: true,
+    platform: "browser",
+    target: "es2020",
+    format: "iife",
+    entryPoints: [new URL("../src/title-worker-bootstrap.ts", import.meta.url).pathname],
+    plugins: [fakeRuntimePlugin],
+    write: false
+  });
+  const source = new TextDecoder().decode(result.outputFiles[0].contents);
+  const context = vm.createContext({
+    process: { platform: "win32", release: { name: "electron" } },
+    navigator: { gpu: {} },
+    postMessage: (message) => posted.push(message),
+    console,
+    setTimeout,
+    clearTimeout
+  });
+  const posted = [];
+  vm.runInContext(source, context);
+  for (let attempt = 0; attempt < 20 && typeof context.onmessage !== "function"; attempt++) await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(typeof context.onmessage, "function");
+  const buffer = () => vm.runInContext("new ArrayBuffer(1)", context);
+  await context.onmessage({ data: { type: "INIT", model: buffer(), tokenizer: buffer(), config: buffer(), generationConfig: buffer(), tokenizerConfig: buffer(), ortWasm: buffer() } });
+  assert.equal(Array.from(context.__titleDetectedDevices).join(","), "webgpu,wasm");
+  assert.equal(context.__titlePipelineDevice, "webgpu");
+  assert.deepEqual(posted.map((message) => ({ type: message.type, backend: message.backend })), [{ type: "READY", backend: "webgpu" }]);
 });
 
 test("title prompt selection uses probability-ranked notes and bounded cleaned snippets", async () => {
