@@ -43,6 +43,9 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.match(worker, /ort-wasm-simd-threaded\.jsep\.wasm/);
   assert.match(worker, /blocked non-local asset request/);
   assert.match(worker, /input instanceof Request \? input\.url/);
+  assert.match(worker, /for \(const prompt of request\.prompts\)/);
+  assert.match(worker, /generationQueue/);
+  assert.doesNotMatch(worker, /Promise\.all\(request\.prompts/);
   // Transformers.js fills env.backends.onnx only when its backend module is
   // first loaded; checking it before pipeline() regresses to a false failure.
   assert.doesNotMatch(worker, /const onnxWasm = env\.backends\?\.onnx\?\.wasm/);
@@ -174,4 +177,40 @@ test("forced title regeneration bypasses cache reads but refreshes cache entries
   assert.equal(regenerated.titles["0"], "Fresh title");
   assert.equal(regenerated.titleGeneration.statuses["0"], "generated");
   assert.equal(runtimeCalls, 1);
+});
+
+test("title worker generation timeout terminates the worker and rejects the request", async () => {
+  const source = await readFile(new URL("../src/title-worker-client.ts", import.meta.url), "utf8");
+  const transformed = await transform(source.replace('import { TitleGenerationRuntime, TitleModelArtifact } from "./title";', ''), { loader: "ts", format: "esm", target: "es2020" });
+  const moduleUrl = `data:text/javascript;base64,${Buffer.from(transformed.code).toString("base64")}`;
+  const OriginalWorker = globalThis.Worker;
+  const OriginalCreateObjectURL = URL.createObjectURL;
+  const OriginalRevokeObjectURL = URL.revokeObjectURL;
+  const workers = [];
+  class FakeWorker {
+    onmessage = null;
+    onerror = null;
+    terminated = false;
+    constructor() { workers.push(this); }
+    postMessage(message) {
+      if (message.type === "INIT") queueMicrotask(() => this.onmessage?.({ data: { type: "READY", backend: "webgpu" } }));
+    }
+    terminate() { this.terminated = true; }
+  }
+  globalThis.Worker = FakeWorker;
+  URL.createObjectURL = () => "blob:title-test";
+  URL.revokeObjectURL = () => {};
+  try {
+    const { BrowserTitleRuntime } = await import(moduleUrl);
+    const buffer = () => new ArrayBuffer(1);
+    const runtime = new BrowserTitleRuntime("worker", { model: buffer(), tokenizer: buffer(), config: buffer(), generationConfig: buffer(), tokenizerConfig: buffer() }, buffer(), { generationTimeoutMs: 10 });
+    await assert.rejects(() => runtime.generate(["prompt"], { maxNewTokens: 12, doSample: false, temperature: 0 }), /timed out after 10ms/);
+    assert.equal(workers.length, 1);
+    assert.equal(workers[0].terminated, true);
+    await assert.rejects(() => runtime.generate(["prompt"], { maxNewTokens: 12, doSample: false, temperature: 0 }), /no longer available/);
+  } finally {
+    globalThis.Worker = OriginalWorker;
+    URL.createObjectURL = OriginalCreateObjectURL;
+    URL.revokeObjectURL = OriginalRevokeObjectURL;
+  }
 });

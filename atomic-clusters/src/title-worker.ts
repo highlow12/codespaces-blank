@@ -9,6 +9,7 @@ import * as ortWeb from "atomic-clusters-title-onnxruntime-web";
 type Message = { type: "INIT"; model: ArrayBuffer; tokenizer: ArrayBuffer; config: ArrayBuffer; generationConfig: ArrayBuffer; tokenizerConfig: ArrayBuffer; ortWasm: ArrayBuffer } | { type: "GENERATE"; id: number; prompts: string[]; maxNewTokens: number; signal?: boolean };
 const scope = globalThis as typeof globalThis & { postMessage?: (value: unknown) => void; onmessage?: (event: MessageEvent<Message>) => void; fetch: typeof fetch };
 let generator: any;
+let generationQueue: Promise<void> = Promise.resolve();
 const assetFiles = new Map<string, ArrayBuffer>();
 type OnnxRuntimeEnvironment = { wasm?: { wasmPaths?: string | Record<string, string>; wasmBinary?: ArrayBuffer; proxy?: boolean } };
 type OnnxRuntimeModule = { env?: OnnxRuntimeEnvironment };
@@ -64,11 +65,21 @@ scope.onmessage = async (event: MessageEvent<Message>) => {
     }
     if (!generator) throw new Error("Title worker is not initialized.");
     const request = event.data as Extract<Message, { type: "GENERATE" }>;
-    const values = await Promise.all(request.prompts.map(async (prompt) => {
-      const output = await generator(prompt, { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, return_full_text: false });
-      const item = Array.isArray(output) ? output[0] : output;
-      return typeof item === "string" ? item : String(item?.generated_text || item?.text || "");
-    }));
-    scope.postMessage?.({ type: "RESULT", id: request.id, values });
+    // WebGPU inference is stateful and can retain a sizeable activation set.
+    // Starting several generations at once can deadlock Chromium's WebGPU
+    // queue (and leaves the client waiting forever), so keep the public batch
+    // API but issue exactly one generation at a time, including across
+    // overlapping requests.
+    const queuedGeneration = generationQueue.catch(() => undefined).then(async () => {
+      const values: string[] = [];
+      for (const prompt of request.prompts) {
+        const output = await generator(prompt, { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, return_full_text: false });
+        const item = Array.isArray(output) ? output[0] : output;
+        values.push(typeof item === "string" ? item : String(item?.generated_text || item?.text || ""));
+      }
+      scope.postMessage?.({ type: "RESULT", id: request.id, values });
+    });
+    generationQueue = queuedGeneration;
+    await queuedGeneration;
   } catch (error) { scope.postMessage?.({ type: "ERROR", id: (event.data as any).id, message: error instanceof Error ? error.message : String(error) }); }
 };
