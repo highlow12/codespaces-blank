@@ -10,3 +10,5 @@
 .atomic-clusters-progress-detail { color: var(--text-muted); font-size: var(--font-ui-small); margin: 3px 0; overflow-wrap: anywhere; }
 .atomic-clusters-progress-bar, .atomic-clusters-model-progress { width: 100%; accent-color: var(--interactive-accent); }
 .atomic-clusters-model-status { color: var(--text-muted); font-size: var(--font-ui-small); margin-top: 4px; max-width: 280px; overflow-wrap: anywhere; }
+.atomic-clusters-umap { width: 100%; height: 280px; margin: 8px 0 16px; border: 1px solid var(--background-modifier-border); border-radius: 6px; overflow: hidden; }
+.atomic-clusters-umap-canvas { display: block; width: 100%; height: 100%; }
