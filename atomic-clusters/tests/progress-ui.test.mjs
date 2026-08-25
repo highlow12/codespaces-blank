@@ -47,6 +47,11 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(main, /runSignal/);
   assert.match(main, /\.abort\(\)/);
   assert.match(main, /Clustering cancelled/);
+  assert.match(main, /InProcessClusteringWorker/);
+  assert.match(main, /BrowserClusteringWorker/);
+  assert.match(main, /browserWorkerSource/);
+  assert.match(main, /Worker APIs unavailable; clustering in process/);
+  assert.match(main, /nodeWorker\.init/);
   assert.match(progress, /new Notice\("", 0\)/);
   assert.match(progress, /setTimeout\(\(\) => this\.hide/);
   assert.match(css, /atomic-clusters-progress-notice/);

@@ -4,9 +4,10 @@ import { ClusterResultStore, EmbeddingCache, EmbeddingLogStore, NoteStore } from
 import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
 import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, PluginSettings } from "./types";
-import { NodeClusteringWorker } from "./worker-client";
+import { BrowserClusteringWorker, InProcessClusteringWorker, NodeClusteringWorker } from "./worker-client";
 import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
+import browserWorkerSource from "./browser-worker-source";
 import { isAbsolute, resolve, sep } from "node:path";
 import { shell } from "electron";
 import { AtomicClustersProgress } from "./progress";
@@ -21,7 +22,7 @@ const DEFAULT_SETTINGS: PluginSettings = {
 
 export default class AtomicClustersPlugin extends Plugin {
   settings!: PluginSettings;
-  private worker: NodeClusteringWorker | PyodideClusteringWorker | null = null;
+  private worker: NodeClusteringWorker | BrowserClusteringWorker | InProcessClusteringWorker | PyodideClusteringWorker | null = null;
   private latestResult: ClusterResult | null = null;
   private running = false;
   private localModelManager!: LocalModelManager;
@@ -126,7 +127,7 @@ export default class AtomicClustersPlugin extends Plugin {
       if (vectors.some((vector) => !vector)) throw new Error("Embedding cache is incomplete; please run the build again.");
       const ids = activeNotes.map((note) => note.path);
       const worker = await this.getWorker();
-      progress.update({ phase: "clustering", progress: 0.84, detail: `Clustering ${activeNotes.length} notes` });
+      progress.update({ phase: "clustering", progress: 0.84, detail: `${worker instanceof InProcessClusteringWorker ? "Worker APIs unavailable; clustering in process" : worker instanceof BrowserClusteringWorker ? "Using Chromium worker fallback" : "Clustering"} · ${activeNotes.length} notes` });
       const config: ClusteringConfig = { minClusterSize: this.settings.minClusterSize, minSamples: this.settings.minSamples, umapNeighbors: this.settings.umapNeighbors, umapMinDist: this.settings.umapMinDist, pcaVarianceTarget: this.settings.pcaVarianceTarget, seed: 42 };
       this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
       await new ClusterResultStore(this.app.vault).save(this.latestResult); await this.publishResult(this.latestResult); progress.complete(`Built ${this.latestResult.hierarchy.leaves.length} clusters`);
@@ -157,11 +158,27 @@ export default class AtomicClustersPlugin extends Plugin {
     }
   }
 
-  private async getWorker(): Promise<NodeClusteringWorker | PyodideClusteringWorker> {
+  private async getWorker(): Promise<NodeClusteringWorker | BrowserClusteringWorker | InProcessClusteringWorker | PyodideClusteringWorker> {
     if (!this.worker) {
       if (this.settings.clusteringRuntime === "pyodide") this.worker = new PyodideClusteringWorker({ pyodideUrl: this.settings.pyodideUrl || undefined });
-      else this.worker = new NodeClusteringWorker(workerSource);
-      await this.worker.init();
+      else {
+        const nodeWorker = new NodeClusteringWorker(workerSource);
+        this.worker = nodeWorker;
+        try { await nodeWorker.init(); }
+        catch (error) {
+          await nodeWorker.terminate().catch(() => undefined);
+          const browserWorker = new BrowserClusteringWorker(browserWorkerSource);
+          try { await browserWorker.init(); this.worker = browserWorker; new Notice(`Node worker unavailable; using Chromium worker fallback: ${error instanceof Error ? error.message : String(error)}`); }
+          catch (browserError) {
+            await browserWorker.terminate().catch(() => undefined);
+            const fallback = new InProcessClusteringWorker();
+            this.worker = fallback;
+            await fallback.init();
+            new Notice(`Worker APIs unavailable; using in-process fallback: ${browserError instanceof Error ? browserError.message : String(browserError)}`);
+          }
+        }
+      }
+      if (this.settings.clusteringRuntime === "pyodide") await this.worker.init();
     }
     return this.worker;
   }

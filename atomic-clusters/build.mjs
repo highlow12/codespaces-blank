@@ -66,6 +66,8 @@ async function run() {
   };
   const workerBuild = await build({ ...common, entryPoints: ["src/worker.ts"], platform: "node", plugins: [wasmBootstrap], write: false });
   const workerSource = new TextDecoder().decode(workerBuild.outputFiles[0].contents);
+  const browserWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/browser-worker.ts"], plugins: [wasmBootstrap], write: false });
+  const browserWorkerSource = new TextDecoder().decode(browserWorkerBuild.outputFiles[0].contents);
   const pyodideWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/pyodide-worker.ts"], plugins: [wasmBootstrap, pyodideCorePlugin], write: false });
   const pyodideWorkerSource = new TextDecoder().decode(pyodideWorkerBuild.outputFiles[0].contents);
   const workerPlugin = { name: "embedded-worker", setup(plugin) {
@@ -76,6 +78,10 @@ async function run() {
     plugin.onResolve({ filter: /^\.\/pyodide-worker-source$/ }, () => ({ path: "pyodide-worker-source", namespace: "embedded-pyodide-worker" }));
     plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-worker" }, () => ({ contents: `export default ${JSON.stringify(pyodideWorkerSource)};`, loader: "js" }));
   } };
+  const browserWorkerPlugin = { name: "embedded-browser-worker", setup(plugin) {
+    plugin.onResolve({ filter: /^\.\/browser-worker-source$/ }, () => ({ path: "atomic-clusters-browser-worker-source", namespace: "embedded-browser-worker" }));
+    plugin.onLoad({ filter: /.*/, namespace: "embedded-browser-worker" }, () => ({ contents: `export default ${JSON.stringify(browserWorkerSource)};`, loader: "js" }));
+  } };
   // The package export points at ort.webgpu.bundle.min.mjs, whose embedded
   // Emscripten factory evaluates new URL(..., import.meta.url) even when
   // wasmBinary is supplied. Use the non-bundle build so the renderer-safe
@@ -83,7 +89,7 @@ async function run() {
   const ortWebGpuAliasPlugin = { name: "onnxruntime-webgpu-renderer-safe", setup(plugin) {
     plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: resolve("node_modules/onnxruntime-web/dist/ort.webgpu.mjs") }));
   } };
-  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
+  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, browserWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
   if (process.argv.includes("--watch")) {
     const buildContext = await context(mainBuild);
     await buildContext.watch();
