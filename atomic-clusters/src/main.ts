@@ -1,5 +1,5 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
-import { GeminiEmbeddingProvider, LocalEmbeddingProvider, SecretResolver } from "./embedding";
+import { configureLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { ClusterResultStore, EmbeddingCache, NoteStore } from "./storage";
 import { AtomicClustersSettingTab } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
@@ -7,6 +7,7 @@ import { ClusteringConfig, ClusterResult, PluginSettings } from "./types";
 import { NodeClusteringWorker } from "./worker-client";
 import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
+import { pathToFileURL } from "node:url";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
@@ -20,14 +21,19 @@ export default class AtomicClustersPlugin extends Plugin {
   private worker: NodeClusteringWorker | PyodideClusteringWorker | null = null;
   private latestResult: ClusterResult | null = null;
   private running = false;
+  private localModelManager!: LocalModelManager;
 
   async onload(): Promise<void> {
+    // Obsidian desktop loads main.js as a CommonJS plugin module. Resolve the
+    // ORT assets beside that bundle instead of relying on document cwd.
+    configureLocalOrtAssets(pathToFileURL(`${__dirname}/`).href);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings> || {});
+    this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf));
     this.addCommand({ id: "build-note-clusters", name: "Build note clusters", callback: () => void this.buildClusters() });
     this.addCommand({ id: "open-cluster-explorer", name: "Open cluster explorer", callback: () => void this.openExplorer() });
     this.addCommand({ id: "cancel-clustering", name: "Cancel clustering", callback: () => this.cancelClustering() });
-    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings()));
+    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager));
   }
 
   async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; }
@@ -42,7 +48,7 @@ export default class AtomicClustersPlugin extends Plugin {
       const cache = new EmbeddingCache(this.app.vault); const entries = await cache.load();
       const provider = this.settings.embeddingProvider === "gemini"
         ? new GeminiEmbeddingProvider(this.settings, this.secretResolver(), (count) => this.confirmGeminiTransmission(count))
-        : new LocalEmbeddingProvider(this.settings);
+        : new LocalEmbeddingProvider(this.settings, undefined, this.localModelManager);
       const fresh = notes.filter((note) => !cache.get(note, provider.id, provider.model, entries));
       const embedded = fresh.length ? await provider.embed(fresh, (done, total) => new Notice(`Embedding ${done}/${total}`)) : [];
       embedded.forEach((item) => entries.set(`${item.provider}:${item.model}:${item.path}`, item)); await cache.save(entries.values());

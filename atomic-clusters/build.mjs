@@ -2,6 +2,7 @@ import { build, context } from "esbuild";
 import { cp, mkdir, readFile, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { verifyWasmAsset } from "./scripts/verify-wasm.mjs";
 
 const common = {
   bundle: true,
@@ -22,6 +23,7 @@ async function run() {
   if (requireWasm && (!existsSync(gluePath) || !existsSync(wasmPath))) {
     throw new Error("Release build requires wasm-core/pkg. Run npm run build:wasm first.");
   }
+  if (requireWasm) await verifyWasmAsset(gluePath, wasmPath);
   const wasmBootstrap = {
     name: "atomic-clusters-wasm-bootstrap",
     setup(plugin) {
@@ -84,5 +86,11 @@ async function run() {
   await build(mainBuild);
   await cp("manifest.json", "dist/manifest.json");
   await cp("styles.css", "dist/styles.css");
+  // onnxruntime-web/wasm resolves its worker and binary next to the plugin
+  // bundle. Ship only the selected WASM execution-provider assets; inference
+  // remains local after the model has been explicitly downloaded.
+  const ortAssets = resolve("node_modules/onnxruntime-web/dist");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.mjs"), "dist/ort-wasm-simd-threaded.mjs");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.wasm"), "dist/ort-wasm-simd-threaded.wasm");
 }
 run().catch((error) => { console.error(error); process.exitCode = 1; });

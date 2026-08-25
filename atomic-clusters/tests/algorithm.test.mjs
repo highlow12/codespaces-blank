@@ -57,11 +57,14 @@ test("Community release embeds the worker and confirms remote transmission", asy
   assert.match(embedding, /outputDimensionality: 768/);
 });
 
-test("local provider is explicit about unavailable runtime assets", async () => {
+test("local provider requires explicit model installation and keeps inference offline", async () => {
   const settings = await readFile(new URL("../src/settings.ts", import.meta.url), "utf8");
   const embedding = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
-  assert.match(settings, /Unavailable in this build/);
-  assert.match(embedding, /no ONNX runtime\/model asset is bundled/);
+  assert.match(settings, /explicit consent/);
+  assert.match(settings, /Delete/);
+  assert.match(embedding, /downloadModel/);
+  assert.match(embedding, /embed\(\) never reaches this function/);
+  assert.match(embedding, /SHA-256/);
 });
 
 test("PCA selection uses sharp, smooth, and flat k-NN preservation curves", async () => {

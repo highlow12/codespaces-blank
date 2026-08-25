@@ -18,8 +18,12 @@ Atomic Clusters의 목표는 Obsidian desktop에서 Markdown vault를 노트 간
   Google Gemini로 보낸다. API key는 Obsidian `SecretStorage` reference로만 읽고
   plugin settings에 저장하지 않는다. 따라서 Gemini 임베딩 생성 자체는 offline
   작업이 아니다.
-- `local` provider와 `multilingual-e5-small` 경계는 있지만 현재 빌드에는 ONNX
-  runner와 model asset이 없어 실행할 수 없다. local inference는 후속 작업이다.
+- `local` provider는 Settings의 명시적 동의 후 multilingual-e5-small ONNX
+  모델과 tokenizer를 내려받아 설치한다. 버전·SHA-256 manifest를 함께 저장하고
+  삭제도 제공하므로 설치 이후 `embed()`는 네트워크 없이 동작한다. ONNX
+  execution/tokenizer binding은 bundled `onnxruntime-web/wasm`와 offline
+  SentencePiece Unigram tokenizer를 사용한다. 대체 execution provider를 위한
+  injection seam도 유지한다.
 
 ## 현재 desktop 구조
 
@@ -254,8 +258,9 @@ git diff --check
 
 ## 산출물과 저장 위치
 
-- build: `atomic-clusters/dist/main.js`, `dist/manifest.json`, `dist/styles.css`.
-  worker source는 `main.js`에 embedded된다.
+- build: `atomic-clusters/dist/main.js`, `dist/manifest.json`, `dist/styles.css`와
+  `dist/ort-wasm-simd-threaded.mjs/.wasm`. worker source와 Python core는
+  `main.js`에 embedded되고, ORT assets는 plugin bundle 옆에서 로드된다.
 - generated numerical asset: `atomic-clusters/wasm-core/pkg/`의 wasm-bindgen
   JS/WASM. packaged plugin은 이를 bundle하고 runtime download를 하지 않는다.
 - vault runtime cache: `.obsidian/plugins/atomic-clusters/embedding-cache.json`.
@@ -274,8 +279,9 @@ git diff --check
 
 - `umap-js`와 authoritative `umap-learn`은 동일 구현이 아니므로 seed가 같아도
   좌표·HDBSCAN 결과가 같다고 볼 수 없다.
-- local `multilingual-e5-small`은 UI boundary만 있고 ONNX runtime/model asset이
-  없어 실제 offline embedding을 생성하지 못한다.
+- local `multilingual-e5-small`은 명시적 다운로드·삭제와 versioned integrity
+  manifest를 제공한다. 설치 후 추론은 bundled ONNX WASM runtime과
+  SentencePiece tokenizer로 offline 동작한다.
 - Gemini provider는 사용자 확인을 전제로 하는 명시적 network 예외이며,
   embedding 생성과 cache warm-up을 완전 offline으로 만들지는 않는다.
 - WASM이 빠진 개발 빌드의 JS density-graph fallback은 HDBSCAN parity 경로가
@@ -286,8 +292,6 @@ git diff --check
 - exact Euclidean MST와 UMAP은 3,000행에서도 측정상 수 분이 걸린다. worker
   cancellation 경계, memory pressure, 더 큰 vault의 UX를 계속 측정해야 한다.
 
-다음 우선순위는 (1) Python/WASM golden fixture로 PCA·UMAP·HDBSCAN 허용오차와
-  결과 계약을 고정하고, (2) release build에 WASM asset 검증을 포함하며,
-  (3) local ONNX provider와 model download/삭제·disclosure UX를 구현하고,
-  (4) 외부 HDBSCAN provider 및 memberships를 audit하고, (5) 3,000행 이상
+다음 우선순위는 (1) 외부 HDBSCAN provider 및 memberships를 audit하고, (2)
+  3,000행 이상
   vault에서 tiled memory/performance와 progress/cancel UX를 재측정하는 것이다.

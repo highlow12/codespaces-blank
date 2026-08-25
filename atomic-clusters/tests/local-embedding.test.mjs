@@ -1,0 +1,77 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { transform } from "esbuild";
+
+async function loadEmbedding() {
+  const source = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
+  const stubbed = source
+    .replace('import { requestUrl } from "obsidian";', 'const requestUrl = async ({ url }) => ({ arrayBuffer: new TextEncoder().encode(url.includes("tokenizer") ? "tokenizer" : "onnx").buffer });')
+    .replace('import * as ort from "onnxruntime-web/wasm";', 'const ort = { env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };');
+  const result = await transform(stubbed, { loader: "ts", format: "esm", target: "es2020" });
+  return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
+}
+
+class MemoryStorage {
+  files = new Map();
+  async exists(path) { return this.files.has(path); }
+  async read(path) { if (!this.files.has(path)) throw new Error(`missing ${path}`); return this.files.get(path); }
+  async write(path, value) { this.files.set(path, value); }
+  async remove(path) { this.files.delete(path); }
+}
+
+test("local model installation is explicit, integrity checked, and deletable", async () => {
+  const { LocalModelManager } = await loadEmbedding();
+  const storage = new MemoryStorage();
+  const manager = new LocalModelManager(storage);
+  assert.equal(await manager.status(), "missing");
+  await assert.rejects(() => manager.downloadModel(async () => false), /cancelled/);
+  await manager.downloadModel(async () => true);
+  assert.equal(await manager.status(), "installed");
+  const artifact = await manager.load();
+  assert.ok(artifact.model.byteLength > 0);
+  storage.files.set("multilingual-e5-small/2024-05-01/model.onnx", new Uint8Array([0]).buffer);
+  assert.equal(await manager.status(), "corrupt");
+  await manager.deleteModel();
+  assert.equal(await manager.status(), "missing");
+});
+
+test("local provider versions cache keys and validates 384-dimensional vectors", async () => {
+  const { LocalEmbeddingProvider, LOCAL_MODEL_VERSION } = await loadEmbedding();
+  const settings = { localModel: "multilingual-e5-small" };
+  const notes = [{ path: "a.md", title: "A", content: "hello", hash: "h", mtime: 1 }];
+  const provider = new LocalEmbeddingProvider(settings, async () => [new Array(384).fill(0).map((_, index) => index / 384)]);
+  const result = await provider.embed(notes);
+  assert.equal(result[0].model, `multilingual-e5-small@${LOCAL_MODEL_VERSION}`);
+  await assert.rejects(() => new LocalEmbeddingProvider(settings, async () => [[1, 2]]).embed(notes), /384-dimensional/);
+});
+
+test("ORT runtime mean-pools masked tokens and emits unit vectors", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  const fakeSession = { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run() { return { last_hidden_state: { dims: [1, 2, 2], data: new Float32Array([3, 0, 0, 4]) } }; } };
+  const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return fakeSession; } } };
+  const runtime = new OrtEmbeddingRuntime(ort, { encode() { return { inputIds: [[1, 2]], attentionMask: [[1, 0]] }; } });
+  const [vector] = await runtime.embed(["passage: test"], { model: new ArrayBuffer(1) });
+  assert.equal(vector.length, 2);
+  assert.ok(Math.abs(Math.hypot(...vector) - 1) < 1e-6);
+  assert.ok(vector[0] > 0.99 && Math.abs(vector[1]) < 1e-6);
+});
+
+test("default factory uses bundled Unigram tokenizer and ORT runtime without an override", async () => {
+  const { defaultLocalRuntimeFactory } = await loadEmbedding();
+  const tokenizer = JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["hello", -0.2], ["world", -0.3], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] });
+  const runtime = await defaultLocalRuntimeFactory({ model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer });
+  const vectors = await runtime.embed(["hello world"], { model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer });
+  assert.equal(vectors.length, 1);
+  assert.equal(vectors[0].length, 2);
+  assert.ok(Math.abs(Math.hypot(...vectors[0]) - 1) < 1e-6);
+});
+
+test("desktop CJS bundle can point ORT at its adjacent plugin assets", async () => {
+  const { configureLocalOrtAssets, getLocalOrtAssetPrefix } = await loadEmbedding();
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters");
+  assert.equal(getLocalOrtAssetPrefix(), "file:///vault/.obsidian/plugins/atomic-clusters/");
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /pathToFileURL\(`\$\{__dirname\}\/`\)\.href/);
+  assert.match(main, /configureLocalOrtAssets/);
+});
