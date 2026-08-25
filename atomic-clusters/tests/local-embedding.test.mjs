@@ -21,8 +21,9 @@ async function loadOrtAssets() {
 
 class MemoryStorage {
   files = new Map();
+  reads = [];
   async exists(path) { return this.files.has(path); }
-  async read(path) { if (!this.files.has(path)) throw new Error(`missing ${path}`); return this.files.get(path); }
+  async read(path) { this.reads.push(path); if (!this.files.has(path)) throw new Error(`missing ${path}`); return this.files.get(path); }
   async write(path, value) { this.files.set(path, value); }
   async remove(path) { this.files.delete(path); }
 }
@@ -38,10 +39,14 @@ test("local model installation is explicit, integrity checked, and deletable", a
   assert.deepEqual(progress.map((update) => update.phase), ["consent", "consent", "model", "model", "tokenizer", "tokenizer", "verify", "install", "complete"]);
   assert.equal(progress.at(-1).progress, 1);
   assert.equal(await manager.status(), "installed");
+  assert.deepEqual(storage.reads, ["multilingual-e5-small/2024-05-01/manifest.json"]);
   const artifact = await manager.load();
   assert.ok(artifact.model.byteLength > 0);
   storage.files.set("multilingual-e5-small/2024-05-01/model.onnx", new Uint8Array([0]).buffer);
-  assert.equal(await manager.status(), "corrupt");
+  storage.reads = [];
+  assert.equal(await manager.status(), "installed");
+  assert.deepEqual(storage.reads, ["multilingual-e5-small/2024-05-01/manifest.json"]);
+  assert.equal(await manager.verifyStatus(), "corrupt");
   await manager.deleteModel();
   assert.equal(await manager.status(), "missing");
 });
@@ -271,6 +276,7 @@ test("pinned JSEP/WebGPU ORT renderer transform handles its asset name", async (
   assert.match(transformed, /var isNode = false/);
   assert.match(transformed, /data:application\/wasm;base64/);
   assert.match(transformed, /if \(false\) isPthread/);
+  assert.doesNotMatch(transformed, /new URL\("\.\/",import\.meta\.url\)|new URL\(import\.meta\.url\)/);
   assert.doesNotMatch(transformed, /new URL\("ort-wasm-simd-threaded\.jsep\.wasm",import\.meta\.url\)/);
 });
 
