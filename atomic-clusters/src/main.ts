@@ -10,7 +10,7 @@ import workerSource from "./worker-source";
 import { isAbsolute, resolve, sep } from "node:path";
 import { shell } from "electron";
 import { AtomicClustersProgress } from "./progress";
-import { resolveLocalOrtAssetPrefix } from "./ort-assets";
+import { prepareLocalOrtRendererModule, resolveLocalOrtAssetPrefix } from "./ort-assets";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
@@ -56,7 +56,8 @@ export default class AtomicClustersPlugin extends Plugin {
     if (!(await adapter.exists(mjsPath)) || !(await adapter.exists(wasmPath))) return;
     if (typeof Blob === "undefined" || typeof URL.createObjectURL !== "function") return;
     const [mjsBytes, wasmBinary] = await Promise.all([adapter.readBinary(mjsPath), adapter.readBinary(wasmPath)]);
-    const mjsUrl = URL.createObjectURL(new Blob([mjsBytes], { type: "text/javascript" }));
+    const mjsSource = prepareLocalOrtRendererModule(new TextDecoder().decode(mjsBytes));
+    const mjsUrl = URL.createObjectURL(new Blob([mjsSource], { type: "text/javascript" }));
     configureLocalOrtAssets(prefix, { mjs: mjsUrl, wasmBinary, revoke: () => URL.revokeObjectURL(mjsUrl) });
   }
 

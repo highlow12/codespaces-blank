@@ -140,6 +140,22 @@ test("ORT assets resolve from a Windows vault path with spaces and manifest.dir"
   assert.equal(fallback, prefix);
 });
 
+test("pinned ORT renderer transform disables both Electron Node-detection branches", async () => {
+  const { prepareLocalOrtRendererModule } = await loadOrtAssets();
+  const source = 'var B="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node,C=0;if(B){const {createRequire:a}=await import("module");var D=require("worker_threads");}if(B){var fs=require("fs");}if(C){if(B){var port=require("worker_threads");}}var isNode = typeof globalThis.process?.versions?.node == \'string\';if (isNode) isPthread = (await import(\'worker_threads\')).workerData === \'em-pthread\';';
+  const transformed = prepareLocalOrtRendererModule(source);
+  assert.match(transformed, /B=false/);
+  assert.equal((transformed.match(/if\(false\)\{/g) || []).length, 3);
+  assert.match(transformed, /var isNode = false/);
+  assert.match(transformed, /if \(false\) isPthread/);
+  assert.doesNotMatch(transformed, /if\(B\)\{|if \(isNode\)/);
+});
+
+test("ORT renderer transform rejects an unexpected asset format", async () => {
+  const { prepareLocalOrtRendererModule } = await loadOrtAssets();
+  assert.throws(() => prepareLocalOrtRendererModule("not an ORT module"), /Unsupported ORT/);
+});
+
 test("desktop bundle resolves ORT assets from vault instead of eval-loader __dirname", async () => {
   const { configureLocalOrtAssets, getLocalOrtAssetPrefix } = await loadEmbedding();
   configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters");
