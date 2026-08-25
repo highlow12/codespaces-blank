@@ -5,7 +5,7 @@ import { ClusterResult, ClusterTitleCacheEntry, ClusterTitleStatus, HierarchyMer
 export const TITLE_MODEL_ID = "qwen2.5-0.5b-instruct";
 export const TITLE_MODEL_REVISION = "516c8d04add8a80c5228f32102b57953b8d421a9";
 export const TITLE_MODEL_MODEL_SHA256 = "b11c1dd99efd57e6c6e5bc4443a019931a5fbd5dd500d48644d8225f5ce0b2cb";
-export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v1";
+export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v2-chat-clean-validated";
 export const TITLE_MODEL_DESCRIPTOR = {
   id: TITLE_MODEL_ID,
   revision: TITLE_MODEL_REVISION,
@@ -118,18 +118,57 @@ export class TitleModelManager {
 }
 
 export interface TitlePrompt { nodeId: number; members: number[]; memberFingerprint: string; text: string; }
-export interface TitleGenerationRuntime { generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; signal?: AbortSignal }): Promise<string[]>; diagnostics?: { backend: "webgpu" | "unavailable" }; }
+export interface TitleGenerationRuntime { generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; repetitionPenalty?: number; noRepeatNgramSize?: number; signal?: AbortSignal }): Promise<string[]>; diagnostics?: { backend: "webgpu" | "unavailable" }; }
 
 /** A runtime seam keeps model orchestration testable and makes GPU failure non-fatal. */
 export type TitleRuntimeFactory = (artifact: TitleModelArtifact) => Promise<TitleGenerationRuntime>;
 export const unavailableTitleRuntime: TitleRuntimeFactory = async () => { throw new Error("Transformers.js WebGPU title runtime is unavailable"); };
 
-export function sanitizeTitle(raw: string): string {
-  return raw.replace(/```[\s\S]*?```/g, "").replace(/[\r\n]+/g, " ").replace(/^["'“”‘’]+|["'“”‘’]+$/g, "").replace(/^\s*(?:title|제목)\s*[:：-]\s*/i, "").replace(/\s+/g, " ").trim().slice(0, 48).trim();
+/** Remove presentation syntax before it can become a title signal. */
+export function cleanText(raw: string, limit = 300): string {
+  let text = raw.replace(/^\uFEFF?---\s*(?:\r?\n)[\s\S]*?(?:\r?\n)---\s*(?:\r?\n|$)/, " ");
+  text = text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, " ").replace(/`[^`\n]+`/g, " ");
+  text = text.replace(/!\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]/g, " ");
+  text = text.replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (_match, target: string, alias?: string) => alias || target.split("/").pop() || "");
+  text = text.replace(/!\[[^\]]*\]\([^)]*\)/g, " ").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1");
+  text = text.replace(/https?:\/\/\S+|www\.\S+/gi, " ");
+  text = text.replace(/^\s*(?:[-*+•]|\d+[.)])\s*(?:\[[ xX]\]\s*)?/gm, "").replace(/^\s*\[[ xX]\]\s*/gm, "");
+  text = text.replace(/(^|\s)[#>*_~]+(?=\S)/g, "$1").replace(/[\*_`~]+/g, " ");
+  // Paths and repeated punctuation/tokens are common prompt-injection noise.
+  text = text.replace(/(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.-]+/g, " ").replace(/([!?.,;:])\1+/g, "$1");
+  for (let i = 0; i < 3; i++) text = text.replace(/\b(\S+)(?:\s+\1){1,}\b/gi, "$1");
+  return text.replace(/\s+/g, " ").trim().slice(0, limit).trim();
 }
 
-export function cleanNoteText(note: NoteRecord): string {
-  return note.content.replace(/^---[\s\S]*?---\s*/m, "").replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/[`*_>#~-]/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+export function cleanNoteText(note: NoteRecord, limit = 260): string { return cleanText(note.content, limit); }
+export function cleanNoteTitle(title: string): string { return cleanText(title.replace(/\.(?:md|markdown)$/i, ""), 100).replace(/[|:：]+/g, " ").replace(/\s+/g, " ").trim(); }
+
+/** Normalize a model response without allowing markdown or a prompt label to leak into the UI. */
+export function sanitizeTitle(raw: string): string {
+  let title = String(raw || "").replace(/```[\s\S]*?```/g, " ").replace(/[\r\n]+/g, " ");
+  title = title.replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, "").trim();
+  title = title.replace(/^\s*(?:assistant|answer|title|제목)\s*[:：-]\s*/i, "");
+  title = title.replace(/^\s*(?:[-*+•]|\d+[.)])\s*(?:\[[ xX]\]\s*)?/, "").replace(/^\s*\[[ xX]\]\s*/, "");
+  title = title.replace(/!\[\[[^\]]+\]\]/g, " ").replace(/\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/g, (_match, target: string, alias?: string) => alias || target.split("/").pop() || "");
+  title = title.replace(/https?:\/\/\S+|www\.\S+/gi, "").replace(/[\*_`~#]+/g, " ");
+  title = title.replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, "");
+  title = title.replace(/([!?.,;:])\1+/g, "$1").replace(/\s+/g, " ").trim();
+  return title.slice(0, 48).trim();
+}
+
+export interface TitleValidation { valid: boolean; reason?: string; }
+export function validateTitle(raw: string, prompt = ""): TitleValidation {
+  const title = sanitizeTitle(raw);
+  if (!title) return { valid: false, reason: "empty output" };
+  if (/\[[ xX]\]|```|\[\[[^\]]+\]\]|https?:\/\/|www\./i.test(title)) return { valid: false, reason: "markdown, checkbox, or URL residue" };
+  if (/^(?:[-*+•]|\d+[.)])\s/.test(title) || /^(?:\d+\s*)+$/.test(title) || (!/[A-Za-z\u00c0-\uFFFF]/u.test(title) && /^[\d\W_]+$/.test(title))) return { valid: false, reason: "list or numeric garbage" };
+  if (/\b(\S+)(?:\s+\1){1,}\b/i.test(title) || /(.)\1{4,}/u.test(title)) return { valid: false, reason: "repeated phrase" };
+  const words = title.split(/\s+/).filter(Boolean);
+  const cjk = /[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/u.test(title);
+  if ((!cjk && (words.length < 2 || words.length > 6)) || (cjk && (words.length > 6 || title.length < 2))) return { valid: false, reason: "title must contain 2-6 words" };
+  const context = prompt.split(/Representative context[^\n]*:\s*/i)[1] || "";
+  if (title.length >= 24 && context.includes(title)) return { valid: false, reason: "copied representative text" };
+  return { valid: true };
 }
 export function selectRepresentativeNotes(notes: NoteRecord[], members: number[], probabilities: number[], limit = 6): NoteRecord[] {
   return members.map((index) => ({ index, note: notes[index] })).filter((entry) => entry.note).sort((a, b) => (probabilities[b.index] ?? 0) - (probabilities[a.index] ?? 0) || a.note.path.localeCompare(b.note.path)).slice(0, limit).map((entry) => entry.note);
@@ -140,6 +179,21 @@ export function stableFingerprint(values: string[]): string {
   for (const value of values) for (let i = 0; i < value.length; i++) { hash ^= value.charCodeAt(i); hash = Math.imul(hash, 16777619); }
   return (hash >>> 0).toString(16).padStart(8, "0");
 }
+
+function dominantLanguage(text: string): string {
+  const korean = (text.match(/[가-힣]/g) || []).length;
+  const japanese = (text.match(/[ぁ-ゟ゠-ヿ]/g) || []).length;
+  const chinese = (text.match(/[一-鿿]/g) || []).length;
+  const latin = (text.match(/[A-Za-z]/g) || []).length;
+  if (korean > Math.max(japanese, chinese, latin)) return "Korean";
+  if (japanese > Math.max(korean, chinese, latin)) return "Japanese";
+  if (chinese > Math.max(korean, japanese, latin)) return "Chinese";
+  if (latin) return "English";
+  return "the dominant language of the input";
+}
+
+export const TITLE_SYSTEM_PROMPT = "You name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.";
+
 export function nodeMembers(result: ClusterResult): Map<number, number[]> {
   const groups = new Map<number, number[]>(); result.leafLabels.forEach((label, index) => { if (label >= 0) groups.set(label, [...(groups.get(label) || []), index]); });
   const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge]));
@@ -152,10 +206,12 @@ export function buildTitlePrompts(result: ClusterResult, notes: NoteRecord[], la
   const membersByNode = nodeMembers(result); const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge])); const prompts: TitlePrompt[] = [];
   const ordered = [...membersByNode.keys()].sort((a, b) => (merges.has(a) ? 1 : 0) - (merges.has(b) ? 1 : 0) || a - b);
   for (const nodeId of ordered) {
-    const members = membersByNode.get(nodeId)!; const representative = selectRepresentativeNotes(notes, members, result.probabilities);
+    const members = membersByNode.get(nodeId)!; const isMerge = merges.has(nodeId); const representative = selectRepresentativeNotes(notes, members, result.probabilities, isMerge ? 2 : 6);
     const children = merges.get(nodeId) ? [merges.get(nodeId)!.left, merges.get(nodeId)!.right].map((id) => result.titles?.[String(id)]).filter(Boolean) : [];
-    const snippets = representative.map((note) => `- ${note.title}: ${cleanNoteText(note)}`).join("\n");
-    prompts.push({ nodeId, members, memberFingerprint: stableFingerprint(members.map((member) => `${result.ids[member]}:${notes[member]?.hash || ""}`)), text: `Generate exactly one concise title of 2-6 words. Follow the input language (${language === "auto" ? "detect automatically" : language}). Output title only, no quotes, punctuation, prefix, or explanation.\n${children.length ? `Child titles: ${children.join(" | ")}\n` : ""}Representative notes:\n${snippets}`.slice(0, 5000) });
+    const contextLanguage = language === "auto" ? dominantLanguage(representative.map((note) => `${note.title} ${cleanNoteText(note, 180)}`).join(" ")) : language;
+    const snippets = representative.map((note) => `- ${cleanNoteTitle(note.title)}: ${cleanNoteText(note, isMerge ? 150 : 220)}`).join("\n");
+    const childText = children.length ? `Child titles (prioritize these themes): ${children.map((child) => cleanNoteTitle(String(child))).join(" | ")}\n` : "";
+    prompts.push({ nodeId, members, memberFingerprint: stableFingerprint(members.map((member) => `${result.ids[member]}:${notes[member]?.hash || ""}`)), text: `Create one title in ${contextLanguage}. It must be 2-6 words, specific to the shared theme, and output title only.\n${childText}Representative context (use only for disambiguation):\n${snippets}`.slice(0, 4000) });
   }
   return prompts;
 }
@@ -201,8 +257,29 @@ export class LocalClusterTitleGenerator {
       }
       if (uncached.length) try {
         const started = Date.now();
-        const values = await runtime.generate(uncached.map((prompt) => prompt.text), { maxNewTokens: 12, doSample: false, temperature: 0, signal: options.signal });
-        uncached.forEach((prompt, index) => { const title = sanitizeTitle(values[index] || ""); durationsMs[String(prompt.nodeId)] = Math.max(0, Math.round((Date.now() - started) / Math.max(1, uncached.length))); if (!title) { statuses[String(prompt.nodeId)] = "failed"; errors[String(prompt.nodeId)] = "Empty model output"; return; } output.titles![String(prompt.nodeId)] = title; statuses[String(prompt.nodeId)] = "generated"; options.cache?.set({ key: titleCacheKey(prompt, options.language || "auto"), title, nodeMembersFingerprint: prompt.memberFingerprint, savedAt: new Date().toISOString() }); });
+        let values = await runtime.generate(uncached.map((prompt) => prompt.text), { maxNewTokens: 12, doSample: false, temperature: 0, repetitionPenalty: 1.15, noRepeatNgramSize: 3, signal: options.signal });
+        const invalid = uncached.filter((prompt, index) => !validateTitle(values[index] || "", prompt.text).valid);
+        // A bad deterministic response is cheap to retry and should never be
+        // persisted. The corrective prompt is still sent through the same
+        // serialized WebGPU runtime, so this does not reintroduce GPU hangs.
+        if (invalid.length) {
+          try {
+            const retryValues = await runtime.generate(invalid.map((prompt) => `${prompt.text}\nYour previous response was invalid. Try again: output only a fresh 2-6 word title; do not copy a sentence, use a list, numbers, markdown, or an explanation.`), { maxNewTokens: 12, doSample: false, temperature: 0, repetitionPenalty: 1.2, noRepeatNgramSize: 3, signal: options.signal });
+            const retryByNode = new Map(invalid.map((prompt, index) => [prompt.nodeId, retryValues[index] || ""]));
+            values = values.map((value, index) => retryByNode.has(uncached[index].nodeId) ? retryByNode.get(uncached[index].nodeId)! : value);
+          } catch (retryError) {
+            if (options.signal?.aborted || (retryError instanceof Error && retryError.message.toLowerCase().includes("cancel"))) throw retryError;
+            // Keep valid first-pass titles even if the corrective request
+            // fails; only the malformed nodes should be reported as failed.
+            values = values.map((value, index) => invalid.some((prompt) => prompt.nodeId === uncached[index].nodeId) ? "" : value);
+          }
+        }
+        uncached.forEach((prompt, index) => {
+          const raw = values[index] || ""; const title = sanitizeTitle(raw); const validation = validateTitle(raw, prompt.text);
+          durationsMs[String(prompt.nodeId)] = Math.max(0, Math.round((Date.now() - started) / Math.max(1, uncached.length)));
+          if (!validation.valid) { statuses[String(prompt.nodeId)] = "failed"; errors[String(prompt.nodeId)] = validation.reason || "Invalid model output"; return; }
+          output.titles![String(prompt.nodeId)] = title; statuses[String(prompt.nodeId)] = "generated"; options.cache?.set({ key: titleCacheKey(prompt, options.language || "auto"), title, nodeMembersFingerprint: prompt.memberFingerprint, savedAt: new Date().toISOString() });
+        });
       } catch (error) {
         const cancelled = options.signal?.aborted || (error instanceof Error && error.message.toLowerCase().includes("cancel"));
         if (cancelled) throw error;

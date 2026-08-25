@@ -11,6 +11,11 @@ async function loadTitle() {
   const result = await transform(source, { loader: "ts", format: "esm", target: "es2020" });
   return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
 }
+async function loadTitleOutput() {
+  const source = await readFile(new URL("../src/title-output.ts", import.meta.url), "utf8");
+  const result = await transform(source, { loader: "ts", format: "esm", target: "es2020" });
+  return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
+}
 class MemoryStorage { files = new Map(); reads = []; async exists(path) { return this.files.has(path); } async read(path) { this.reads.push(path); return this.files.get(path); } async write(path, data) { this.files.set(path, data); } async remove(path) { this.files.delete(path); } }
 
 test("title model manager writes manifest last and distinguishes incomplete installs", async () => {
@@ -148,6 +153,43 @@ test("title prompt selection uses probability-ranked notes and bounded cleaned s
   const notes = [{ path: "low.md", title: "Low", content: "*low*", hash: "a" }, { path: "high.md", title: "High", content: "# high", hash: "b" }];
   const prompt = buildTitlePrompts(result, notes)[0]; assert.match(prompt.text, /High/); assert.ok(prompt.text.indexOf("High") < prompt.text.indexOf("Low"));
   assert.equal(sanitizeTitle('"Title:  Hello\nworld"'), "Hello world"); assert.ok(prompt.text.length < 5000);
+});
+
+test("title input cleanup removes Obsidian and markdown noise, including Korean notes", async () => {
+  const { cleanNoteText, cleanNoteTitle, buildTitlePrompts, validateTitle } = await loadTitle();
+  const result = { schemaVersion: 2, ids: ["한국어-노트.md"], leafLabels: [0], probabilities: [1], outlierProxy: [0], hierarchy: { leaves: [0], merges: [], root: 0 }, pca: {}, timings: {} };
+  const notes = [{ path: "한국어-노트.md", title: "한국어 학습.md", content: "---\ntags: [study]\n---\n- [x] [[문법|문법 정리]]\n1. [링크](https://example.com)\n![[image.png]]\n`const noisy = true`\n문법 문법 문법!!!", hash: "ko" }];
+  const cleaned = cleanNoteText(notes[0]);
+  assert.match(cleaned, /문법 정리/);
+  assert.doesNotMatch(cleaned, /https?:|\[x\]|image\.png|const noisy|tags:/i);
+  assert.equal(cleanNoteTitle(notes[0].title), "한국어 학습");
+  const prompt = buildTitlePrompts(result, notes)[0];
+  assert.match(prompt.text, /Korean/);
+  assert.equal(validateTitle("문법 학습", prompt.text).valid, true);
+  assert.equal(validateTitle("[ ] 1 2 3", prompt.text).valid, false);
+});
+
+test("invalid title output is retried once and only the validated Korean title is cached", async () => {
+  const { LocalClusterTitleGenerator, TitleModelManager, TITLE_MODEL_DESCRIPTOR } = await loadTitle();
+  const storage = new MemoryStorage();
+  const manager = new TitleModelManager(storage, { ...TITLE_MODEL_DESCRIPTOR, modelSha256: createHash("sha256").update("asset").digest("hex") });
+  await manager.downloadModel(async () => true);
+  const result = { schemaVersion: 2, ids: ["a.md"], leafLabels: [0], probabilities: [1], outlierProxy: [0], hierarchy: { leaves: [0], merges: [], root: 0 }, pca: {}, timings: {} };
+  const notes = [{ path: "a.md", title: "학습 노트", content: "한국어 문법과 어휘를 공부한다.", hash: "ko" }];
+  const calls = [];
+  const cache = { get: () => undefined, set: (entry) => calls.push(entry) };
+  let invocation = 0;
+  const runtime = async () => ({ generate: async (prompts) => { invocation++; assert.equal(prompts.length, 1); return invocation === 1 ? ["[ ] 1 2 3"] : ["한국어 문법 학습"]; }, diagnostics: { backend: "webgpu" } });
+  const titled = await new LocalClusterTitleGenerator(manager, runtime).generate(result, notes, { language: "auto", cache });
+  assert.equal(invocation, 2);
+  assert.equal(titled.titles["0"], "한국어 문법 학습");
+  assert.equal(calls.length, 1);
+});
+
+test("chat generation output extracts the final assistant content", async () => {
+  const { extractAssistantContent } = await loadTitleOutput();
+  assert.equal(extractAssistantContent([{ generated_text: [{ role: "user", content: "요청" }, { role: "assistant", content: "지식 관리" }] }]), "지식 관리");
+  assert.equal(extractAssistantContent([{ generated_text: "Plain title" }]), "Plain title");
 });
 
 test("title generation failure is recorded without failing the cluster result", async () => {

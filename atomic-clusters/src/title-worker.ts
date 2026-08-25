@@ -5,11 +5,13 @@ import { env, pipeline } from "@huggingface/transformers";
 // Transformers.js. Keeping this import explicit avoids relying on the lazy
 // env.backends.onnx compatibility property.
 import * as ortWeb from "atomic-clusters-title-onnxruntime-web";
+import { extractAssistantContent } from "./title-output";
 
 type Message = { type: "INIT"; model: ArrayBuffer; tokenizer: ArrayBuffer; config: ArrayBuffer; generationConfig: ArrayBuffer; tokenizerConfig: ArrayBuffer; ortWasm: ArrayBuffer } | { type: "GENERATE"; id: number; prompts: string[]; maxNewTokens: number; signal?: boolean };
 const scope = globalThis as typeof globalThis & { postMessage?: (value: unknown) => void; onmessage?: (event: MessageEvent<Message>) => void; fetch: typeof fetch };
 let generator: any;
 let generationQueue: Promise<void> = Promise.resolve();
+const TITLE_SYSTEM_PROMPT = "You name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.";
 const assetFiles = new Map<string, ArrayBuffer>();
 type OnnxRuntimeEnvironment = { wasm?: { wasmPaths?: string | Record<string, string>; wasmBinary?: ArrayBuffer; proxy?: boolean } };
 type OnnxRuntimeModule = { env?: OnnxRuntimeEnvironment };
@@ -73,9 +75,8 @@ scope.onmessage = async (event: MessageEvent<Message>) => {
     const queuedGeneration = generationQueue.catch(() => undefined).then(async () => {
       const values: string[] = [];
       for (const prompt of request.prompts) {
-        const output = await generator(prompt, { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, return_full_text: false });
-        const item = Array.isArray(output) ? output[0] : output;
-        values.push(typeof item === "string" ? item : String(item?.generated_text || item?.text || ""));
+        const output = await generator([{ role: "system", content: TITLE_SYSTEM_PROMPT }, { role: "user", content: prompt }], { max_new_tokens: request.maxNewTokens, do_sample: false, temperature: 0, repetition_penalty: 1.15, no_repeat_ngram_size: 3, return_full_text: false });
+        values.push(extractAssistantContent(output));
       }
       scope.postMessage?.({ type: "RESULT", id: request.id, values });
     });
