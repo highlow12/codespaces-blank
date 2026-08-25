@@ -5,9 +5,11 @@ from unittest.mock import patch
 import numpy as np
 
 from wikipedia_soft_benchmark.hierarchy_benchmark import (
+    CalibrationResult,
     calibration_sweep,
     choose_calibration,
     build_parser,
+    evaluate_prediction,
     fit_discovery,
     predict_memberships,
 )
@@ -214,6 +216,114 @@ class WikipediaHierarchyBenchmarkTests(unittest.TestCase):
             {"mean_leaf_nmi": 0.5, "mean_noise_rate": 0.1, "complexity": 20, "sort_key": [42, 18, 3, 8]},
         ]
         self.assertEqual(choose_calibration(options)["sort_key"], [42, 18, 3, 8])
+
+    def test_calibration_result_is_stable_and_legacy_unpackable(self):
+        class FakeState:
+            labels = np.array([0, 0, 1, 1])
+
+        class FakeTransformer:
+            def transform(self, values):
+                return np.zeros((len(values), 2), dtype=np.float64)
+
+        class FakeNeighborIndex:
+            max_neighbors = 2
+            def query(self, values, count, *, exclude_self=False):
+                return np.zeros((len(values), count)), np.zeros((len(values), count), dtype=np.int64)
+
+        class FakePrepared:
+            pca = FakeTransformer()
+            umap = FakeTransformer()
+            neighbor_index = FakeNeighborIndex()
+            timing_sec = {}
+
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
+        metadata = [{"split": "discovery", "leaf": "a", "parent": "p", "top": "t"}] * 4
+        calibration_metadata = [{"split": "calibration", "leaf": "a", "parent": "p", "top": "t"}] * 2
+        fake_result = {"native": {"leaf_nmi": 0.5}, "exact_knn": {"leaf_nmi": 0.25}}
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._prepare_discovery_projection", return_value=FakePrepared()), patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark._state_from_prepared_projection", return_value=FakeState()
+        ), patch("wikipedia_soft_benchmark.hierarchy_benchmark.evaluate_split", return_value=fake_result):
+            result = calibration_sweep(discovery, metadata, calibration, calibration_metadata, seeds=(42,), min_cluster_sizes=(2,), min_samples_values=(1,), neighbor_counts=(1,), return_prepared=True)
+        self.assertIsInstance(result, CalibrationResult)
+        rows, selected, artifacts = result
+        self.assertEqual(selected["seed"], 42)
+        self.assertIs(artifacts.selected_state, result.artifacts.selected_state)
+
+    def test_metric_labels_are_opt_in(self):
+        # The public evaluator defaults to aggregate-only output; callers
+        # producing row-level artifacts can request mapped labels explicitly.
+        class State:
+            cluster_to_leaf = {0: "a"}
+            cluster_to_parent = {0: "p"}
+            cluster_to_top = {0: "t"}
+        prediction = type("Prediction", (), {
+            "native_labels": np.array([0]), "exact_labels": np.array([0]),
+            "native": np.array([[1.0]]), "exact_knn": np.array([[1.0]]),
+            "native_unexplained": np.array([0.0]), "exact_unexplained": np.array([0.0]),
+            "pca_features": np.array([[0.0]]),
+        })()
+        rows = [{"leaf": "a", "parent": "p", "top": "t"}]
+        aggregate = evaluate_prediction(State(), prediction, rows)
+        detailed = evaluate_prediction(State(), prediction, rows, include_labels=True)
+        self.assertNotIn("mapped_labels", aggregate["native"])
+        self.assertEqual(detailed["native"]["mapped_labels"], ["a"])
+
+    def test_calibration_predicts_native_once_per_configuration(self):
+        class FakeState:
+            labels = np.array([0, 0, 1, 1])
+            cluster_count = 2
+            configuration = {"min_cluster_size": 2, "min_samples": 1}
+
+        class FakeTransformer:
+            def transform(self, values):
+                return np.zeros((len(values), 2), dtype=np.float64)
+
+        class FakeNeighborIndex:
+            max_neighbors = 3
+            def query(self, values, count, *, exclude_self=False):
+                return np.zeros((len(values), count)), np.zeros((len(values), count), dtype=np.int64)
+
+        class FakePrepared:
+            pca = FakeTransformer()
+            umap = FakeTransformer()
+            neighbor_index = FakeNeighborIndex()
+            timing_sec = {}
+
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
+        metadata = [{"split": "discovery", "leaf": "a", "parent": "p", "top": "t"}] * 4
+        calibration_metadata = [{"split": "calibration", "leaf": "a", "parent": "p", "top": "t"}] * 2
+        fake_result = {"native": {"leaf_nmi": 0.5}, "exact_knn": {"leaf_nmi": 0.25}}
+        native = (np.ones((2, 2)) / 2, np.zeros(2), np.zeros(2, dtype=np.int64))
+        knn = (np.ones((2, 2)) / 2, np.zeros(2), np.zeros(2, dtype=np.int64))
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._prepare_discovery_projection", return_value=FakePrepared()), patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark._state_from_prepared_projection", return_value=FakeState()
+        ), patch("wikipedia_soft_benchmark.hierarchy_benchmark.predict_native_memberships", return_value=native) as native_predict, patch(
+            "wikipedia_soft_benchmark.hierarchy_benchmark.predict_knn_memberships", return_value=knn
+        ) as knn_predict, patch("wikipedia_soft_benchmark.hierarchy_benchmark.evaluate_split", return_value=fake_result):
+            calibration_sweep(discovery, metadata, calibration, calibration_metadata, seeds=(42,), min_cluster_sizes=(2, 3), min_samples_values=(1,), neighbor_counts=(1, 2, 3))
+        self.assertEqual(native_predict.call_count, 2)
+        self.assertEqual(knn_predict.call_count, 6)
+
+    def test_return_prepared_retains_global_winner_across_seed_groups(self):
+        discovery = np.ones((4, 3), dtype=np.float32)
+        calibration = np.ones((2, 3), dtype=np.float32)
+        metadata = [{"split": "discovery"}] * 4
+        calibration_metadata = [{"split": "calibration"}] * 2
+        state_a = type("State", (), {"configuration": {"min_cluster_size": 2, "min_samples": 1}})()
+        state_b = type("State", (), {"configuration": {"min_cluster_size": 3, "min_samples": 1}})()
+        prepared_a = object()
+        prepared_b = object()
+        row_a = {"seed": 42, "min_cluster_size": 2, "min_samples": 1, "neighbor_count": 1, "native_leaf_nmi": 0.1, "exact_knn_leaf_nmi": 0.1, "mean_leaf_nmi": 0.1, "mean_noise_rate": 0.0, "complexity": 4, "sort_key": [42, 2, 1, 1]}
+        row_b = {"seed": 43, "min_cluster_size": 3, "min_samples": 1, "neighbor_count": 1, "native_leaf_nmi": 0.9, "exact_knn_leaf_nmi": 0.9, "mean_leaf_nmi": 0.9, "mean_noise_rate": 0.0, "complexity": 5, "sort_key": [43, 3, 1, 1]}
+        groups = [([row_a], prepared_a, state_a, {}), ([row_b], prepared_b, state_b, {})]
+        with patch("wikipedia_soft_benchmark.hierarchy_benchmark._calibration_group_artifacts", side_effect=groups) as worker:
+            result = calibration_sweep(discovery, metadata, calibration, calibration_metadata, seeds=(42, 43), min_cluster_sizes=(2,), min_samples_values=(1,), neighbor_counts=(1,), return_prepared=True)
+        self.assertEqual(worker.call_count, 2)
+        self.assertIs(result.artifacts.prepared_projection, prepared_b)
+        self.assertIs(result.artifacts.selected_state, state_b)
+        self.assertEqual(result.selected["seed"], 43)
 
 
 if __name__ == "__main__":

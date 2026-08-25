@@ -18,6 +18,7 @@ import numpy as np
 
 from pca_neighbor_search import build_pca_neighbor_index
 from wikipedia_soft_benchmark.embeddings import l2_normalize
+from wikipedia_soft_benchmark.benchmark_helpers import scale_splits, split_data
 from wikipedia_soft_benchmark.hierarchy_benchmark import (
     DEFAULT_MIN_CLUSTER_SIZES,
     DEFAULT_MIN_SAMPLES,
@@ -30,37 +31,6 @@ from wikipedia_soft_benchmark.hierarchy_benchmark import (
 
 SEEDS = (42, 43, 44, 45, 46)
 K_VALUES = (8, 15, 24)
-
-
-def _split(embeddings: np.ndarray, rows: Sequence[Mapping[str, Any]]):
-    result = {}
-    for name in ("discovery", "calibration", "test"):
-        indices = [i for i, row in enumerate(rows) if row.get("split") == name]
-        if not indices:
-            raise ValueError(f"metadata has no {name} rows")
-        result[name] = (np.asarray(embeddings[indices]), [dict(rows[i]) for i in indices])
-    return result
-
-
-def _repeat(values: tuple[np.ndarray, list[dict[str, Any]]], size: int):
-    matrix, rows = values
-    indexes = np.arange(size, dtype=np.int64) % len(rows)
-    repeated_rows = []
-    for output, source in enumerate(indexes):
-        row = dict(rows[int(source)])
-        original = row.get("id", row.get("source_id", int(source)))
-        row["original_id"] = original
-        row["id"] = f"{original}__repeat_{output}"
-        row["source_id"] = row["id"]
-        repeated_rows.append(row)
-    return matrix[indexes], repeated_rows
-
-
-def _scaled(split, target_size: int):
-    discovery_size = int(round(target_size * 0.60))
-    calibration_size = int(round(target_size * 0.20))
-    sizes = {"discovery": discovery_size, "calibration": calibration_size, "test": target_size - discovery_size - calibration_size}
-    return {name: _repeat(split[name], sizes[name]) for name in sizes}
 
 
 def _neighbor_recall(exact: tuple[np.ndarray, np.ndarray], ann: tuple[np.ndarray, np.ndarray]) -> float:
@@ -107,8 +77,8 @@ def _quality_seed(split, seed: int, pca_components: int | None, graph_neighbors:
     ann_neighbors = ann_index.query(test_pca, max(K_VALUES))
     rows = []
     for k in K_VALUES:
-        exact = evaluate_split(state, test, test_rows, neighbor_count=k, neighbor_backend="exact", neighbor_index=exact_index, neighbor_results=(exact_neighbors[0][:, :k], exact_neighbors[1][:, :k]))["exact_knn"]
-        ann = evaluate_split(state, test, test_rows, neighbor_count=k, neighbor_backend="pynndescent", neighbor_index=ann_index, neighbor_results=(ann_neighbors[0][:, :k], ann_neighbors[1][:, :k]))["exact_knn"]
+        exact = evaluate_split(state, test, test_rows, neighbor_count=k, neighbor_backend="exact", neighbor_index=exact_index, neighbor_results=(exact_neighbors[0][:, :k], exact_neighbors[1][:, :k]), include_labels=True)["exact_knn"]
+        ann = evaluate_split(state, test, test_rows, neighbor_count=k, neighbor_backend="pynndescent", neighbor_index=ann_index, neighbor_results=(ann_neighbors[0][:, :k], ann_neighbors[1][:, :k]), include_labels=True)["exact_knn"]
         rows.append({
             "k": k, "exact": exact, "pynndescent": ann,
             "recommended_leaf_agreement": float(np.mean(np.asarray(exact["mapped_labels"]) == np.asarray(ann["mapped_labels"]))),
@@ -127,7 +97,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("at least one seed is required")
     embeddings = np.load(args.embedding_dir / "document_embeddings.npy")
     metadata = load_metadata(args.embedding_dir / "document_metadata.jsonl")
-    original = _split(embeddings, metadata)
+    original = split_data(embeddings, metadata)
     args.quality_output_dir.mkdir(parents=True, exist_ok=True)
     quality = [_quality_seed(original, seed, args.pca_components, args.graph_neighbors, args.query_epsilon) for seed in args.seeds]
     all_rows = [row for run_record in quality for row in run_record["k"]]
@@ -156,7 +126,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 writer.writerow({"seed": run_record["seed"], "k": row["k"], "exact_leaf_nmi": row["exact"]["leaf_nmi"], "pynndescent_leaf_nmi": row["pynndescent"]["leaf_nmi"], **{key: row[key] for key in ("recommended_leaf_agreement", "affinity_mae", "neighbor_recall")}})
     scaling_report = None
     if args.target_size:
-        scaled = _scaled(original, args.target_size)
+        scaled = scale_splits(original, args.target_size)
         discovery, discovery_rows = scaled["discovery"]
         calibration, calibration_rows = scaled["calibration"]
         test, test_rows = scaled["test"]

@@ -1,6 +1,8 @@
 # DBpedia 임베딩 클러스터링
 
-DBpedia 문서 임베딩을 대상으로 **Spherical Fuzzy C-Means(SFCM)** 기반 클러스터링과 증분 업데이트를 실험·운영하는 프로젝트입니다. 현재 기본 경로는 본문 임베딩을 PCA로 축소한 뒤 SFCM으로 군집화하는 방식입니다.
+DBpedia 문서 임베딩을 대상으로 **PCA → UMAP → HDBSCAN** 기반 클러스터링을
+기본 경로로 실험·운영하는 프로젝트입니다. 기존 SFCM은 계층형·증분 처리와
+비교 실험을 위한 명시적 호환 경로로 유지합니다.
 
 ## 현재 상태
 
@@ -13,9 +15,15 @@ DBpedia 문서 임베딩을 대상으로 **Spherical Fuzzy C-Means(SFCM)** 기�
 
 ### 현재 결론
 
-- 기본 설계는 `content → PCA → SFCM`입니다.
-- 500건 이상 노드의 최초 K는 기본적으로 20% 독립 표본의 3/5 다수결로 고른 뒤, 선택된 K만 전체 데이터에서 적합합니다. 합의가 없거나 전체 적합이 유효하지 않으면 기존 전체 K 탐색으로 자동 복귀합니다.
-- `--fuzzifier`를 생략하면 안정성 probe로 `m`을 선택합니다. 기본 후보는 `1.2, 1.4, 1.6, 1.8, 2.0`이며, `--fast`에서는 안정적인 부모 노드의 값을 자식이 재사용할 수 있습니다.
+- 기본 설계는 `content → PCA → UMAP → HDBSCAN`입니다. UMAP 공간에서 HDBSCAN이
+  데이터가 지지하는 군집 수와 noise를 결정하며, HDBSCAN native membership도
+  함께 저장합니다.
+- 계층형·증분 SFCM 호환 경로에서는 500건 이상 노드의 최초 K를 20% 독립 표본의
+  3/5 다수결로 고른 뒤 선택된 K만 전체 데이터에서 적합합니다. 이는 기본
+  HDBSCAN discovery 경로가 아니라 `full_pipeline.py`/`incremental_clustering.py`의
+  동작입니다.
+- 같은 SFCM 호환 경로에서 `--fuzzifier`를 생략하면 안정성 probe로 `m`을
+  선택합니다. 기본 후보는 `1.2, 1.4, 1.6, 1.8, 2.0`입니다.
 - 태그는 곧바로 임베딩에 합치지 않고, 검증 전까지 metadata·prior·reranking 후보 채널로 분리합니다.
 - 증분 업데이트는 전체 문서를 매번 다시 계산하지 않습니다. 중심 이동의 영향이 충분한 문서와 새로 추가·수정된 문서만 membership을 갱신하고, 자연 noise 또는 XB 품질 저하가 감지될 때 전체 재클러스터링을 수행합니다.
 
@@ -58,7 +66,7 @@ HDBSCAN state와 projection을 held-out test에 재사용합니다. 비교 벤�
 | 2026-08-09 | Python worker 병렬화는 보류 | 2 CPU 환경의 측정에서 순차 실행보다 느렸습니다. 따라서 복잡한 병렬화보다 입력 cache·lazy import·수치 계산 재사용을 우선합니다. |
 | 2026-08-13 | 큰 노드의 기본 최초 K 선택을 표본 합의 방식으로 전환 | 20% 표본의 단일 선택은 불안정했지만 5개 독립 표본 중 3표 다수결은 3,000건 검증 조건 9/9에서 전체 선택 K와 일치했습니다. 선택 K는 전체 데이터에서 다시 적합하며, 합의 실패 시 exact 탐색으로 복귀합니다. |
 | 2026-08-14~15 | 안정성 기반 fuzzifier 선택을 기본화하고 geometry·운영 경로를 재검증 | 기본 경로는 `m=2.0` 고정이 아니라 안정적인 후보를 선택합니다. 3,000건 Gemini, seed 42~44 비교에서 자동 경로는 모두 `m=1.2`를 선택했고, fast 자동 경로는 일반 자동 경로보다 평균 약 2.03배 빨랐습니다. 이 결과는 해당 데이터셋의 비교 근거이며 모든 데이터에 대한 보증은 아닙니다. |
-| 현재 | 태그의 early fusion을 기본 경로에서 제외하고 `content → PCA → SFCM` 유지 | 태그 신호 자체는 확인하되, 현재 품질에서는 본문 공간의 기하를 해칠 가능성이 있습니다. 합성 데이터의 control·ablation 실험으로 이득 조건이 확인될 때만 결합 방식을 채택합니다. |
+| 현재 | 태그의 early fusion을 기본 경로에서 제외하고 `content → PCA → UMAP → HDBSCAN` 채택 | 태그 신호 자체는 확인하되, 현재 품질에서는 본문 공간의 기하를 해칠 가능성이 있습니다. SFCM은 계층형·증분 및 비교 실험 경로로 유지합니다. |
 
 ## 최근 검증 및 기준선
 
@@ -103,14 +111,26 @@ Gemini 데이터에서 빠르게 초기 상태를 적합합니다. `dbpedia_labe
   --skip-visualization
 ```
 
-시각화와 함께 flat Auto-PCA SFCM 전체 파이프라인을 실행하려면 다음을 사용합니다.
+기본 PCA + UMAP + HDBSCAN 파이프라인을 실행하려면 다음을 사용합니다.
 
 ```bash
-./.venv/bin/python full_pipeline.py \
+./.venv/bin/python 실험파일.py \
   --input-json dbpedia_gemini_embeddings.json.gz \
-  --output-dir results/full_pipeline \
-  --fast
+  --output-dir results
 ```
+
+이 기본 실행은 HDBSCAN이 발견한 leaf를 membership-weighted soft center로
+만든 뒤, PCA 공간의 cosine distance와 mass-weighted average linkage로
+bottom-up 계층을 함께 생성합니다. `results/hdbscan_hierarchy_assignments.csv`에는
+원래 leaf와 모든 dendrogram cut(`bottom_up_k*`)이, `results/hdbscan_hierarchy_tree.json`에는
+merge 순서·거리·질량이 저장됩니다. 발견된 leaf가 0개 또는 1개인 경우에도
+빈 merge 또는 단일 leaf 계층으로 안전하게 기록됩니다. 이 계층은 레거시
+재귀 PCA+FCM 경로와 별개의 결과이며, 후자가 필요할 때만 `--hierarchical`을
+명시합니다.
+
+기존 SFCM flat 경로가 필요하면 `--pipeline 2_auto_pca_fcm`을 명시합니다.
+계층형·증분 SFCM은 `full_pipeline.py`와 `incremental_clustering.py`에서
+별도로 사용할 수 있습니다.
 
 원래 HDBSCAN noise 문서에 대해 대표점(근사 메도이드) 거리와 클러스터 내 최근접
 5개 문서 거리의 소프트 소속도를 비교하려면 다음을 사용합니다.

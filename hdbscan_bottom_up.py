@@ -29,6 +29,20 @@ class MergeStep:
     leaves: tuple[int, ...]
 
 
+@dataclass(frozen=True)
+class HDBSCANHierarchyResult:
+    """A label-independent bottom-up hierarchy over HDBSCAN leaves.
+
+    ``assignments`` contains the original HDBSCAN leaf label and one column
+    for every dendrogram cut.  ``tree`` is intentionally JSON-compatible so
+    callers can persist it without serializing a fitted estimator.
+    """
+
+    assignments: pd.DataFrame
+    tree: dict[str, Any]
+    summary: dict[str, Any]
+
+
 def soft_leaf_centers(
     pca_features: np.ndarray,
     memberships: np.ndarray,
@@ -53,15 +67,23 @@ def weighted_average_linkage(
     centers: np.ndarray,
     masses: np.ndarray,
 ) -> list[MergeStep]:
-    """Build a deterministic weighted average-linkage tree over leaf centers."""
+    """Build a deterministic weighted average-linkage tree over leaf centers.
 
-    centers = normalize(np.asarray(centers, dtype=np.float64), norm="l2")
+    Empty and singleton leaf sets are valid degenerate trees and return no
+    merge steps.  This makes callers safe when HDBSCAN classifies every point
+    as noise or discovers only one leaf.
+    """
+
+    centers = np.asarray(centers, dtype=np.float64)
     masses = np.asarray(masses, dtype=np.float64)
+    if centers.ndim != 2:
+        raise ValueError("Centers must be a 2D array")
     leaf_count = centers.shape[0]
-    if centers.ndim != 2 or leaf_count < 2:
-        raise ValueError("At least two 2D leaf centers are required")
     if masses.shape != (leaf_count,) or np.any(masses <= 0):
         raise ValueError("Masses must be positive and aligned with leaf centers")
+    if leaf_count < 2:
+        return []
+    centers = normalize(centers, norm="l2")
 
     base = np.clip(1.0 - centers @ centers.T, 0.0, 2.0)
     distances: dict[tuple[int, int], float] = {}
@@ -144,6 +166,123 @@ def lift_leaf_labels(labels: np.ndarray, leaf_mapping: np.ndarray) -> np.ndarray
     non_noise = labels >= 0
     lifted[non_noise] = leaf_mapping[labels[non_noise]]
     return lifted
+
+
+def build_hdbscan_hierarchy(
+    pca_features: np.ndarray,
+    leaf_labels: np.ndarray,
+    memberships: np.ndarray,
+    *,
+    probabilities: np.ndarray | None = None,
+    outlier_scores: np.ndarray | None = None,
+    metadata: pd.DataFrame | None = None,
+) -> HDBSCANHierarchyResult:
+    """Build an unsupervised hierarchy from an HDBSCAN discovery result.
+
+    HDBSCAN's labels are the leaves.  Their membership-weighted centers are
+    merged with deterministic, mass-weighted average linkage in normalized
+    PCA space.  No ground-truth labels or requested ``K`` are used.  The
+    zero- and one-leaf cases are valid artifacts with no merge steps.
+    """
+
+    features = np.asarray(pca_features, dtype=np.float64)
+    labels = np.asarray(leaf_labels, dtype=np.int64)
+    weights = np.asarray(memberships, dtype=np.float64)
+    if features.ndim != 2 or labels.shape != (features.shape[0],):
+        raise ValueError("PCA features and leaf labels must have aligned rows")
+    if weights.ndim != 2 or weights.shape[0] != features.shape[0]:
+        raise ValueError("Memberships must be a 2D matrix aligned with features")
+    if np.any(labels < -1):
+        raise ValueError("HDBSCAN leaf labels may only contain -1 or non-negative labels")
+    leaf_count = int(weights.shape[1])
+    non_noise = labels[labels >= 0]
+    if non_noise.size and int(non_noise.max()) >= leaf_count:
+        raise ValueError("Leaf labels exceed the membership matrix columns")
+    if non_noise.size and not np.array_equal(
+        np.unique(non_noise), np.arange(int(non_noise.max()) + 1)
+    ):
+        raise ValueError("Non-noise leaf labels must be contiguous from zero")
+    if metadata is None:
+        assignments = pd.DataFrame(index=np.arange(features.shape[0]))
+    else:
+        if len(metadata) != features.shape[0]:
+            raise ValueError("Metadata must be aligned with features")
+        assignments = metadata.copy()
+    assignments["hdbscan_leaf"] = labels
+    for name, values in (
+        ("hdbscan_probability", probabilities),
+        ("hdbscan_outlier_score", outlier_scores),
+    ):
+        if values is not None:
+            array = np.asarray(values, dtype=np.float64)
+            if array.shape != (features.shape[0],):
+                raise ValueError(f"{name} must be aligned with features")
+            assignments[name] = array
+
+    merges: list[MergeStep] = []
+    masses = np.zeros(leaf_count, dtype=np.float64)
+    if leaf_count:
+        # HDBSCAN native memberships should give every discovered leaf
+        # positive mass.  The explicit check keeps malformed mocked results
+        # from producing a misleading hierarchy.
+        centers, masses = soft_leaf_centers(features, weights)
+        if leaf_count >= 2:
+            merges = weighted_average_linkage(centers, masses)
+        for cluster_count in range(leaf_count, 0, -1):
+            mapping = cut_tree(leaf_count, merges, cluster_count)
+            assignments[f"bottom_up_k{cluster_count}"] = lift_leaf_labels(
+                labels, mapping
+            )
+
+    def merge_to_dict(merge: MergeStep) -> dict[str, Any]:
+        return {
+            "node": int(merge.node),
+            "left": int(merge.left),
+            "right": int(merge.right),
+            "distance": float(merge.distance),
+            "mass": float(merge.mass),
+            "leaves": [int(leaf) for leaf in merge.leaves],
+        }
+
+    leaves = [
+        {
+            "leaf": int(leaf),
+            "mass": float(masses[leaf]),
+            "sample_count": int(np.sum(labels == leaf)),
+        }
+        for leaf in range(leaf_count)
+    ]
+    tree = {
+        "schema_version": 1,
+        "method": "hdbscan_leaf_bottom_up",
+        "merge_space": "membership-weighted normalized PCA space",
+        "merge_distance": "cosine distance between soft leaf centers",
+        "merge_linkage": "membership-mass-weighted average linkage",
+        "leaf_count": leaf_count,
+        "noise_count": int(np.sum(labels == -1)),
+        "leaves": leaves,
+        "merges": [merge_to_dict(merge) for merge in merges],
+        "cuts": [
+            {
+                "cluster_count": int(cluster_count),
+                "assignment_column": f"bottom_up_k{cluster_count}",
+            }
+            for cluster_count in range(leaf_count, 0, -1)
+        ],
+    }
+    summary = {
+        "hierarchy": "hdbscan_leaf_bottom_up",
+        "leaf_cluster_count": leaf_count,
+        "merge_count": len(merges),
+        "levels_reached": len(merges) + (1 if leaf_count else 0),
+        "noise_count": int(np.sum(labels == -1)),
+        "noise_ratio": float(np.mean(labels == -1)),
+    }
+    return HDBSCANHierarchyResult(
+        assignments=assignments,
+        tree=tree,
+        summary=summary,
+    )
 
 
 def partition_metrics(truth: np.ndarray, predicted: np.ndarray) -> dict[str, Any]:

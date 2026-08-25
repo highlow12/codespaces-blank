@@ -167,7 +167,7 @@ def _worker(arguments: tuple[Any, ...]) -> dict[str, Any]:
         projection_mode=str(mode),
     )
     effective_neighbors = min(int(selected["neighbor_count"]), len(discovery_rows))
-    test_result = evaluate_split(state, test, test_rows, neighbor_count=effective_neighbors)
+    test_result = evaluate_split(state, test, test_rows, neighbor_count=effective_neighbors, include_labels=False)
 
     geometry = {
         split: _geometry_for_split(

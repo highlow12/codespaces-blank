@@ -32,6 +32,7 @@ from umap import UMAP
 from pca_neighbor_search import PcaNeighborIndex, build_pca_neighbor_index
 
 from .embeddings import l2_normalize
+from .benchmark_helpers import write_gzip_csv
 
 DEFAULT_SEEDS = (42, 43, 44)
 DEFAULT_MIN_CLUSTER_SIZES = (18, 24, 30)
@@ -131,6 +132,40 @@ class MembershipPrediction:
     native_labels: np.ndarray
     exact_labels: np.ndarray
     pca_features: np.ndarray
+
+
+@dataclass
+class CalibrationResult:
+    """Stable result object for :func:`calibration_sweep`.
+
+    The object intentionally remains iterable (and subscriptable) so callers
+    using the historical ``rows, selected = calibration_sweep(...)`` or
+    ``rows, selected, artifacts = ...`` unpacking continue to work.
+    """
+
+    rows: list[dict[str, Any]]
+    selected: Mapping[str, Any]
+    artifacts: CalibrationArtifacts | None = None
+
+    def __iter__(self):
+        yield self.rows
+        yield self.selected
+        if self.artifacts is not None:
+            yield self.artifacts
+
+    def __len__(self) -> int:
+        return 3 if self.artifacts is not None else 2
+
+    def __getitem__(self, index: int):
+        values = (self.rows, self.selected, self.artifacts)
+        # Only the supported tuple positions are exposed.  In particular,
+        # do not let Python's negative indexing reach the optional artifact
+        # when this result has the historical two-value shape.
+        if index < 0:
+            index += len(self)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        return values[index]
 
 
 def _normalize_memberships(raw: Any, n_rows: int, cluster_count: int) -> np.ndarray:
@@ -334,6 +369,46 @@ def _neighbors_to_new(state: DiscoveryState, pca_features: np.ndarray, neighbor_
     return np.clip(output, 0.0, 1.0)
 
 
+def _labels_from_memberships(memberships: np.ndarray) -> np.ndarray:
+    labels = np.argmax(memberships, axis=1).astype(np.int64) if memberships.shape[1] else np.full(len(memberships), -1, dtype=np.int64)
+    labels[np.sum(memberships, axis=1) <= 0] = -1
+    return labels
+
+
+def predict_native_memberships(
+    state: DiscoveryState, umap_features: np.ndarray
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Predict native HDBSCAN memberships from already transformed rows."""
+    transformed = np.asarray(umap_features, dtype=np.float64)
+    if state.cluster_count:
+        native = _normalize_memberships(
+            hdbscan.prediction.membership_vector(state.clusterer, transformed),
+            len(transformed), state.cluster_count,
+        )
+    else:
+        native = np.zeros((len(transformed), 0), dtype=np.float64)
+    unexplained = np.clip(1.0 - native.sum(axis=1), 0.0, 1.0)
+    return native, unexplained, _labels_from_memberships(native)
+
+
+def predict_knn_memberships(
+    state: DiscoveryState,
+    pca_features: np.ndarray,
+    *,
+    neighbor_count: int = 15,
+    neighbor_backend: str | None = None,
+    neighbor_index: PcaNeighborIndex | None = None,
+    neighbor_results: tuple[np.ndarray, np.ndarray] | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    exact = _neighbors_to_new(
+        state, np.asarray(pca_features, dtype=np.float64), neighbor_count,
+        neighbor_backend=neighbor_backend, neighbor_index=neighbor_index,
+        neighbor_results=neighbor_results,
+    )
+    unexplained = np.clip(1.0 - exact.sum(axis=1), 0.0, 1.0)
+    return exact, unexplained, _labels_from_memberships(exact)
+
+
 def predict_memberships(state: DiscoveryState, embeddings: np.ndarray, *, neighbor_count: int = 15, neighbor_backend: str | None = None, neighbor_index: PcaNeighborIndex | None = None, neighbor_results: tuple[np.ndarray, np.ndarray] | None = None, pca_features: np.ndarray | None = None, umap_features: np.ndarray | None = None) -> MembershipPrediction:
     matrix = l2_normalize(np.asarray(embeddings, dtype=np.float32))
     if pca_features is None:
@@ -348,17 +423,12 @@ def predict_memberships(state: DiscoveryState, embeddings: np.ndarray, *, neighb
         transformed = np.asarray(umap_features, dtype=np.float64)
         if transformed.shape[0] != len(matrix):
             raise ValueError("umap_features and embeddings must have equal row counts")
-    if state.cluster_count:
-        native = _normalize_memberships(hdbscan.prediction.membership_vector(state.clusterer, transformed), len(matrix), state.cluster_count)
-    else:
-        native = np.zeros((len(matrix), 0), dtype=np.float64)
-    exact = _neighbors_to_new(state, pca_features, neighbor_count, neighbor_backend=neighbor_backend, neighbor_index=neighbor_index, neighbor_results=neighbor_results)
-    native_unexplained = np.clip(1.0 - native.sum(axis=1), 0.0, 1.0)
-    exact_unexplained = np.clip(1.0 - exact.sum(axis=1), 0.0, 1.0)
-    native_labels = np.argmax(native, axis=1).astype(np.int64) if native.shape[1] else np.full(len(matrix), -1, dtype=np.int64)
-    exact_labels = np.argmax(exact, axis=1).astype(np.int64) if exact.shape[1] else np.full(len(matrix), -1, dtype=np.int64)
-    native_labels[native.sum(axis=1) <= 0] = -1
-    exact_labels[exact.sum(axis=1) <= 0] = -1
+    native, native_unexplained, native_labels = predict_native_memberships(state, transformed)
+    exact, exact_unexplained, exact_labels = predict_knn_memberships(
+        state, pca_features, neighbor_count=neighbor_count,
+        neighbor_backend=neighbor_backend, neighbor_index=neighbor_index,
+        neighbor_results=neighbor_results,
+    )
     return MembershipPrediction(native, exact, native_unexplained, exact_unexplained, native_labels, exact_labels, pca_features)
 
 
@@ -366,7 +436,7 @@ def _mapped(labels: np.ndarray, mapping: Mapping[int, str]) -> np.ndarray:
     return np.asarray([mapping.get(int(label), "__noise__") if label >= 0 else "__noise__" for label in labels], dtype=object)
 
 
-def _metrics(true: Sequence[str], labels: np.ndarray, memberships: np.ndarray, mapping: Mapping[int, str], unexplained: np.ndarray) -> dict[str, Any]:
+def _metrics(true: Sequence[str], labels: np.ndarray, memberships: np.ndarray, mapping: Mapping[int, str], unexplained: np.ndarray, *, include_labels: bool = False) -> dict[str, Any]:
     truth = np.asarray([str(value) for value in true], dtype=object)
     mapped = _mapped(labels, mapping)
     coverage = float(np.mean(np.sum(memberships, axis=1) > 0)) if len(truth) else 0.0
@@ -381,7 +451,10 @@ def _metrics(true: Sequence[str], labels: np.ndarray, memberships: np.ndarray, m
     affinity: list[float] = []
     for row_index, actual in enumerate(truth):
         affinity.append(float(sum(memberships[row_index, cluster] for cluster, value in mapping.items() if value == actual)))
-    return {"leaf_nmi": float(normalized_mutual_info_score(truth, mapped)), "leaf_ari": float(adjusted_rand_score(truth, mapped)), "non_noise_coverage": coverage, "mapped_macro_f1": macro_f1, "mapped_balanced_accuracy": balanced, "true_affinity": float(np.mean(affinity)) if affinity else 0.0, "unexplained_mass": float(np.mean(unexplained)) if len(unexplained) else 0.0, "mapped_labels": mapped.tolist()}
+    result: dict[str, Any] = {"leaf_nmi": float(normalized_mutual_info_score(truth, mapped)), "leaf_ari": float(adjusted_rand_score(truth, mapped)), "non_noise_coverage": coverage, "mapped_macro_f1": macro_f1, "mapped_balanced_accuracy": balanced, "true_affinity": float(np.mean(affinity)) if affinity else 0.0, "unexplained_mass": float(np.mean(unexplained)) if len(unexplained) else 0.0}
+    if include_labels:
+        result["mapped_labels"] = mapped.tolist()
+    return result
 
 
 def hierarchy_distance(true_rows: Sequence[Mapping[str, Any]], labels: np.ndarray, mapping_leaf: Mapping[int, str], mapping_parent: Mapping[int, str], mapping_top: Mapping[int, str]) -> float:
@@ -401,19 +474,73 @@ def hierarchy_distance(true_rows: Sequence[Mapping[str, Any]], labels: np.ndarra
     return float(np.mean(distances)) if distances else 0.0
 
 
-def evaluate_split(state: DiscoveryState, embeddings: np.ndarray, metadata: Sequence[Mapping[str, Any]], *, neighbor_count: int, neighbor_backend: str | None = None, neighbor_index: PcaNeighborIndex | None = None, neighbor_results: tuple[np.ndarray, np.ndarray] | None = None, pca_features: np.ndarray | None = None, umap_features: np.ndarray | None = None) -> dict[str, Any]:
-    matrix, rows = _validate_rows(embeddings, metadata)
-    prediction = predict_memberships(state, matrix, neighbor_count=neighbor_count, neighbor_backend=neighbor_backend, neighbor_index=neighbor_index, neighbor_results=neighbor_results, pca_features=pca_features, umap_features=umap_features)
+def evaluate_prediction(
+    state: DiscoveryState,
+    prediction: MembershipPrediction,
+    metadata: Sequence[Mapping[str, Any]],
+    *,
+    include_labels: bool = False,
+) -> dict[str, Any]:
+    """Evaluate a prediction that has already been computed.
+
+    Keeping prediction and metric calculation separate prevents callers that
+    need labels for plotting from paying for a second HDBSCAN/kNN prediction.
+    """
+    rows = [dict(row) for row in metadata]
+    row_count = len(rows)
+    native = np.asarray(prediction.native)
+    exact_knn = np.asarray(prediction.exact_knn)
+    native_labels = np.asarray(prediction.native_labels)
+    exact_labels = np.asarray(prediction.exact_labels)
+    native_unexplained = np.asarray(prediction.native_unexplained)
+    exact_unexplained = np.asarray(prediction.exact_unexplained)
+    pca_features = np.asarray(prediction.pca_features)
+    array_specs = (
+        ("native", native, 2),
+        ("exact_knn", exact_knn, 2),
+        ("native_labels", native_labels, 1),
+        ("exact_labels", exact_labels, 1),
+        ("native_unexplained", native_unexplained, 1),
+        ("exact_unexplained", exact_unexplained, 1),
+        ("pca_features", pca_features, 2),
+    )
+    for name, value, ndim in array_specs:
+        array = np.asarray(value)
+        if array.ndim != ndim or array.shape[0] != row_count:
+            raise ValueError(f"prediction.{name} must have {row_count} rows; got shape {array.shape}")
+    if native.shape[1] != exact_knn.shape[1]:
+        raise ValueError("native and exact_knn membership matrices must have equal cluster counts")
+    if np.any(native_labels < -1) or np.any(native_labels >= native.shape[1]):
+        raise ValueError("native labels contain a cluster outside membership columns")
+    if np.any(exact_labels < -1) or np.any(exact_labels >= exact_knn.shape[1]):
+        raise ValueError("exact_knn labels contain a cluster outside membership columns")
+    prediction = MembershipPrediction(native, exact_knn, native_unexplained, exact_unexplained, native_labels, exact_labels, pca_features)
     true_leaf = [str(row.get("leaf", "")) for row in rows]
     true_parent = [str(row.get("parent", "")) for row in rows]
     true_top = [str(row.get("top", "")) for row in rows]
-    result: dict[str, Any] = {"native": _metrics(true_leaf, prediction.native_labels, prediction.native, state.cluster_to_leaf, prediction.native_unexplained), "exact_knn": _metrics(true_leaf, prediction.exact_labels, prediction.exact_knn, state.cluster_to_leaf, prediction.exact_unexplained)}
+    result: dict[str, Any] = {
+        "native": _metrics(true_leaf, prediction.native_labels, prediction.native, state.cluster_to_leaf, prediction.native_unexplained, include_labels=include_labels),
+        "exact_knn": _metrics(true_leaf, prediction.exact_labels, prediction.exact_knn, state.cluster_to_leaf, prediction.exact_unexplained, include_labels=include_labels),
+    }
     for name, labels, memberships, mapping, unexplained in (("native", prediction.native_labels, prediction.native, state.cluster_to_leaf, prediction.native_unexplained), ("exact_knn", prediction.exact_labels, prediction.exact_knn, state.cluster_to_leaf, prediction.exact_unexplained)):
         section = result[name]
-        section["parent"] = _metrics(true_parent, labels, memberships, state.cluster_to_parent, unexplained)
-        section["top"] = _metrics(true_top, labels, memberships, state.cluster_to_top, unexplained)
+        section["parent"] = _metrics(true_parent, labels, memberships, state.cluster_to_parent, unexplained, include_labels=include_labels)
+        section["top"] = _metrics(true_top, labels, memberships, state.cluster_to_top, unexplained, include_labels=include_labels)
         section["hierarchy_distance"] = hierarchy_distance(rows, labels, state.cluster_to_leaf, state.cluster_to_parent, state.cluster_to_top)
     return result
+
+
+def evaluate_split(state: DiscoveryState, embeddings: np.ndarray, metadata: Sequence[Mapping[str, Any]], *, neighbor_count: int, neighbor_backend: str | None = None, neighbor_index: PcaNeighborIndex | None = None, neighbor_results: tuple[np.ndarray, np.ndarray] | None = None, pca_features: np.ndarray | None = None, umap_features: np.ndarray | None = None, prediction: MembershipPrediction | None = None, include_labels: bool = True) -> dict[str, Any]:
+    if prediction is not None:
+        matrix = np.asarray(embeddings)
+        if matrix.ndim != 2 or len(matrix) != len(metadata):
+            raise ValueError("embeddings and metadata must have equal row counts")
+        rows = [dict(row) for row in metadata]
+    else:
+        matrix, rows = _validate_rows(embeddings, metadata)
+    if prediction is None:
+        prediction = predict_memberships(state, matrix, neighbor_count=neighbor_count, neighbor_backend=neighbor_backend, neighbor_index=neighbor_index, neighbor_results=neighbor_results, pca_features=pca_features, umap_features=umap_features)
+    return evaluate_prediction(state, prediction, rows, include_labels=include_labels)
 
 
 def choose_calibration(results: Sequence[Mapping[str, Any]]) -> Mapping[str, Any]:
@@ -498,35 +625,59 @@ def _calibration_group_core(
     )
     timing["calibration_neighbor_query_sec"] = float(time.perf_counter() - started)
     rows: list[dict[str, Any]] = []
-    states: dict[tuple[int, int], DiscoveryState] = {}
-    hdbscan_started = time.perf_counter()
+    best_row: dict[str, Any] | None = None
+    best_state: Any | None = None
+    hdbscan_fit_sec = native_prediction_sec = knn_membership_sec = metric_evaluation_sec = 0.0
     for min_size, min_samples in itertools.product(min_cluster_sizes, min_samples_values):
+        fit_started = time.perf_counter()
         state = _state_from_prepared_projection(
             prepared,
             min_cluster_size=min_size,
             min_samples=min_samples,
         )
-        if collect_artifacts:
-            states[(int(min_size), int(min_samples))] = state
-        noise_rate = float(np.mean(state.labels < 0))
+        hdbscan_fit_sec += time.perf_counter() - fit_started
+        labels = np.asarray(getattr(state, "labels", []))
+        noise_rate = float(np.mean(labels < 0)) if len(labels) else 0.0
+        native_prediction: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        if hasattr(state, "cluster_count"):
+            native_started = time.perf_counter()
+            native_prediction = predict_native_memberships(state, calibration_umap)
+            native_prediction_sec += time.perf_counter() - native_started
         # One maximum-k query is shared by all calibration candidates.  The
         # prefixes below avoid three ANN (or brute-force) queries for k=8/15/24.
         for neighbors in neighbor_counts:
+            effective_count = min(neighbors, len(discovery_metadata), index_max_neighbors)
+            prediction = None
+            if native_prediction is not None:
+                knn_started = time.perf_counter()
+                exact, exact_unexplained, exact_labels = predict_knn_memberships(
+                    state, calibration_pca, neighbor_count=effective_count,
+                    neighbor_backend=neighbor_backend,
+                    neighbor_results=calibration_neighbor_results,
+                )
+                knn_membership_sec += time.perf_counter() - knn_started
+                prediction = MembershipPrediction(
+                    native_prediction[0], exact, native_prediction[1], exact_unexplained,
+                    native_prediction[2], exact_labels, calibration_pca,
+                )
+            metrics_started = time.perf_counter()
             evaluation = evaluate_split(
                 state,
                 calibration_embeddings,
                 calibration_metadata,
-                neighbor_count=min(neighbors, len(discovery_metadata), index_max_neighbors),
+                neighbor_count=effective_count,
                 neighbor_backend=neighbor_backend,
                 neighbor_results=calibration_neighbor_results,
                 pca_features=calibration_pca,
                 umap_features=calibration_umap,
+                prediction=prediction,
+                include_labels=False,
             )
+            metric_evaluation_sec += time.perf_counter() - metrics_started
             native_nmi = float(evaluation["native"]["leaf_nmi"])
             knn_nmi = float(evaluation["exact_knn"]["leaf_nmi"])
             knn_key = f"{neighbor_backend}_leaf_nmi"
-            rows.append(
-                {
+            row = {
                     "seed": int(seed),
                     "min_cluster_size": int(min_size),
                     "min_samples": int(min_samples),
@@ -540,10 +691,17 @@ def _calibration_group_core(
                     "complexity": int(min_size + min_samples + neighbors),
                     "sort_key": [int(seed), int(min_size), int(min_samples), int(neighbors)],
                 }
-            )
-    timing["hdbscan_calibration_sec"] = float(time.perf_counter() - hdbscan_started)
+            rows.append(row)
+            if best_row is None or choose_calibration((best_row, row)) is row:
+                best_row = row
+                best_state = state
+    timing["hdbscan_fit_candidates_sec"] = float(hdbscan_fit_sec)
+    timing["native_prediction_sec"] = float(native_prediction_sec)
+    timing["knn_membership_sec"] = float(knn_membership_sec)
+    timing["metric_evaluation_sec"] = float(metric_evaluation_sec)
+    timing["hdbscan_calibration_sec"] = float(hdbscan_fit_sec + native_prediction_sec + knn_membership_sec + metric_evaluation_sec)
     if collect_artifacts:
-        return rows, prepared, states, timing
+        return rows, prepared, best_state, timing
     return rows
 
 
@@ -617,15 +775,37 @@ def calibration_sweep(
         for seed in seed_values
     ]
     if return_prepared:
-        grouped_artifacts = [_calibration_group_artifacts(group) for group in groups]
-        rows = [row for group in grouped_artifacts for row in group[0]]
+        # Process one seed at a time.  Only the current global winner's
+        # projection/state is retained; previous groups become collectible as
+        # soon as a later group wins.
+        rows: list[dict[str, Any]] = []
+        best_row: Mapping[str, Any] | None = None
+        best_prepared: _PreparedDiscoveryProjection | None = None
+        best_state: DiscoveryState | Any | None = None
+        best_timing: dict[str, float] = {}
+        for group in groups:
+            group_rows, prepared, group_state, timing = _calibration_group_artifacts(group)
+            rows.extend(group_rows)
+            group_best = choose_calibration(group_rows)
+            if best_row is None or choose_calibration((best_row, group_best)) is group_best:
+                best_row = group_best
+                best_prepared = prepared
+                best_state = group_state
+                best_timing = dict(timing)
         selected = choose_calibration(rows)
-        matching = [group for group in grouped_artifacts if int(group[0][0]["seed"]) == int(selected["seed"])][0]
-        prepared = matching[1]
-        states = matching[2]
-        key = (int(selected["min_cluster_size"]), int(selected["min_samples"]))
-        artifacts = CalibrationArtifacts(prepared, states[key], dict(matching[3]))
-        return rows, selected, artifacts
+        if best_prepared is None or best_state is None or best_row is None:
+            raise RuntimeError("calibration produced no retained artifact")
+        prepared = best_prepared
+        selected_state = best_state
+        # The group retains only its best state.  If the global winner is in
+        # that group, it is necessarily the retained state because the same
+        # deterministic ordering is used by choose_calibration.
+        state_configuration = getattr(selected_state, "configuration", {})
+        if state_configuration and (int(state_configuration.get("min_cluster_size", -1)) != int(selected["min_cluster_size"]) or
+                int(state_configuration.get("min_samples", -1)) != int(selected["min_samples"])):
+            raise RuntimeError("calibration artifact state does not match selected configuration")
+        artifacts = CalibrationArtifacts(prepared, selected_state, best_timing)
+        return CalibrationResult(rows, selected, artifacts)
     if jobs == 1 or len(groups) <= 1:
         grouped_rows = [_calibration_group(group) for group in groups]
     else:
@@ -748,21 +928,31 @@ def main(argv: Sequence[str] | None = None) -> int:
     discovery = embeddings[split_indices["discovery"]]
     calibration = embeddings[split_indices["calibration"]]
     test = embeddings[split_indices["test"]]
+    if args.jobs != 1:
+        raise ValueError("--jobs > 1 is not supported by the CLI when reusing the selected calibration state; use calibration_sweep(..., return_prepared=False) for parallel calibration")
     # Keep the selected state and prepared projection from calibration.  This
     # avoids refitting PCA, the neighbor index, UMAP, and the selected HDBSCAN
     # state before the held-out test.  The historical two-value API remains
     # available to library callers.
-    sweep, selected, artifacts = calibration_sweep(discovery, discovery_meta, calibration, calibration_meta, pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors, projection_mode=args.projection_mode, neighbor_backend=args.neighbor_backend, neighbor_graph_neighbors=args.neighbor_graph_neighbors, neighbor_query_epsilon=args.neighbor_query_epsilon, jobs=1 if args.jobs != 1 else args.jobs, return_prepared=True)
+    sweep, selected, artifacts = calibration_sweep(discovery, discovery_meta, calibration, calibration_meta, pca_components=args.pca_components, umap_components=args.umap_components, umap_n_neighbors=args.umap_n_neighbors, projection_mode=args.projection_mode, neighbor_backend=args.neighbor_backend, neighbor_graph_neighbors=args.neighbor_graph_neighbors, neighbor_query_epsilon=args.neighbor_query_epsilon, jobs=args.jobs, return_prepared=True)
     state = artifacts.selected_state
     effective_neighbors = min(int(selected["neighbor_count"]), len(discovery_meta))
     test_prediction = predict_memberships(state, test, neighbor_count=effective_neighbors, neighbor_backend=args.neighbor_backend)
-    test_result = evaluate_split(state, test, test_meta, neighbor_count=effective_neighbors, neighbor_backend=args.neighbor_backend)
+    test_result = evaluate_prediction(state, test_prediction, test_meta)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     assignments = []
     for index, row in enumerate(test_meta):
         assignments.append({"row_index": index, "source_id": row.get("source_id", row.get("id", index)), "leaf": row.get("leaf"), "parent": row.get("parent"), "top": row.get("top"), "native_recommended_cluster": int(test_prediction.native_labels[index]), "exact_knn_recommended_cluster": int(test_prediction.exact_labels[index]), "native_unexplained_mass": float(test_prediction.native_unexplained[index]), "exact_knn_unexplained_mass": float(test_prediction.exact_unexplained[index]), "native_max_affinity": float(np.max(test_prediction.native[index])) if test_prediction.native.shape[1] else 0.0, "exact_knn_max_affinity": float(np.max(test_prediction.exact_knn[index])) if test_prediction.exact_knn.shape[1] else 0.0})
     assignments_path = args.output_dir / "assignments.jsonl.gz"
     _write_gzip_jsonl(assignments_path, assignments)
+    assignments_csv_path = args.output_dir / "assignments.csv.gz"
+    csv_assignments = [
+        {**row,
+         "native_leaf": state.cluster_to_leaf.get(int(row["native_recommended_cluster"]), "__noise__") if int(row["native_recommended_cluster"]) >= 0 else "__noise__",
+         "exact_knn_leaf": state.cluster_to_leaf.get(int(row["exact_knn_recommended_cluster"]), "__noise__") if int(row["exact_knn_recommended_cluster"]) >= 0 else "__noise__"}
+        for row in assignments
+    ]
+    write_gzip_csv(assignments_csv_path, csv_assignments)
     calibration_runs_path = args.output_dir / "calibration_runs.jsonl"
     _write_jsonl(calibration_runs_path, sweep)
     runs_path = args.output_dir / "runs.csv"
@@ -797,6 +987,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     file_artifacts = {
         "assignments": assignments_path.name,
+        "assignments_csv": assignments_csv_path.name,
         "calibration_runs": calibration_runs_path.name,
         "runs": runs_path.name,
     }

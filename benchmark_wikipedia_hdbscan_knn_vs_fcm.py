@@ -11,9 +11,6 @@ from __future__ import annotations
 
 import argparse
 import csv
-import os
-import resource
-import threading
 import json
 import time
 from collections import Counter
@@ -38,124 +35,24 @@ from incremental_clustering import assign_to_hierarchy
 from pca_dimension_selection import select_pca_dimension_for_data
 from wikipedia_soft_benchmark.hierarchy_benchmark import (
     calibration_sweep,
+    evaluate_prediction,
     evaluate_split,
     fit_discovery,
     load_metadata,
     predict_memberships,
 )
 from wikipedia_soft_benchmark.embeddings import l2_normalize
+from wikipedia_soft_benchmark.benchmark_helpers import (
+    MeasuredStage as _MeasuredStage,
+    rss_kib as _rss_kib,
+    scale_splits as _scale_splits,
+    split_data as _split_data,
+    write_gzip_csv,
+)
 
 
 DEFAULT_SEEDS = (42, 43, 44, 45, 46)
 LABEL_FIELDS = ("leaf", "parent", "top")
-
-
-def _rss_kib() -> float:
-    """Return current resident memory for stage-local peak measurements."""
-    try:
-        with open("/proc/self/statm", encoding="ascii") as handle:
-            resident_pages = int(handle.read().split()[1])
-        return resident_pages * os.sysconf("SC_PAGE_SIZE") / 1024.0
-    except (FileNotFoundError, OSError, ValueError):
-        # macOS and restricted runners may not expose procfs.  ru_maxrss is
-        # still useful as a monotonic process-level fallback.
-        value = float(resource.getrusage(resource.RUSAGE_SELF).ru_maxrss)
-        return value / 1024.0 if value > 10_000 else value
-
-
-class _MeasuredStage:
-    """Measure wall time and peak RSS concurrently for one pipeline stage."""
-
-    def __init__(self) -> None:
-        self.elapsed_sec = 0.0
-        self.peak_rss_kib = 0.0
-        self.baseline_rss_kib = 0.0
-        self._stop = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def __enter__(self) -> "_MeasuredStage":
-        self.baseline_rss_kib = _rss_kib()
-        self.peak_rss_kib = self.baseline_rss_kib
-        started = time.perf_counter()
-
-        def sample() -> None:
-            while not self._stop.wait(0.01):
-                self.peak_rss_kib = max(self.peak_rss_kib, _rss_kib())
-
-        self._started = started
-        self._thread = threading.Thread(target=sample, daemon=True)
-        self._thread.start()
-        return self
-
-    def __exit__(self, *_: object) -> None:
-        self._stop.set()
-        if self._thread is not None:
-            self._thread.join(timeout=1.0)
-        self.peak_rss_kib = max(self.peak_rss_kib, _rss_kib())
-        self.elapsed_sec = time.perf_counter() - self._started
-
-    def as_dict(self) -> dict[str, float]:
-        return {
-            "sec": float(self.elapsed_sec),
-            "baseline_rss_kib": float(self.baseline_rss_kib),
-            "peak_rss_kib": float(self.peak_rss_kib),
-            "peak_rss_delta_kib": float(max(0.0, self.peak_rss_kib - self.baseline_rss_kib)),
-        }
-
-
-def _split_data(
-    embeddings: np.ndarray, metadata: list[dict[str, Any]]
-) -> dict[str, tuple[np.ndarray, list[dict[str, Any]]]]:
-    result = {}
-    for split in ("discovery", "calibration", "test"):
-        indices = [i for i, row in enumerate(metadata) if row.get("split") == split]
-        if not indices:
-            raise ValueError(f"Wikipedia metadata has no {split!r} rows")
-        result[split] = (embeddings[indices], [metadata[i] for i in indices])
-    return result
-
-
-def _repeat_rows(
-    embeddings: np.ndarray,
-    rows: list[dict[str, Any]],
-    target_size: int,
-) -> tuple[np.ndarray, list[dict[str, Any]]]:
-    """Repeat one split to an exact size while assigning unique row IDs."""
-    if target_size < 1:
-        raise ValueError("target split size must be positive")
-    indices = np.arange(target_size, dtype=np.int64) % len(rows)
-    repeated_embeddings = np.asarray(embeddings[indices], dtype=embeddings.dtype)
-    repeated_rows: list[dict[str, Any]] = []
-    for output_index, source_index in enumerate(indices):
-        row = dict(rows[int(source_index)])
-        original_id = row.get("id", row.get("source_id", int(source_index)))
-        row["original_id"] = original_id
-        row["id"] = f"{original_id}__repeat_{output_index}"
-        row["source_id"] = row["id"]
-        repeated_rows.append(row)
-    return repeated_embeddings, repeated_rows
-
-
-def _scale_splits(
-    split: dict[str, tuple[np.ndarray, list[dict[str, Any]]]],
-    target_size: int | None,
-) -> dict[str, tuple[np.ndarray, list[dict[str, Any]]]]:
-    if target_size is None:
-        return split
-    if target_size < 5:
-        raise ValueError("--target-size must be at least 5")
-    discovery_size = int(round(target_size * 0.60))
-    calibration_size = int(round(target_size * 0.20))
-    test_size = target_size - discovery_size - calibration_size
-    sizes = {
-        "discovery": discovery_size,
-        "calibration": calibration_size,
-        "test": test_size,
-    }
-    return {
-        name: _repeat_rows(*split[name], sizes[name])
-        for name in ("discovery", "calibration", "test")
-    }
 
 
 def _majority_mapping(
@@ -332,11 +229,9 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 neighbor_results=test_neighbor_results,
                 pca_features=test_pca, umap_features=test_umap,
             )
-            hdb_metrics = evaluate_split(
-                hdb_state, test_matrix, test_rows, neighbor_count=neighbor_count,
-                neighbor_results=test_neighbor_results,
-                pca_features=test_pca, umap_features=test_umap,
-            )["exact_knn"]
+        test_metric_stage = _MeasuredStage()
+        with test_metric_stage:
+            hdb_metrics = evaluate_prediction(hdb_state, hdb_prediction, test_rows)["exact_knn"]
 
         print(f"[{index}/{len(args.seeds)}] seed={seed}: hierarchical FCM", flush=True)
         fcm_fit_stage = _MeasuredStage()
@@ -383,6 +278,27 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 fcm_metrics["paths"],
                 seed,
             )
+        assignments_path = seed_dir / "assignments.csv.gz"
+        assignment_rows = []
+        for row_index, (row, hdb_label, fcm_path) in enumerate(
+            zip(test_rows, hdb_prediction.exact_labels, fcm_metrics["paths"], strict=True)
+        ):
+            cluster = int(hdb_label)
+            assignment_rows.append(
+                {
+                    "row_index": row_index,
+                    "source_id": row.get("source_id", row.get("id", row_index)),
+                    "true_leaf": row.get("leaf"),
+                    "true_parent": row.get("parent"),
+                    "true_top": row.get("top"),
+                    "hdbscan_cluster": cluster,
+                    "hdbscan_mapped_leaf": hdb_state.cluster_to_leaf.get(cluster, "__noise__"),
+                    "hdbscan_max_affinity": float(np.max(hdb_prediction.exact_knn[row_index])) if hdb_prediction.exact_knn.shape[1] else 0.0,
+                    "hdbscan_unexplained_mass": float(hdb_prediction.exact_unexplained[row_index]),
+                    "fcm_cluster_path": fcm_path,
+                }
+            )
+        write_gzip_csv(assignments_path, assignment_rows)
         timing_details = {
             "hdbscan_automatic_pca": pca_stage.as_dict(),
             "hdbscan_calibration_total": {
@@ -394,6 +310,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
             "hdbscan_test_umap_transform": test_umap_stage.as_dict(),
             "hdbscan_test_neighbor_query": test_neighbor_stage.as_dict(),
             "hdbscan_test_prediction": test_prediction_stage.as_dict(),
+            "hdbscan_test_metric_evaluation": test_metric_stage.as_dict(),
             "fcm_fit": fcm_fit_stage.as_dict(),
             "fcm_test_assignment": fcm_assignment_stage.as_dict(),
             "visualization": visualization_stage.as_dict(),
@@ -402,6 +319,7 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
         hdbscan_final_fit_and_test_sec = (
             test_pca_stage.elapsed_sec + test_umap_stage.elapsed_sec
             + test_neighbor_stage.elapsed_sec + test_prediction_stage.elapsed_sec
+            + test_metric_stage.elapsed_sec
         )
         timing = {
             "hdbscan_auto_pca_sec": float(hdb_auto_pca_sec),
@@ -438,7 +356,10 @@ def run(args: argparse.Namespace) -> dict[str, Any]:
                 "summary": fcm.summary,
                 "metrics": fcm_metrics,
             },
-            "artifacts": {"comparison_plot": str(plot_path)},
+            "artifacts": {
+                "comparison_plot": str(plot_path),
+                "assignments_csv": str(assignments_path),
+            },
         }
         (seed_dir / "run.json").write_text(
             json.dumps(run_record, ensure_ascii=False, indent=2), encoding="utf-8"

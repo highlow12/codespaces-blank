@@ -1,0 +1,2 @@
+seed,hdbscan_pca,hdbscan_neighbor_k,hdbscan_leaf_nmi,hdbscan_leaf_ari,hdbscan_hierarchy_distance,fcm_pca,fcm_leaf_clusters,fcm_leaf_nmi,fcm_leaf_ari,fcm_hierarchy_distance,hdbscan_runtime_sec,fcm_runtime_sec,visualization_runtime_sec,runtime_sec
+42,128,15,0.748940742149227,0.6240251953887217,0.347,128,79,0.6139897271020622,0.16647776002068282,0.7005,142.66352466600256,146.96409945199957,0.5151604989987391,290.27025791899905
