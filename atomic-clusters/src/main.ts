@@ -31,7 +31,9 @@ export default class AtomicClustersPlugin extends Plugin {
   private localModelManager!: LocalModelManager;
   private titleModelManager!: TitleModelManager;
   private titleRuntime: BrowserTitleRuntime | null = null;
-  private titleOrtWasmBinary: ArrayBuffer | null = null;
+  // Titles and local embeddings use the same ORT WebGPU JSEP binary. Keeping
+  // one buffer here prevents the two runtimes from drifting apart again.
+  private localOrtWebgpuWasmBinary: ArrayBuffer | null = null;
   private operationProgress: AtomicClustersProgress | null = null;
   private runAbortController: AbortController | null = null;
 
@@ -68,6 +70,7 @@ export default class AtomicClustersPlugin extends Plugin {
     const wasmPath = `${pluginDir}/${LOCAL_ORT_WASM_ASSET}`;
     const webgpuMjsPath = `${pluginDir}/${LOCAL_ORT_WEBGPU_MJS_ASSET}`;
     const webgpuWasmPath = `${pluginDir}/${LOCAL_ORT_WEBGPU_WASM_ASSET}`;
+    this.localOrtWebgpuWasmBinary = null;
     if (!(await adapter.exists(mjsPath)) || !(await adapter.exists(wasmPath))) return;
     if (typeof Blob === "undefined" || typeof URL.createObjectURL !== "function") return;
     const [mjsBytes, wasmBinary] = await Promise.all([adapter.readBinary(mjsPath), adapter.readBinary(wasmPath)]);
@@ -80,8 +83,8 @@ export default class AtomicClustersPlugin extends Plugin {
       const webgpuSource = prepareLocalOrtRendererModule(new TextDecoder().decode(webgpuMjsBytes), LOCAL_ORT_WEBGPU_WASM_ASSET);
       webgpuMjsUrl = URL.createObjectURL(new Blob([webgpuSource], { type: "text/javascript" }));
       webgpuWasmBinary = webgpuBinary;
+      this.localOrtWebgpuWasmBinary = webgpuBinary;
     }
-    this.titleOrtWasmBinary = webgpuWasmBinary || null;
     configureLocalOrtAssets(prefix, { mjs: mjsUrl, wasmBinary, ...(webgpuMjsUrl ? { webgpuMjs: webgpuMjsUrl, webgpuWasmBinary } : {}), revoke: () => { URL.revokeObjectURL(mjsUrl); if (webgpuMjsUrl) URL.revokeObjectURL(webgpuMjsUrl); } });
   }
 
@@ -207,8 +210,8 @@ export default class AtomicClustersPlugin extends Plugin {
     const titleCache = await new ClusterTitleCache(this.app.vault).load();
     const titleStarted = new Date().toISOString();
     const titleGenerator = new LocalClusterTitleGenerator(this.titleModelManager, async (artifact) => {
-      if (!this.titleOrtWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
-      this.titleRuntime = new BrowserTitleRuntime(titleWorkerSource, artifact, this.titleOrtWasmBinary.slice(0));
+      if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
+      this.titleRuntime = new BrowserTitleRuntime(titleWorkerSource, artifact, this.localOrtWebgpuWasmBinary.slice(0));
       await this.titleRuntime.initialize();
       return this.titleRuntime;
     });
@@ -270,8 +273,8 @@ export default class AtomicClustersPlugin extends Plugin {
     onProgress({ phase: "consent", progress: 0, detail: "Checking installed title model" });
     if (await this.titleModelManager.status() !== "installed") throw new Error("Title model is not installed; download it before testing the runtime.");
     onProgress({ phase: "verify", progress: 0.4, detail: "Checking model integrity" });
-    if (!this.titleOrtWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
-    const runtime = new BrowserTitleRuntime(titleWorkerSource, await this.titleModelManager.load(), this.titleOrtWasmBinary.slice(0));
+    if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
+    const runtime = new BrowserTitleRuntime(titleWorkerSource, await this.titleModelManager.load(), this.localOrtWebgpuWasmBinary.slice(0));
     await runtime.initialize(); await runtime.generate(["Generate a title for this note."], { maxNewTokens: 12, doSample: false, temperature: 0 }); await runtime.terminate();
     onProgress({ phase: "complete", progress: 1, detail: "WebGPU title runtime ready" });
   }

@@ -68,12 +68,21 @@ async function run() {
   const workerSource = new TextDecoder().decode(workerBuild.outputFiles[0].contents);
   const browserWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/browser-worker.ts"], plugins: [wasmBootstrap], write: false });
   const browserWorkerSource = new TextDecoder().decode(browserWorkerBuild.outputFiles[0].contents);
-  // Transformers.js bundles its own (currently 1.22.x) ORT Web dependency.
-  // Point the title worker's explicit runtime import at that exact copy so
-  // its env object is the one selected by the lazy Transformers backend.
-  const transformersOrtWeb = resolve("node_modules/@huggingface/transformers/node_modules/onnxruntime-web/dist/ort.webgpu.mjs");
+  // Transformers.js and the embedding provider intentionally resolve the same
+  // exact ORT Web package. Keeping this check here makes a release fail early
+  // if npm reintroduces a nested or mismatched runtime (which would make the
+  // shared JSEP WASM binary ABI-incompatible with one of the JS consumers).
+  const sharedOrtVersion = "1.22.0-dev.20250409-89f8206ba4";
+  const sharedOrtWebDist = resolve("node_modules/onnxruntime-web/dist");
+  const sharedOrtWebGpu = resolve(sharedOrtWebDist, "ort.webgpu.mjs");
+  const sharedOrtWasm = resolve(sharedOrtWebDist, "ort-wasm-simd-threaded.jsep.wasm");
+  const sharedOrtPackage = resolve(sharedOrtWebDist, "..", "package.json");
+  const installedOrtVersion = JSON.parse(await readFile(sharedOrtPackage, "utf8")).version;
+  if (installedOrtVersion !== sharedOrtVersion || !existsSync(sharedOrtWebGpu) || !existsSync(sharedOrtWasm)) {
+    throw new Error(`Build requires shared onnxruntime-web ${sharedOrtVersion} JS/WASM assets.`);
+  }
   const titleOrtAliasPlugin = { name: "transformers-title-onnxruntime-web", setup(plugin) {
-    plugin.onResolve({ filter: /^atomic-clusters-title-onnxruntime-web$/ }, () => ({ path: transformersOrtWeb }));
+    plugin.onResolve({ filter: /^atomic-clusters-title-onnxruntime-web$/ }, () => ({ path: sharedOrtWebGpu }));
   } };
   // The bootstrap seeds the shared ORT Web runtime and temporarily hides
   // Electron's process global before Transformers.js is evaluated. Do not
@@ -104,7 +113,7 @@ async function run() {
   // wasmBinary is supplied. Use the non-bundle build so the renderer-safe
   // JSEP module is loaded through wasmPaths and transformed into a Blob.
   const ortWebGpuAliasPlugin = { name: "onnxruntime-webgpu-renderer-safe", setup(plugin) {
-    plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: resolve("node_modules/onnxruntime-web/dist/ort.webgpu.mjs") }));
+    plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: sharedOrtWebGpu }));
   } };
   const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, browserWorkerPlugin, titleWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
   if (process.argv.includes("--watch")) {

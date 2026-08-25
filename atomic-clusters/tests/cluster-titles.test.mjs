@@ -50,9 +50,26 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
 
 test("title build aliases the explicit ORT import to Transformers.js' pinned runtime", async () => {
   const build = await readFile(new URL("../build.mjs", import.meta.url), "utf8");
-  assert.match(build, /transformersOrtWeb/);
-  assert.match(build, /onnxruntime-web\/dist\/ort\.webgpu\.mjs/);
+  assert.match(build, /sharedOrtWebGpu/);
+  assert.match(build, /sharedOrtWebDist/);
+  assert.match(build, /sharedOrtPackage/);
+  assert.match(build, /sharedOrtVersion\s*=\s*["']1\.22\.0-dev\.20250409-89f8206ba4["']/);
+  assert.match(build, /sharedOrtWasm/);
+  assert.match(build, /onnxruntime-web\/dist/);
+  assert.match(build, /["']ort\.webgpu\.mjs["']/);
   assert.match(build, /titleOrtAliasPlugin/);
+  assert.doesNotMatch(build, /@huggingface\/transformers\/node_modules\/onnxruntime-web/);
+  assert.doesNotMatch(build, /title\.jsep\.wasm/);
+});
+
+test("main passes the shared embedding ORT WebGPU WASM asset to titles", async () => {
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const embedding = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
+  assert.match(embedding, /LOCAL_ORT_WEBGPU_WASM_ASSET\s*=\s*["']ort-wasm-simd-threaded\.jsep\.wasm["']/);
+  assert.match(main, /LOCAL_ORT_WEBGPU_WASM_ASSET/);
+  assert.match(main, /localOrtWebgpuWasmBinary/);
+  assert.match(main, /this\.localOrtWebgpuWasmBinary\s*=\s*webgpuBinary/);
+  assert.doesNotMatch(main, /TITLE_ORT_WEBGPU_WASM_ASSET|titleWasmPath|title\.jsep\.wasm/);
 });
 
 test("built title worker hides Electron process before Transformers.js evaluates", async () => {

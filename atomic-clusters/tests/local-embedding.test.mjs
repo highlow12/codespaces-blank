@@ -271,7 +271,7 @@ test("pinned JSEP/WebGPU ORT renderer transform handles its asset name", async (
   const { prepareLocalOrtRendererModule } = await loadOrtAssets();
   const source = await readFile(new URL("../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs", import.meta.url), "utf8");
   const transformed = prepareLocalOrtRendererModule(source, "ort-wasm-simd-threaded.jsep.wasm");
-  assert.match(transformed, /D=false/);
+  assert.match(transformed, /(?:D=false|n=false)/);
   assert.equal((transformed.match(/if\(false\)\{/g) || []).length, 3);
   assert.match(transformed, /var isNode = false/);
   assert.match(transformed, /data:application\/wasm;base64/);

@@ -18,6 +18,22 @@ test("release build invokes the practical verifier after checking asset presence
   assert.match(source, /requireWasm/);
   assert.match(source, /ort-wasm-simd-threaded\.jsep\.mjs/);
   assert.match(source, /ort-wasm-simd-threaded\.jsep\.wasm/);
+  assert.match(source, /sharedOrtWebDist/);
+  assert.match(source, /sharedOrtPackage/);
+  assert.match(source, /sharedOrtWasm/);
+  assert.match(source, /sharedOrtVersion\s*=\s*["']1\.22\.0-dev\.20250409-89f8206ba4["']/);
+  assert.doesNotMatch(source, /title\.jsep\.wasm/);
   assert.match(source, /onnxruntime-webgpu-renderer-safe/);
   assert.match(source, /ort\.webgpu\.mjs/);
+});
+
+test("embedding and title use the same exact ORT JS and WASM package", async () => {
+  const packageJson = JSON.parse(await readFile(new URL("../node_modules/onnxruntime-web/package.json", import.meta.url), "utf8"));
+  const transformersPackage = JSON.parse(await readFile(new URL("../node_modules/@huggingface/transformers/package.json", import.meta.url), "utf8"));
+  const titleRuntime = await readFile(new URL("../node_modules/onnxruntime-web/dist/ort.webgpu.mjs", import.meta.url), "utf8");
+  const titleWasm = await readFile(new URL("../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.wasm", import.meta.url));
+  assert.equal(packageJson.version, "1.22.0-dev.20250409-89f8206ba4");
+  assert.equal(transformersPackage.dependencies["onnxruntime-web"], packageJson.version);
+  assert.match(titleRuntime, new RegExp(`ONNX Runtime Web v${String(packageJson.version).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+  assert.ok(titleWasm.byteLength > 1_000_000);
 });

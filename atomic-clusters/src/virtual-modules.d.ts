@@ -13,6 +13,21 @@ declare module "atomic-clusters-title-onnxruntime-web" {
   };
 }
 
+// The pinned ORT Web snapshot does not publish declarations for these
+// renderer-specific export subpaths. The embedding provider only relies on
+// their runtime Tensor/session surface.
+declare module "onnxruntime-web/wasm" {
+  export const env: any;
+  export const Tensor: any;
+  export const InferenceSession: any;
+}
+
+declare module "onnxruntime-web/webgpu" {
+  export const env: any;
+  export const Tensor: any;
+  export const InferenceSession: any;
+}
+
 declare module "electron" {
   export const shell: { openPath(path: string): Promise<string> };
 }
