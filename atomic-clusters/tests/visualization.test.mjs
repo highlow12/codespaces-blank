@@ -10,13 +10,16 @@ async function loadVisualization() {
 }
 
 test("visualization helpers preserve aspect ratio and center degenerate coordinates", async () => {
-  const { scaleVisualizationPoints } = await loadVisualization();
+  const { scaleVisualizationPoints, VISUALIZATION_POINT_PADDING } = await loadVisualization();
   const points = scaleVisualizationPoints([[0, 0], [10, 5]], 220, 120, 10);
   assert.deepEqual(points[0], [10, 110]);
   assert.deepEqual(points[1], [210, 10]);
   const flat = scaleVisualizationPoints([[2, 4], [2, 4]], 100, 80, 10);
   assert.deepEqual(flat, [[50, 40], [50, 40]]);
   assert.ok(flat.flat().every(Number.isFinite));
+  const padded = scaleVisualizationPoints([[0, 0], [10, 5]], 220, 120);
+  assert.equal(VISUALIZATION_POINT_PADDING, 18);
+  assert.ok(padded.flatMap(([x, y]) => [x, y]).every((value) => value >= 18 && value <= 202));
 });
 
 test("visualization colors are stable and noise is neutral", async () => {

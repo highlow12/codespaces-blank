@@ -14,4 +14,8 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(css, /\.atomic-clusters-view \{[^}]*height: 100%/s);
   assert.match(css, /\.atomic-clusters-umap \{[^}]*flex: 1 1 auto/s);
   assert.match(css, /\.atomic-clusters-umap-point-hit \{/);
+  assert.match(css, /\.atomic-clusters-umap-hit-layer \{[^}]*pointer-events: none/s);
+  assert.match(css, /\.atomic-clusters-umap-point-hit \{[^}]*background: transparent !important/s);
+  assert.match(css, /\.atomic-clusters-umap-point-hit \{[^}]*pointer-events: auto/s);
+  assert.match(view, /scaleVisualizationPoints\(visualization\.coordinates, width, height\)/);
 });

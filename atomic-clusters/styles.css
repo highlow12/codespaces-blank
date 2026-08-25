@@ -16,6 +16,8 @@
 .atomic-clusters-model-status { color: var(--text-muted); font-size: var(--font-ui-small); margin-top: 4px; max-width: 280px; overflow-wrap: anywhere; }
 .atomic-clusters-umap { position: relative; flex: 1 1 auto; width: 100%; min-height: 300px; margin: 8px 0 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; background: var(--background-primary); box-shadow: inset 0 0 0 1px var(--background-modifier-border-hover); }
 .atomic-clusters-umap-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
-.atomic-clusters-umap-hit-layer { position: absolute; inset: 0; }
-.atomic-clusters-umap-point-hit { position: absolute; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; transform: translate(-50%, -50%); background: transparent; cursor: pointer; }
-.atomic-clusters-umap-point-hit:hover, .atomic-clusters-umap-point-hit:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; background: color-mix(in srgb, var(--interactive-accent) 12%, transparent); }
+.atomic-clusters-umap-hit-layer { position: absolute; inset: 0; pointer-events: none; }
+/* Obsidian themes style every button. Keep these hit targets visually empty
+   so they cannot cover the colored canvas markers underneath. */
+.atomic-clusters-umap-point-hit { appearance: none; position: absolute; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; transform: translate(-50%, -50%); background: transparent !important; background-color: transparent !important; box-shadow: none !important; color: transparent; cursor: pointer; pointer-events: auto; }
+.atomic-clusters-umap-point-hit:hover, .atomic-clusters-umap-point-hit:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; background: transparent !important; background-color: transparent !important; }

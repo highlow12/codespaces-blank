@@ -9,6 +9,10 @@ const TAB20 = [
 
 export const VISUALIZATION_NOISE_COLOR = "#9aa0a6";
 
+// Leave enough room for the largest rendered marker (including its hover ring
+// and the invisible pointer target) at every edge of the canvas.
+export const VISUALIZATION_POINT_PADDING = 18;
+
 /** Stable matplotlib-tab20-like color for a leaf label; noise is neutral. */
 export function visualizationColor(label: number): string {
   if (!Number.isSafeInteger(label) || label < 0) return VISUALIZATION_NOISE_COLOR;
@@ -23,7 +27,7 @@ export function scaleVisualizationPoints(
   coordinates: readonly VisualizationCoordinate[],
   width: number,
   height: number,
-  padding = 12
+  padding = VISUALIZATION_POINT_PADDING
 ): VisualizationCoordinate[] {
   if (!coordinates.length || width <= 0 || height <= 0) return [];
   const safePadding = Math.max(0, Math.min(padding, Math.min(width, height) / 2));
