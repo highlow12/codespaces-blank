@@ -57,3 +57,23 @@ test("title generation failure is recorded without failing the cluster result", 
   const generator = new LocalClusterTitleGenerator(manager, async () => { throw new Error("GPU initialization failed"); });
   const titled = await generator.generate(result, notes); assert.equal(titled.schemaVersion, 2); assert.equal(titled.titleGeneration.backend, "unavailable"); assert.equal(Object.keys(titled.titleGeneration.statuses).length, 3); assert.match(Object.values(titled.titleGeneration.errors)[0], /GPU/);
 });
+
+test("forced title regeneration bypasses cache reads but refreshes cache entries", async () => {
+  const { LocalClusterTitleGenerator, TitleModelManager, TITLE_MODEL_DESCRIPTOR } = await loadTitle();
+  const storage = new MemoryStorage();
+  const manager = new TitleModelManager(storage, { ...TITLE_MODEL_DESCRIPTOR, modelSha256: createHash("sha256").update("asset").digest("hex") });
+  await manager.downloadModel(async () => true);
+  const result = { schemaVersion: 2, ids: ["a.md"], leafLabels: [0], probabilities: [1], outlierProxy: [0], hierarchy: { leaves: [0], merges: [], root: 0 }, pca: {}, timings: {} };
+  const notes = [{ path: "a.md", title: "A", content: "body", hash: "a" }];
+  let runtimeCalls = 0;
+  const runtime = async () => ({ generate: async () => { runtimeCalls++; return ["Fresh title"]; }, diagnostics: { backend: "webgpu" } });
+  const cache = { get: () => ({ key: "same", title: "Cached title", nodeMembersFingerprint: "x", savedAt: "" }), set: () => {} };
+  const generator = new LocalClusterTitleGenerator(manager, runtime);
+  const cached = await generator.generate(result, notes, { cache });
+  assert.equal(cached.titles["0"], "Cached title");
+  assert.equal(runtimeCalls, 0);
+  const regenerated = await generator.generate(result, notes, { cache, forceRegenerate: true });
+  assert.equal(regenerated.titles["0"], "Fresh title");
+  assert.equal(regenerated.titleGeneration.statuses["0"], "generated");
+  assert.equal(runtimeCalls, 1);
+});

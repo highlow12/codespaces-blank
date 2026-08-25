@@ -6,6 +6,7 @@ import { TitleModelManager, TitleModelProgress, TitleModelStatus } from "./title
 
 export interface ClusterRunControls {
   build(): Promise<void>;
+  regenerateTitles(): Promise<void>;
   cancel(): void;
   isRunning(): boolean;
 }
@@ -76,14 +77,17 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     const setting = new Setting(containerEl).setName("Build clusters").setDesc("Run the configured embedding and clustering pipeline. Progress remains visible in one persistent Notice while the job is running.");
     const statusEl = setting.controlEl.createDiv({ cls: "atomic-clusters-model-status", text: "Ready" });
     let buildButton: { setDisabled(disabled: boolean): unknown; setButtonText(text: string): unknown } | undefined;
+    let regenerateButton: { setDisabled(disabled: boolean): unknown } | undefined;
     let cancelButton: { setDisabled(disabled: boolean): unknown } | undefined;
     const refresh = () => {
       const running = this.clusterRun.isRunning();
       if (buildButton) { buildButton.setDisabled(running); buildButton.setButtonText(running ? "Building…" : "Build clusters"); }
+      regenerateButton?.setDisabled(running);
       cancelButton?.setDisabled(!running);
       statusEl.setText(running ? "Running — see the persistent progress Notice." : "Ready");
     };
     setting.addButton((button) => { buildButton = button; return button.setButtonText("Build clusters").onClick(() => { if (this.clusterRun.isRunning()) return; try { const run = this.clusterRun.build(); refresh(); void run.catch((error) => { statusEl.setText(`Build failed: ${safeUiError(error)}`); }).finally(refresh); } catch (error) { statusEl.setText(`Build failed: ${safeUiError(error)}`); refresh(); } }); });
+    setting.addButton((button) => { regenerateButton = button; return button.setButtonText("Regenerate titles").setTooltip("Reuse the saved cluster structure and regenerate every leaf and merge title").onClick(() => { if (this.clusterRun.isRunning()) return; try { const run = this.clusterRun.regenerateTitles(); refresh(); void run.catch((error) => { statusEl.setText(`Title regeneration failed: ${safeUiError(error)}`); }).finally(refresh); } catch (error) { statusEl.setText(`Title regeneration failed: ${safeUiError(error)}`); refresh(); } }); });
     setting.addButton((button) => { cancelButton = button; return button.setButtonText("Cancel").setDisabled(true).onClick(() => { if (!this.clusterRun.isRunning()) return; this.clusterRun.cancel(); refresh(); }); });
     refresh();
   }

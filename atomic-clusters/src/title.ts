@@ -161,7 +161,15 @@ export function buildTitlePrompts(result: ClusterResult, notes: NoteRecord[], la
 }
 
 export interface TitleCacheLike { get(key: string): ClusterTitleCacheEntry | undefined; set(entry: ClusterTitleCacheEntry): void; }
-export interface GenerateTitlesOptions { language?: string; signal?: AbortSignal; onProgress?: (done: number, total: number) => void; onBatch?: (result: ClusterResult) => Promise<void> | void; cache?: TitleCacheLike; }
+export interface GenerateTitlesOptions {
+  language?: string;
+  signal?: AbortSignal;
+  onProgress?: (done: number, total: number) => void;
+  onBatch?: (result: ClusterResult) => Promise<void> | void;
+  cache?: TitleCacheLike;
+  /** Ignore cache reads while still writing newly generated titles to it. */
+  forceRegenerate?: boolean;
+}
 
 export class LocalClusterTitleGenerator {
   constructor(private readonly manager: TitleModelManager, private readonly runtimeFactory: TitleRuntimeFactory = unavailableTitleRuntime, private readonly modelStatus?: () => Promise<TitleModelStatus>) {}
@@ -186,7 +194,11 @@ export class LocalClusterTitleGenerator {
       // their children in earlier (bottom-up) batches.
       const currentPrompts = buildTitlePrompts(output, notes, options.language || "auto");
       const batch = levelGroups.get(level)!.slice(start, start + batchSize).map((id) => currentPrompts.find((prompt) => prompt.nodeId === id)!).filter(Boolean); const uncached: TitlePrompt[] = [];
-      for (const prompt of batch) { const key = titleCacheKey(prompt, options.language || "auto"); const cached = options.cache?.get(key); if (cached) { output.titles![String(prompt.nodeId)] = cached.title; statuses[String(prompt.nodeId)] = "cached"; durationsMs[String(prompt.nodeId)] = 0; } else uncached.push(prompt); }
+      for (const prompt of batch) {
+        const key = titleCacheKey(prompt, options.language || "auto");
+        const cached = options.forceRegenerate ? undefined : options.cache?.get(key);
+        if (cached) { output.titles![String(prompt.nodeId)] = cached.title; statuses[String(prompt.nodeId)] = "cached"; durationsMs[String(prompt.nodeId)] = 0; } else uncached.push(prompt);
+      }
       if (uncached.length) try {
         const started = Date.now();
         const values = await runtime.generate(uncached.map((prompt) => prompt.text), { maxNewTokens: 12, doSample: false, temperature: 0, signal: options.signal });
