@@ -34,8 +34,12 @@ function stripChatMLDelimiters(value: string): string {
 
 function renderQwenChatML(userPrompt: string): string {
   const system = stripChatMLDelimiters(TITLE_SYSTEM_PROMPT);
-  const user = stripChatMLDelimiters(userPrompt);
-  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n`;
+  // Qwen3 supports the documented soft switch and its no-thinking template
+  // also emits an empty think block before the assistant answer. Keep both
+  // markers: this prevents the small generation budget from being spent on
+  // hidden reasoning while remaining compatible with ONNX tokenizer assets.
+  const user = stripChatMLDelimiters(userPrompt).trimEnd() + "\n/no_think";
+  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n<think></think>\n`;
 }
 
 function getOnnxRuntime(): OnnxRuntimeModule {

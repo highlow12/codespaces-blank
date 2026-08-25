@@ -363,7 +363,7 @@ class TitleModelConsentModal extends Modal {
   constructor(app: App, private readonly resolveChoice: (value: boolean) => void) { super(app); }
   onOpen(): void {
     this.contentEl.createEl("h2", { text: "Download cluster title model?" });
-    this.contentEl.createEl("p", { text: "This downloads the approximately 483 MB Qwen2.5-0.5B-Instruct Q4F16 ONNX model and tokenizer from Hugging Face. It is stored in the vault and title inference runs locally on WebGPU; CPU fallback is not used." });
+    this.contentEl.createEl("p", { text: "This downloads the approximately 544 MiB (570 MB) Qwen3-0.6B Q4F16 ONNX model and tokenizer from Hugging Face. It is stored in the vault and title inference runs locally on WebGPU; CPU fallback is not used." });
     const buttons = this.contentEl.createDiv({ cls: "modal-button-container" });
     buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.finish(false));
     buttons.createEl("button", { text: "Download", cls: "mod-cta" }).addEventListener("click", () => this.finish(true));

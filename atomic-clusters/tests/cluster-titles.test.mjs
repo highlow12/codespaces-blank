@@ -149,7 +149,7 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.equal(posted.at(-1).id, 1);
   assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
   assert.equal(typeof context.__titleGenerationInput, "string");
-  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster<|im_end|>\n<|im_start|>assistant\n");
+  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n<think></think>\n");
   assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 
@@ -193,9 +193,11 @@ test("invalid title output is retried once and only the validated Korean title i
 });
 
 test("chat generation output extracts the final assistant content", async () => {
-  const { extractAssistantContent } = await loadTitleOutput();
+  const { extractAssistantContent, stripThinkingContent } = await loadTitleOutput();
   assert.equal(extractAssistantContent([{ generated_text: [{ role: "user", content: "요청" }, { role: "assistant", content: "지식 관리" }] }]), "지식 관리");
   assert.equal(extractAssistantContent([{ generated_text: "Plain title" }]), "Plain title");
+  assert.equal(stripThinkingContent("<think>숨은 추론</think>지식 관리"), "지식 관리");
+  assert.equal(stripThinkingContent("<think>잘린 추론"), "");
 });
 
 test("title generation failure is recorded without failing the cluster result", async () => {

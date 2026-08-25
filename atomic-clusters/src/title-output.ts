@@ -1,3 +1,13 @@
+/** Remove Qwen3 reasoning blocks before title validation/sanitization. */
+export function stripThinkingContent(value: unknown): string {
+  let text = String(value ?? "");
+  text = text.replace(/<think>[\s\S]*?<\/think>/gi, " ");
+  // A truncated generation can leave an unterminated reasoning block. Never
+  // expose its internal reasoning as a cluster title.
+  text = text.replace(/<think>[\s\S]*$/gi, " ");
+  return text.trim();
+}
+
 /** Extract the final assistant message from Transformers.js text-generation output. */
 export function extractAssistantContent(output: unknown): string {
   const item = Array.isArray(output) ? output[0] : output;
@@ -5,11 +15,11 @@ export function extractAssistantContent(output: unknown): string {
   if (Array.isArray(generated)) {
     const messages = generated as Array<{ role?: string; content?: unknown; text?: unknown }>;
     const assistant = [...messages].reverse().find((message) => message && message.role === "assistant") || [...messages].reverse().find((message) => message && typeof message.content === "string");
-    return assistant ? String(assistant.content ?? assistant.text ?? "") : "";
+    return assistant ? stripThinkingContent(assistant.content ?? assistant.text ?? "") : "";
   }
   if (generated && typeof generated === "object") {
     const message = generated as { content?: unknown; text?: unknown; generated_text?: unknown };
-    return String(message.content ?? message.text ?? message.generated_text ?? "");
+    return stripThinkingContent(message.content ?? message.text ?? message.generated_text ?? "");
   }
-  return typeof generated === "string" ? generated : String(generated ?? "");
+  return stripThinkingContent(typeof generated === "string" ? generated : String(generated ?? ""));
 }

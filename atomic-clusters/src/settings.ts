@@ -52,7 +52,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
   }
 
   private renderTitleModelControl(containerEl: HTMLElement): void {
-    new Setting(containerEl).setName("Cluster title model").setDesc("Optional offline Qwen2.5-0.5B-Instruct Q4F16 WebGPU model. Titles are generated after a cluster result is saved; missing or failed title inference never fails clustering.").addToggle((toggle) => toggle.setValue(this.settings.clusterTitlesEnabled !== false).onChange(async (value) => { this.settings.clusterTitlesEnabled = value; await this.save(); }));
+    new Setting(containerEl).setName("Cluster title model").setDesc("Optional offline Qwen3-0.6B Q4F16 WebGPU model (about 544 MiB). Titles are generated after a cluster result is saved; missing or failed title inference never fails clustering.").addToggle((toggle) => toggle.setValue(this.settings.clusterTitlesEnabled !== false).onChange(async (value) => { this.settings.clusterTitlesEnabled = value; await this.save(); }));
     const setting = new Setting(containerEl).setName("Title model files").setDesc("Download requires explicit consent. The manifest is written last and integrity is checked only with Check model.");
     const statusSetting = new Setting(containerEl).setName("Title model status").setDesc("Checking…");
     const progress = statusSetting.controlEl.createEl("progress", { cls: "atomic-clusters-model-progress", attr: { max: "1", value: "0" } });

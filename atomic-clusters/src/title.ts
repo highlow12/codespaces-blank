@@ -2,21 +2,23 @@ import { requestUrl } from "obsidian";
 import { ClusterResult, ClusterTitleCacheEntry, ClusterTitleStatus, HierarchyMerge, NoteRecord } from "./types";
 
 /** The title model is deliberately separate from embedding models and is never fetched implicitly. */
-export const TITLE_MODEL_ID = "qwen2.5-0.5b-instruct";
-export const TITLE_MODEL_REVISION = "516c8d04add8a80c5228f32102b57953b8d421a9";
-export const TITLE_MODEL_MODEL_SHA256 = "b11c1dd99efd57e6c6e5bc4443a019931a5fbd5dd500d48644d8225f5ce0b2cb";
-export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v2-chat-clean-validated";
+export const TITLE_MODEL_ID = "qwen3-0.6b-q4f16";
+export const TITLE_MODEL_REVISION = "558750086ed49d78cb701ed6fa85af33fd16453f";
+export const TITLE_MODEL_MODEL_SHA256 = "9e33a5911974174761d0dfdcc0bec975d9c45af0eae5e9eb647b8ba9442a8f91";
+export const TITLE_MODEL_SIZE_BYTES = 569_789_750;
+export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v3-qwen3-no-think-clean-validated";
 export const TITLE_MODEL_DESCRIPTOR = {
   id: TITLE_MODEL_ID,
   revision: TITLE_MODEL_REVISION,
-  modelUrl: `https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/${TITLE_MODEL_REVISION}/onnx/model_q4f16.onnx`,
-  tokenizerUrl: `https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/${TITLE_MODEL_REVISION}/tokenizer.json`,
-  configUrl: `https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/${TITLE_MODEL_REVISION}/config.json`,
-  generationConfigUrl: `https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/${TITLE_MODEL_REVISION}/generation_config.json`,
-  tokenizerConfigUrl: `https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct/resolve/${TITLE_MODEL_REVISION}/tokenizer_config.json`,
+  modelUrl: `https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/${TITLE_MODEL_REVISION}/onnx/model_q4f16.onnx`,
+  tokenizerUrl: `https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/${TITLE_MODEL_REVISION}/tokenizer.json`,
+  configUrl: `https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/${TITLE_MODEL_REVISION}/config.json`,
+  generationConfigUrl: `https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/${TITLE_MODEL_REVISION}/generation_config.json`,
+  tokenizerConfigUrl: `https://huggingface.co/onnx-community/Qwen3-0.6B-ONNX/resolve/${TITLE_MODEL_REVISION}/tokenizer_config.json`,
   /** The manifest records the downloaded digest; this field is a fixed descriptor identity. */
   quantization: "q4f16",
   device: "webgpu",
+  modelSizeBytes: TITLE_MODEL_SIZE_BYTES,
   modelSha256: TITLE_MODEL_MODEL_SHA256
 } as const;
 
@@ -146,6 +148,9 @@ export function cleanNoteTitle(title: string): string { return cleanText(title.r
 /** Normalize a model response without allowing markdown or a prompt label to leak into the UI. */
 export function sanitizeTitle(raw: string): string {
   let title = String(raw || "").replace(/```[\s\S]*?```/g, " ").replace(/[\r\n]+/g, " ");
+  // Qwen3 may still return a reasoning block when the soft /no_think switch
+  // is ignored or a generation is truncated. It is never part of a title.
+  title = title.replace(/<think>[\s\S]*?<\/think>/gi, " ").replace(/<think>[\s\S]*$/gi, " ");
   title = title.replace(/^["'“”‘’「」『』]+|["'“”‘’「」『』]+$/g, "").trim();
   title = title.replace(/^\s*(?:assistant|answer|title|제목)\s*[:：-]\s*/i, "");
   title = title.replace(/^\s*(?:[-*+•]|\d+[.)])\s*(?:\[[ xX]\]\s*)?/, "").replace(/^\s*\[[ xX]\]\s*/, "");
