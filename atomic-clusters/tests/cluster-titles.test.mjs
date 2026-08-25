@@ -30,6 +30,9 @@ test("title model manager rejects a model whose bytes do not match the pinned SH
 test("title worker uses the bundled Transformers.js pipeline with local-only WebGPU assets", async () => {
   const worker = await readFile(new URL("../src/title-worker.ts", import.meta.url), "utf8");
   assert.match(worker, /@huggingface\/transformers/);
+  assert.match(worker, /atomic-clusters-title-onnxruntime-web/);
+  assert.match(worker, /Symbol\.for\("onnxruntime"\)/);
+  assert.match(worker, /configureOnnxRuntime\(event\.data\.ortWasm\)/);
   assert.match(worker, /allowRemoteModels\s*=\s*false/);
   assert.match(worker, /localModelPath/);
   assert.match(worker, /device:\s*"webgpu"/);
@@ -39,6 +42,16 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.match(worker, /ort-wasm-simd-threaded\.jsep\.wasm/);
   assert.match(worker, /blocked non-local asset request/);
   assert.match(worker, /input instanceof Request \? input\.url/);
+  // Transformers.js fills env.backends.onnx only when its backend module is
+  // first loaded; checking it before pipeline() regresses to a false failure.
+  assert.doesNotMatch(worker, /const onnxWasm = env\.backends\?\.onnx\?\.wasm/);
+});
+
+test("title build aliases the explicit ORT import to Transformers.js' pinned runtime", async () => {
+  const build = await readFile(new URL("../build.mjs", import.meta.url), "utf8");
+  assert.match(build, /transformersOrtWeb/);
+  assert.match(build, /onnxruntime-web\/dist\/ort\.webgpu\.mjs/);
+  assert.match(build, /titleOrtAliasPlugin/);
 });
 
 test("title prompt selection uses probability-ranked notes and bounded cleaned snippets", async () => {

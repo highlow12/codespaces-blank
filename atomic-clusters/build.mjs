@@ -68,7 +68,14 @@ async function run() {
   const workerSource = new TextDecoder().decode(workerBuild.outputFiles[0].contents);
   const browserWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/browser-worker.ts"], plugins: [wasmBootstrap], write: false });
   const browserWorkerSource = new TextDecoder().decode(browserWorkerBuild.outputFiles[0].contents);
-  const titleWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/title-worker.ts"], write: false });
+  // Transformers.js bundles its own (currently 1.22.x) ORT Web dependency.
+  // Point the title worker's explicit runtime import at that exact copy so
+  // its env object is the one selected by the lazy Transformers backend.
+  const transformersOrtWeb = resolve("node_modules/@huggingface/transformers/node_modules/onnxruntime-web/dist/ort.webgpu.mjs");
+  const titleOrtAliasPlugin = { name: "transformers-title-onnxruntime-web", setup(plugin) {
+    plugin.onResolve({ filter: /^atomic-clusters-title-onnxruntime-web$/ }, () => ({ path: transformersOrtWeb }));
+  } };
+  const titleWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/title-worker.ts"], plugins: [titleOrtAliasPlugin], write: false });
   const titleWorkerSource = new TextDecoder().decode(titleWorkerBuild.outputFiles[0].contents);
   const pyodideWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/pyodide-worker.ts"], plugins: [wasmBootstrap, pyodideCorePlugin], write: false });
   const pyodideWorkerSource = new TextDecoder().decode(pyodideWorkerBuild.outputFiles[0].contents);
