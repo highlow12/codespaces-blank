@@ -1,6 +1,7 @@
 import { requestUrl } from "obsidian";
 import * as ort from "onnxruntime-web/wasm";
-import { CachedEmbedding, EmbeddingLogEntry, EmbeddingProviderId, NoteRecord, PluginSettings } from "./types";
+import * as ortWebGpu from "onnxruntime-web/webgpu";
+import { CachedEmbedding, EmbeddingLogEntry, EmbeddingProviderId, LocalExecutionProvider, NoteRecord, PluginSettings } from "./types";
 
 export interface EmbeddingProvider {
   readonly id: EmbeddingProviderId;
@@ -52,10 +53,12 @@ export const LOCAL_MODEL_DESCRIPTOR = {
 
 export const LOCAL_ORT_MJS_ASSET = "ort-wasm-simd-threaded.mjs";
 export const LOCAL_ORT_WASM_ASSET = "ort-wasm-simd-threaded.wasm";
+export const LOCAL_ORT_WEBGPU_MJS_ASSET = "ort-wasm-simd-threaded.jsep.mjs";
+export const LOCAL_ORT_WEBGPU_WASM_ASSET = "ort-wasm-simd-threaded.jsep.wasm";
 /** Conservative bound: SentencePiece normally uses far fewer than 8 chars/token. */
 export const LOCAL_TOKENIZER_CHAR_FACTOR = 8;
 
-export interface LocalOrtAssetOverrides { mjs?: string; wasm?: string; wasmBinary?: ArrayBuffer; revoke?: () => void; }
+export interface LocalOrtAssetOverrides { mjs?: string; wasm?: string; wasmBinary?: ArrayBuffer; webgpuMjs?: string; webgpuWasm?: string; webgpuWasmBinary?: ArrayBuffer; revoke?: () => void; }
 let localOrtAssetPrefix: string | null = null;
 let localOrtAssetOverrides: LocalOrtAssetOverrides | undefined;
 
@@ -166,6 +169,8 @@ export interface LocalInferenceRuntime { embed(texts: string[], artifact: LocalM
 
 export interface LocalRuntimeProgress { phase: "configuration" | "model" | "session" | "probe" | "complete"; progress: number; detail?: string; }
 
+export interface LocalRuntimeDiagnostics { backend: "webgpu" | "wasm"; fallbackReason?: string; }
+
 /** Errors raised while initializing/loading the ONNX backend must not be retried per note. */
 export class LocalInferenceBackendError extends Error {
   constructor(message: string, cause?: unknown) { super(message); this.name = "LocalInferenceBackendError"; if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause; }
@@ -224,7 +229,9 @@ export class UnigramTokenizer implements LocalTokenizer {
 /** Runtime seam for the optional ONNX binding and tokenizer implementation. */
 export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
   private sessionPromise?: Promise<any>;
-  constructor(private readonly ort: { Tensor: new (type: string, data: ArrayLike<number> | BigInt64Array, dims: number[]) => any; InferenceSession: { create(model: ArrayBuffer): Promise<any> } }, private readonly tokenizer: LocalTokenizer, private readonly batchSize = 16, private readonly maxLength = 512) {}
+  readonly diagnostics: LocalRuntimeDiagnostics;
+  constructor(private readonly ort: { Tensor: new (type: string, data: ArrayLike<number> | BigInt64Array, dims: number[]) => any; InferenceSession: { create(model: ArrayBuffer, options?: { executionProviders?: readonly string[] }): Promise<any> } }, private readonly tokenizer: LocalTokenizer, private readonly batchSize = 16, private readonly maxLength = 512, backend: "webgpu" | "wasm" = "wasm", fallbackReason?: string) { this.diagnostics = { backend, ...(fallbackReason ? { fallbackReason } : {}) }; }
+  async initialize(artifact: LocalModelArtifact): Promise<void> { await this.getSession(artifact); }
   async embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<number[][]> {
     const session = await this.getSession(artifact);
     const output: number[][] = [];
@@ -267,14 +274,14 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
         output.push(norm > 1e-12 ? vector.map((value) => value / norm) : vector.fill(0));
       }
       onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
-      if (start + batch.length < texts.length) { await new Promise<void>((resolve) => setTimeout(resolve, 0)); checkCancelled(signal); }
+      if (start + batch.length < texts.length) { await yieldToEventLoop(); checkCancelled(signal); }
     }
     return output;
   }
 
   private async getSession(artifact: LocalModelArtifact): Promise<any> {
     if (!this.sessionPromise) {
-      this.sessionPromise = this.ort.InferenceSession.create(artifact.model).catch((error) => {
+      this.sessionPromise = this.ort.InferenceSession.create(artifact.model, { executionProviders: [this.diagnostics.backend] }).catch((error) => {
         this.sessionPromise = undefined;
         throw new LocalInferenceBackendError("Local ONNX backend initialization failed; verify the bundled ORT assets and installed model.", error);
       });
@@ -284,6 +291,12 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
 }
 
 function flattenBigInt(rows: number[][]): BigInt64Array { return BigInt64Array.from(rows.flat().map((value) => BigInt(value))); }
+
+/** MessageChannel queues a task without the aggressive background timer throttling used by Electron. */
+function yieldToEventLoop(): Promise<void> {
+  if (typeof MessageChannel === "function") return new Promise((resolve) => { const channel = new MessageChannel(); channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); }; channel.port2.postMessage(undefined); });
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 export interface SecretResolver { getSecret(reference: string): Promise<string | null>; }
 
@@ -344,22 +357,42 @@ async function withRetry<T>(request: () => Promise<T>, signal?: AbortSignal, att
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-export type LocalRuntimeFactory = (artifact: LocalModelArtifact) => Promise<LocalInferenceRuntime>;
+export type LocalRuntimeFactory = (artifact: LocalModelArtifact, executionProvider?: LocalExecutionProvider) => Promise<LocalInferenceRuntime>;
 
-export async function defaultLocalRuntimeFactory(artifact: LocalModelArtifact): Promise<LocalInferenceRuntime> {
+function configureOrtBinding(binding: typeof ort, backend: "webgpu" | "wasm"): void {
+  binding.env.wasm.numThreads = 1;
+  const mjs = backend === "webgpu" ? localOrtAssetOverrides?.webgpuMjs : localOrtAssetOverrides?.mjs;
+  const wasm = backend === "webgpu" ? localOrtAssetOverrides?.webgpuWasm : localOrtAssetOverrides?.wasm;
+  const wasmBinary = backend === "webgpu" ? localOrtAssetOverrides?.webgpuWasmBinary : localOrtAssetOverrides?.wasmBinary;
+  binding.env.wasm.wasmPaths = mjs ? { mjs, ...(wasm ? { wasm } : {}) } : (localOrtAssetPrefix || undefined);
+  if (wasmBinary) binding.env.wasm.wasmBinary = wasmBinary;
+}
+
+function hasWebGpu(): boolean { return typeof navigator !== "undefined" && !!(navigator as Navigator & { gpu?: unknown }).gpu; }
+
+export async function defaultLocalRuntimeFactory(artifact: LocalModelArtifact, executionProvider: LocalExecutionProvider = "auto"): Promise<LocalInferenceRuntime> {
   // The WASM ORT binding and tokenizer are bundled with the plugin. The hook
   // remains an override for alternate execution providers, but is no longer
   // required for a normal model-download -> offline-embed flow.
   const override = (globalThis as typeof globalThis & { __ATOMIC_CLUSTERS_LOCAL_ONNX__?: LocalInferenceRuntime }).__ATOMIC_CLUSTERS_LOCAL_ONNX__;
   if (override) return override;
   if (!localOrtAssetPrefix) throw new LocalInferenceBackendError("Local ORT assets are not configured for this vault/plugin installation.");
-  ort.env.wasm.numThreads = 1;
-  ort.env.wasm.wasmPaths = localOrtAssetOverrides?.mjs
-    ? { mjs: localOrtAssetOverrides.mjs, ...(localOrtAssetOverrides.wasm ? { wasm: localOrtAssetOverrides.wasm } : {}) }
-    : localOrtAssetPrefix;
-  if (localOrtAssetOverrides?.wasmBinary) ort.env.wasm.wasmBinary = localOrtAssetOverrides.wasmBinary;
   const tokenizer = new UnigramTokenizer(new TextDecoder().decode(artifact.tokenizer));
-  return new OrtEmbeddingRuntime(ort, tokenizer);
+  const create = async (backend: "webgpu" | "wasm", fallbackReason?: string): Promise<OrtEmbeddingRuntime> => {
+    const binding = backend === "webgpu" ? ortWebGpu : ort;
+    configureOrtBinding(binding, backend);
+    const runtime = new OrtEmbeddingRuntime(binding, tokenizer, 16, 512, backend, fallbackReason);
+    await runtime.initialize(artifact);
+    return runtime;
+  };
+  if (executionProvider === "wasm") return create("wasm");
+  if (executionProvider === "webgpu" && !hasWebGpu()) throw new LocalInferenceBackendError("WebGPU is unavailable in this Obsidian environment.");
+  if (executionProvider === "auto" && !hasWebGpu()) return create("wasm", "WebGPU is unavailable; using WASM CPU.");
+  try { return await create("webgpu"); }
+  catch (error) {
+    if (executionProvider === "webgpu") throw new LocalInferenceBackendError("WebGPU local ONNX session initialization failed.", error);
+    return create("wasm", `WebGPU initialization failed; using WASM CPU: ${safeError(error)}`);
+  }
 }
 
 export class LocalEmbeddingProvider implements EmbeddingProvider {
@@ -367,6 +400,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   private runtimeState?: { artifact: LocalModelArtifact; runtime: LocalInferenceRuntime };
   constructor(private readonly settings: PluginSettings, private readonly runner?: (texts: string[], model: string) => Promise<number[][]>, private readonly manager?: LocalModelManager, private readonly runtimeFactory: LocalRuntimeFactory = defaultLocalRuntimeFactory) {}
   get model(): string { return `${this.settings.localModel}@${LOCAL_MODEL_VERSION}`; }
+  get runtimeDiagnostics(): LocalRuntimeDiagnostics | undefined { return (this.runtimeState?.runtime as LocalInferenceRuntime & { diagnostics?: LocalRuntimeDiagnostics })?.diagnostics; }
 
   async preflight(onProgress?: (progress: LocalRuntimeProgress) => void, signal?: AbortSignal): Promise<void> {
     checkCancelled(signal);
@@ -380,8 +414,10 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       if (vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
     } else {
       onProgress?.({ phase: "model", progress: 0.25, detail: "Loading and verifying the installed model" });
+      onProgress?.({ phase: "session", progress: 0.5, detail: "Initializing the configured local ONNX backend" });
       const runtimeState = await this.getRuntime();
-      onProgress?.({ phase: "session", progress: 0.5, detail: "Initializing the ONNX session" });
+      const diagnostics = (runtimeState.runtime as LocalInferenceRuntime & { diagnostics?: LocalRuntimeDiagnostics }).diagnostics;
+      onProgress?.({ phase: "session", progress: 0.5, detail: diagnostics ? `${diagnostics.backend === "webgpu" ? "WebGPU" : "WASM CPU"} backend ready${diagnostics.fallbackReason ? ` · ${diagnostics.fallbackReason}` : ""}` : "ONNX session ready" });
       const vectors = await runtimeState.runtime.embed(["passage: Atomic Clusters local runtime preflight"], runtimeState.artifact, undefined, signal);
       checkCancelled(signal);
       if (vectors.length !== 1 || vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
@@ -436,7 +472,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     if (!this.runtimeState) {
       if (!this.manager) throw new Error("Local model is not configured. Download multilingual-e5-small from Settings first.");
       const artifact = await this.manager.load();
-      const runtime = await this.runtimeFactory(artifact);
+      const runtime = await this.runtimeFactory(artifact, this.settings.localExecutionProvider || "auto");
       this.runtimeState = { artifact, runtime };
     }
     return this.runtimeState;

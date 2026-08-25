@@ -86,11 +86,13 @@ async function run() {
   await build(mainBuild);
   await cp("manifest.json", "dist/manifest.json");
   await cp("styles.css", "dist/styles.css");
-  // onnxruntime-web/wasm resolves its worker and binary next to the plugin
-  // bundle. Ship only the selected WASM execution-provider assets; inference
-  // remains local after the model has been explicitly downloaded.
+  // onnxruntime-web resolves its worker and binary next to the plugin bundle.
+  // Ship both CPU WASM and the JSEP/WebGPU assets; inference remains local
+  // after the model has been explicitly downloaded.
   const ortAssets = resolve("node_modules/onnxruntime-web/dist");
   await cp(resolve(ortAssets, "ort-wasm-simd-threaded.mjs"), "dist/ort-wasm-simd-threaded.mjs");
   await cp(resolve(ortAssets, "ort-wasm-simd-threaded.wasm"), "dist/ort-wasm-simd-threaded.wasm");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.mjs"), "dist/ort-wasm-simd-threaded.jsep.mjs");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.wasm"), "dist/ort-wasm-simd-threaded.jsep.wasm");
 }
 run().catch((error) => { console.error(error); process.exitCode = 1; });

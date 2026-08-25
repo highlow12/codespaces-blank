@@ -1,10 +1,13 @@
 export type EmbeddingProviderId = "gemini" | "local";
+export type LocalExecutionProvider = "auto" | "webgpu" | "wasm";
 
 export interface PluginSettings {
   embeddingProvider: EmbeddingProviderId;
   geminiModel: string;
   geminiSecretRef: string;
   localModel: string;
+  /** Prefer WebGPU when available, or force the WASM CPU backend. */
+  localExecutionProvider?: LocalExecutionProvider;
   excludedFolders: string[];
   minClusterSize: number;
   minSamples: number;
@@ -58,6 +61,7 @@ export interface EmbeddingRunLog {
   entries: EmbeddingLogEntry[];
   status?: "completed" | "failed" | "cancelled";
   stage?: "preflight" | "embedding" | "clustering";
+  runtime?: { backend: "webgpu" | "wasm"; fallbackReason?: string };
   error?: string;
 }
 

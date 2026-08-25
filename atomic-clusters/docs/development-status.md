@@ -21,9 +21,12 @@ Atomic Clusters의 목표는 Obsidian desktop에서 Markdown vault를 노트 간
 - `local` provider는 Settings의 명시적 동의 후 multilingual-e5-small ONNX
   모델과 tokenizer를 내려받아 설치한다. 버전·SHA-256 manifest를 함께 저장하고
   삭제도 제공하므로 설치 이후 `embed()`는 네트워크 없이 동작한다. ONNX
-  execution/tokenizer binding은 bundled `onnxruntime-web/wasm`와 offline
-  SentencePiece Unigram tokenizer를 사용한다. 대체 execution provider를 위한
-  injection seam도 유지한다.
+  execution/tokenizer binding은 bundled onnxruntime-web WASM/WebGPU(JSEP)와
+  offline SentencePiece Unigram tokenizer를 사용한다. Local backend는 `auto`가
+  기본이며 WebGPU session을 먼저 시도하고 지원되지 않거나 초기화에 실패하면
+  WASM CPU로 fallback한다. 선택 backend와 fallback 원인은 preflight 진행 상태와
+  run log에 제한적으로 표시한다. 대체 execution provider를 위한 injection seam도
+  유지한다.
 
 ## 현재 desktop 구조
 
@@ -87,6 +90,7 @@ run-level log에 기록한다.
 | embedding provider | `gemini` | Gemini 전송 확인 후 768-dimensional embedding |
 | Gemini model | `gemini-embedding-2` | SecretStorage reference 기본값은 `gemini-api-key` |
 | local model | `multilingual-e5-small` | 명시적 설치 후 bundled ONNX/WASM + tokenizer로 offline |
+| local execution backend | `auto` | WebGPU 우선, 미지원/실패 시 WASM CPU fallback |
 | excluded folders | `[]` | 모든 Markdown 파일 대상 |
 | HDBSCAN `minClusterSize` | `5` | 현재 설정 화면에는 직접 노출하지 않음 |
 | HDBSCAN `minSamples` | `3` | core-distance 이웃 수 |

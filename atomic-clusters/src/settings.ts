@@ -24,6 +24,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = value.split(",").map((item) => item.trim()).filter(Boolean); await this.save(); }));
     this.renderClusterRunControl(containerEl);
     if (this.settings.embeddingProvider === "local") {
+      new Setting(containerEl).setName("Local execution backend").setDesc("Auto tries WebGPU first and falls back to the WASM CPU backend when unavailable. WebGPU can be faster but depends on the graphics driver.").addDropdown((dropdown) => dropdown.addOption("auto", "Auto (WebGPU → WASM CPU)").addOption("webgpu", "WebGPU only").addOption("wasm", "WASM CPU only").setValue(this.settings.localExecutionProvider || "auto").onChange(async (value) => { this.settings.localExecutionProvider = value as PluginSettings["localExecutionProvider"]; await this.save(); }));
       const modelSetting = new Setting(containerEl).setName("Local multilingual-e5-small").setDesc("Download once with explicit consent; inference uses the installed files without network access.");
       const statusSetting = new Setting(containerEl).setName("Local model status").setDesc("Installation progress and integrity status.");
       const progress = statusSetting.controlEl.createEl("progress", { cls: "atomic-clusters-model-progress", attr: { max: "1", value: "0" } });

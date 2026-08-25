@@ -16,4 +16,6 @@ test("release build invokes the practical verifier after checking asset presence
   const source = await readFile(new URL("../build.mjs", import.meta.url), "utf8");
   assert.match(source, /verifyWasmAsset\(gluePath, wasmPath\)/);
   assert.match(source, /requireWasm/);
+  assert.match(source, /ort-wasm-simd-threaded\.jsep\.mjs/);
+  assert.match(source, /ort-wasm-simd-threaded\.jsep\.wasm/);
 });

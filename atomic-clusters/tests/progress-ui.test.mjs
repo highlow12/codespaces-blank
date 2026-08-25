@@ -29,6 +29,8 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(main, /disposeLocalOrtAssets/);
   assert.match(main, /current = \(current as \{ cause\?: unknown \}\)\?\.cause/);
   assert.match(embedding, /wasmBinary/);
+  assert.match(embedding, /webgpuMjs/);
+  assert.match(embedding, /yieldToEventLoop/);
   assert.doesNotMatch(main, /class EmbeddingLogModal/);
   assert.doesNotMatch(main, /atomic-clusters-log-table/);
   assert.match(settings, /Open embedding log/);
@@ -60,6 +62,8 @@ test("embedding log contract contains diagnostics but no payload fields", async 
   assert.match(types, /status\?: "completed" \| "failed" \| "cancelled"/);
   assert.match(types, /stage\?: "preflight" \| "embedding" \| "clustering"/);
   assert.match(settings, /Test local runtime/);
+  assert.match(settings, /Auto \(WebGPU → WASM CPU\)/);
+  assert.match(types, /LocalExecutionProvider/);
   assert.match(settings, /runtime \$\{update\.phase\}/);
   assert.match(main, /provider\.preflight/);
   assert.match(main, /stage: "preflight"/);

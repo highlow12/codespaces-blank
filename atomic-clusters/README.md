@@ -27,9 +27,12 @@ resolved by a SecretStorage reference, never persisted in plugin settings.
 The local `multilingual-e5-small` provider is opt-in. Settings provides an
 explicit consent dialog to download the ONNX model and tokenizer, stores them
 under the plugin model directory with a versioned SHA-256 manifest, and offers
-deletion. After installation, embedding uses only the local model and the
-bundled `onnxruntime-web/wasm` runtime plus tokenizer; no network request is
-made by `embed()`.
+deletion. After installation, embedding uses only the local model, bundled
+onnxruntime-web WASM/WebGPU (JSEP) assets, and tokenizer; no network request is
+made by `embed()`. The local backend setting defaults to Auto: it tries WebGPU
+first and falls back to the WASM CPU backend when WebGPU is unavailable or
+session creation fails. The selected backend or fallback reason appears in
+preflight progress and the run log.
 
 The Pyodide worker embeds the `pyodide_core` source package in the release
 bundle, loads NumPy and scikit-learn, fits the authoritative Python PCA, and

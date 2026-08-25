@@ -7,8 +7,9 @@ async function loadEmbedding() {
   const source = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
   const stubbed = source
     .replace('import { requestUrl } from "obsidian";', 'const requestUrl = async ({ url }) => ({ arrayBuffer: new TextEncoder().encode(url.includes("tokenizer") ? "tokenizer" : "onnx").buffer });')
-    .replace('import * as ort from "onnxruntime-web/wasm";', 'const ort = { env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };');
-  const result = await transform(`${stubbed}\nexport { ort };`, { loader: "ts", format: "esm", target: "es2020" });
+    .replace('import * as ort from "onnxruntime-web/wasm";', 'const ort = { env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };')
+    .replace('import * as ortWebGpu from "onnxruntime-web/webgpu";', 'const ortWebGpu = ort;');
+  const result = await transform(`${stubbed}\nexport { ort, ortWebGpu };`, { loader: "ts", format: "esm", target: "es2020" });
   return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
 }
 
@@ -175,7 +176,7 @@ test("local runtime preflight probes once and reuses the runtime for embedding",
   const phases = [];
   await provider.preflight((update) => phases.push(update.phase));
   await provider.embed([{ path: "a.md", title: "A", content: "hello", hash: "h", mtime: 1 }]);
-  assert.deepEqual(phases, ["configuration", "model", "session", "complete"]);
+  assert.deepEqual(phases, ["configuration", "model", "session", "session", "complete"]);
   assert.equal(factoryCalls, 1);
   assert.equal(inferenceCalls, 2);
 });
@@ -189,6 +190,37 @@ test("default factory uses bundled Unigram tokenizer and ORT runtime without an 
   assert.equal(vectors.length, 1);
   assert.equal(vectors[0].length, 2);
   assert.ok(Math.abs(Math.hypot(...vectors[0]) - 1) < 1e-6);
+});
+
+test("default factory reports automatic WebGPU-to-WASM CPU fallback", async () => {
+  const { configureLocalOrtAssets, defaultLocalRuntimeFactory } = await loadEmbedding();
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/");
+  const tokenizer = JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["hello", -0.2], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] });
+  const runtime = await defaultLocalRuntimeFactory({ model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer }, "auto");
+  assert.equal(runtime.diagnostics.backend, "wasm");
+  assert.match(runtime.diagnostics.fallbackReason, /WebGPU/);
+});
+
+test("default factory falls back when WebGPU session creation fails", async () => {
+  const { ortWebGpu, configureLocalOrtAssets, defaultLocalRuntimeFactory } = await loadEmbedding();
+  configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/");
+  const tokenizer = JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["hello", -0.2], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] });
+  const originalCreate = ortWebGpu.InferenceSession.create;
+  let calls = 0;
+  const requestedProviders = [];
+  ortWebGpu.InferenceSession.create = async (...args) => { calls++; requestedProviders.push(args[1]?.executionProviders); if (calls === 1) throw new Error("GPU session unavailable"); return originalCreate(...args); };
+  const originalNavigator = globalThis.navigator;
+  Object.defineProperty(globalThis, "navigator", { configurable: true, value: { gpu: {} } });
+  try {
+    const runtime = await defaultLocalRuntimeFactory({ model: new ArrayBuffer(2), tokenizer: new TextEncoder().encode(tokenizer).buffer }, "auto");
+    assert.equal(runtime.diagnostics.backend, "wasm");
+    assert.match(runtime.diagnostics.fallbackReason, /GPU session unavailable/);
+    assert.equal(calls, 2);
+    assert.deepEqual(requestedProviders, [["webgpu"], ["wasm"]]);
+  } finally {
+    ortWebGpu.InferenceSession.create = originalCreate;
+    Object.defineProperty(globalThis, "navigator", { configurable: true, value: originalNavigator });
+  }
 });
 
 test("default factory wires renderer-safe ORT blob module and wasm binary overrides", async () => {
@@ -228,6 +260,18 @@ test("pinned ORT renderer transform disables both Electron Node-detection branch
   assert.match(transformed, /data:application\/wasm;base64/);
   assert.doesNotMatch(transformed, /new URL\("ort-wasm-simd-threaded\.wasm",import\.meta\.url\)/);
   assert.doesNotMatch(transformed, /if\(B\)\{|if \(isNode\)/);
+});
+
+test("pinned JSEP/WebGPU ORT renderer transform handles its asset name", async () => {
+  const { prepareLocalOrtRendererModule } = await loadOrtAssets();
+  const source = await readFile(new URL("../node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.jsep.mjs", import.meta.url), "utf8");
+  const transformed = prepareLocalOrtRendererModule(source, "ort-wasm-simd-threaded.jsep.wasm");
+  assert.match(transformed, /D=false/);
+  assert.equal((transformed.match(/if\(false\)\{/g) || []).length, 3);
+  assert.match(transformed, /var isNode = false/);
+  assert.match(transformed, /data:application\/wasm;base64/);
+  assert.match(transformed, /if \(false\) isPthread/);
+  assert.doesNotMatch(transformed, /new URL\("ort-wasm-simd-threaded\.jsep\.wasm",import\.meta\.url\)/);
 });
 
 test("ORT renderer transform rejects an unexpected asset format", async () => {
