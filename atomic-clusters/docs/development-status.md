@@ -41,6 +41,13 @@ mtime, (지원 runtime에서는 SHA-256, test fallback에서는 stable FNV) cont
 재임베딩한다. `NodeClusteringWorker`에는 `INIT/CLUSTER/CANCEL` 요청과
 `READY/PROGRESS/RESULT/ERROR` 응답 계약이 있다.
 
+설정에서 `Pyodide Python reference` runtime을 선택하면 같은 worker 계약을
+유지하는 `PyodideClusteringWorker`를 사용한다. worker는 release bundle에
+포함된 `pyodide_core`를 Pyodide 가상 filesystem에 설치하고 Python
+`cluster_documents`를 호출한다. Pyodide가 PCA를 fit한 뒤 JS UMAP/WASM-HDBSCAN
+결과를 `discovery_runner`로 주입하므로 Python membership-weighted hierarchy를
+실제 worker에서 검증할 수 있다. 기본 WASM runtime은 변경되지 않는다.
+
 worker가 생성된 WASM asset을 발견하면 `WasmNumericKernel`을 사용한다. asset이
 없는 개발/fixture 빌드에서는 같은 orchestration이 deterministic TypeScript
 kernel로 동작한다. 이 fallback은 개발 가능성을 위한 것이며 Python/HDBSCAN
@@ -167,7 +174,7 @@ cluster_selection_method="leaf", prediction_data=True)`를 사용한다. Python�
 native memberships와 probability/outlier score를 보존하고, bottom-up hierarchy
 center는 unnormalized selected PCA features와 memberships를 사용한다.
 
-현재 plugin은 다음과 같이 의도적으로 다르다.
+현재 plugin의 기본 WASM runtime은 다음과 같이 의도적으로 다르다.
 
 - UMAP은 `umap-js@1.4.0`이며 `umap-learn`과 초기화·optimizer·부동소수점 및
   neighbor graph 구현이 동일하다고 가정하지 않는다.

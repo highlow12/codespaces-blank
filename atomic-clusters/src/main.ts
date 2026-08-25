@@ -5,17 +5,19 @@ import { AtomicClustersSettingTab } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
 import { ClusteringConfig, ClusterResult, PluginSettings } from "./types";
 import { NodeClusteringWorker } from "./worker-client";
+import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
   localModel: "multilingual-e5-small", excludedFolders: [], minClusterSize: 5, minSamples: 3,
   umapNeighbors: 15, umapMinDist: 0.1, pcaVarianceTarget: 0.9
+  , clusteringRuntime: "wasm", pyodideUrl: ""
 };
 
 export default class AtomicClustersPlugin extends Plugin {
   settings!: PluginSettings;
-  private worker: NodeClusteringWorker | null = null;
+  private worker: NodeClusteringWorker | PyodideClusteringWorker | null = null;
   private latestResult: ClusterResult | null = null;
   private running = false;
 
@@ -55,7 +57,14 @@ export default class AtomicClustersPlugin extends Plugin {
     finally { this.running = false; }
   }
 
-  private async getWorker(): Promise<NodeClusteringWorker> { if (!this.worker) { this.worker = new NodeClusteringWorker(workerSource); await this.worker.init(); } return this.worker; }
+  private async getWorker(): Promise<NodeClusteringWorker | PyodideClusteringWorker> {
+    if (!this.worker) {
+      if (this.settings.clusteringRuntime === "pyodide") this.worker = new PyodideClusteringWorker({ pyodideUrl: this.settings.pyodideUrl || undefined });
+      else this.worker = new NodeClusteringWorker(workerSource);
+      await this.worker.init();
+    }
+    return this.worker;
+  }
   private cancelClustering(): void { if (!this.running) { new Notice("No clustering job is running."); return; } this.worker?.cancel(); new Notice("Clustering cancellation requested."); }
   private async openExplorer(): Promise<void> { const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false); if (!leaf) return; await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true }); this.app.workspace.revealLeaf(leaf); if (!this.latestResult) this.latestResult = await new ClusterResultStore(this.app.vault).load(); if (this.latestResult) (leaf.view as ClusterExplorerView).setResult(this.latestResult); }
   private async publishResult(result: ClusterResult): Promise<void> { for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setResult(result); }

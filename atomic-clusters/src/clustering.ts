@@ -32,6 +32,13 @@ const jsKernel: NumericKernel = {
 
 export interface ClusterOptions { kernel?: NumericKernel; hdbscan?: HdbscanProvider; onProgress?: ClusterProgress; signal?: { cancelled: boolean }; }
 
+export interface DiscoveryResult {
+  umapFeatures: number[][];
+  labels: number[];
+  probabilities: number[];
+  outlierProxy: number[];
+}
+
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
   if (input.length < 3) {
@@ -57,17 +64,40 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   selectedPca.explainedVariance = explainedFraction(pca.explained, selectedPca.selected, selectedPca.totalVariance);
   checkCancelled(options);
   progress("umap", 0.2);
+  const discovery = await discoverPcaFeatures(pca.projected, config, options);
+  const hdbscan = discovery;
+  /* The Python/Pyodide worker uses this same boundary after fitting its
+   * authoritative PCA. Keeping discovery separate makes the JS callback a
+   * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
+  progress("hdbscan", 0.78);
+  const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel);
+  progress("hierarchy", 0.9);
+  progress("complete", 1);
+  return {
+    schemaVersion: 1, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
+    outlierProxy: hdbscan.outlierProxy, pca: selectedPca, hierarchy,
+    timings: { totalMs: Date.now() - started }
+  };
+}
+
+/** Run the browser-side UMAP/HDBSCAN discovery boundary on PCA features. */
+export async function discoverPcaFeatures(pcaFeatures: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<DiscoveryResult> {
+  if (!pcaFeatures.length || pcaFeatures.some((row) => row.length !== pcaFeatures[0].length)) throw new Error("PCA features must be a non-empty rectangular matrix.");
+  const kernel = options.kernel || jsKernel;
+  const progress = options.onProgress || (() => undefined);
+  checkCancelled(options);
+  progress("umap", 0.2);
   // umap-js initializes its simplicial-set embedding from this seeded random
   // source; this matches the production umap-learn route's random init.
   const random = seededRandom(config.seed ?? 42);
   const umap = new UMAP({
     nComponents: config.umapComponents || 20,
-    nNeighbors: Math.min(config.umapNeighbors || 15, Math.max(2, normalized.length - 1)),
+    nNeighbors: Math.min(config.umapNeighbors || 15, Math.max(2, pcaFeatures.length - 1)),
     minDist: config.umapMinDist ?? 0.1,
     random
   });
-  const reduced = await umap.fitAsync(pca.projected, (epoch) => {
-    progress("umap", 0.2 + Math.min(0.55, epoch / Math.max(1, normalized.length * 5) * 0.55));
+  const reduced = await umap.fitAsync(pcaFeatures, (epoch) => {
+    progress("umap", 0.2 + Math.min(0.55, epoch / Math.max(1, pcaFeatures.length * 5) * 0.55));
     checkCancelled(options);
   });
   checkCancelled(options);
@@ -77,14 +107,7 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   // Python PCA -> UMAP -> HDBSCAN route uses min_samples=3.
   const minSamples = config.minSamples ?? 3;
   const hdbscan = (options.hdbscan || new DeterministicHdbscanProvider()).fit(reduced, minClusterSize, minSamples, kernel);
-  progress("hierarchy", 0.9);
-  const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel);
-  progress("complete", 1);
-  return {
-    schemaVersion: 1, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value), pca: selectedPca, hierarchy,
-    timings: { totalMs: Date.now() - started }
-  };
+  return { umapFeatures: reduced, labels: hdbscan.labels, probabilities: hdbscan.probabilities, outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value) };
 }
 
 export function candidateComponents(max: number, min = 32, step = 32): number[] {

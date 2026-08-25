@@ -18,11 +18,20 @@ directory. Clustering is lazy and runs in a Node `worker_thread`:
 normalized embeddings → sampled automatic PCA → umap-js → HDBSCAN provider → bottom-up hierarchy
 ```
 
-The plugin has no runtime package installer and does not use Pyodide. Gemini is
+The default plugin runtime has no runtime package installer and uses the bundled
+WASM worker. An optional Pyodide worker runs the Python reference
+`cluster_documents` API and loads the pinned Pyodide runtime only when selected
+in Settings. Gemini is
 an explicit network provider using Obsidian `requestUrl`; the API key is
 resolved by a SecretStorage reference, never persisted in plugin settings.
 The local `multilingual-e5-small` provider is an opt-in boundary and download
 UI; a future release supplies the bundled ONNX runner/model asset.
+
+The Pyodide worker embeds the `pyodide_core` source package in the release
+bundle, loads NumPy and scikit-learn, fits the authoritative Python PCA, and
+injects the browser UMAP/WASM-HDBSCAN discovery result through the documented
+`discovery_runner` seam. This preserves the Python membership-weighted
+hierarchy while keeping UMAP/HDBSCAN native-extension packages out of Pyodide.
 
 The numerical boundary is `wasm-core/`. Its Rust/wasm-bindgen kernels own
 normalization, matrix multiplication, PCA/power iteration, tiled cosine

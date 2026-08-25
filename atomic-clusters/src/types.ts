@@ -11,6 +11,9 @@ export interface PluginSettings {
   umapNeighbors: number;
   umapMinDist: number;
   pcaVarianceTarget: number;
+  /** Optional Python reference runtime; WASM remains the desktop default. */
+  clusteringRuntime?: "wasm" | "pyodide";
+  pyodideUrl?: string;
 }
 
 export interface NoteRecord {
@@ -100,7 +103,7 @@ export interface ClusterResult {
 }
 
 export type WorkerRequest =
-  | { type: "INIT"; version: 1 }
+  | { type: "INIT"; version: 1; pyodideUrl?: string; indexURL?: string }
   | { type: "CLUSTER"; jobId: string; ids: string[]; embeddings: number[][]; config: ClusteringConfig }
   | { type: "CANCEL"; jobId?: string };
 
@@ -109,3 +112,8 @@ export type WorkerResponse =
   | { type: "PROGRESS"; jobId: string; phase: string; progress: number }
   | { type: "RESULT"; jobId: string; result: ClusterResult }
   | { type: "ERROR"; jobId?: string; code: string; message: string };
+
+export interface PyodideClusterResult extends ClusterResult {
+  /** Raw JSON-friendly result emitted by pyodide_core.cluster_documents. */
+  pyodide?: Record<string, unknown>;
+}
