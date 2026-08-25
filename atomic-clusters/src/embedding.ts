@@ -130,6 +130,14 @@ export class LocalModelManager {
 
   async status(): Promise<"missing" | "installed" | "corrupt"> {
     if (!(await this.storage.exists(this.manifestPath())) || !(await this.storage.exists(this.path("model.onnx"))) || !(await this.storage.exists(this.path("tokenizer.json")))) return "missing";
+    // Settings calls this during every render. Read only the small manifest;
+    // hashing a 470 MB model here blocks the Obsidian settings UI.
+    try { this.validateManifest(await this.readManifest()); return "installed"; } catch { return "corrupt"; }
+  }
+
+  /** Explicit, potentially expensive integrity check for the Check model button. */
+  async verifyStatus(): Promise<"missing" | "installed" | "corrupt"> {
+    if (!(await this.storage.exists(this.manifestPath())) || !(await this.storage.exists(this.path("model.onnx"))) || !(await this.storage.exists(this.path("tokenizer.json")))) return "missing";
     try { await this.load(); return "installed"; } catch { return "corrupt"; }
   }
 
@@ -153,13 +161,21 @@ export class LocalModelManager {
   }
 
   async load(): Promise<LocalModelArtifact> {
-    const manifestBytes = await this.storage.read(this.manifestPath());
-    const manifest = JSON.parse(new TextDecoder().decode(manifestBytes)) as LocalModelManifest;
-    if (manifest.id !== this.descriptor.id || manifest.version !== this.descriptor.version || manifest.dimension !== this.descriptor.dimension) throw new Error("Installed local model manifest is stale; download the current model again.");
+    const manifest = await this.readManifest();
+    this.validateManifest(manifest);
     const [model, tokenizer] = await Promise.all([this.storage.read(this.path("model.onnx")), this.storage.read(this.path("tokenizer.json"))]);
     const [modelSha256, tokenizerSha256] = await Promise.all([sha256(model), sha256(tokenizer)]);
     if (modelSha256 !== manifest.modelSha256 || tokenizerSha256 !== manifest.tokenizerSha256) throw new Error("Installed local model failed its SHA-256 integrity check; delete and download it again.");
     return { descriptor: this.descriptor, model, tokenizer, modelSha256, tokenizerSha256 };
+  }
+
+  private async readManifest(): Promise<LocalModelManifest> {
+    const manifestBytes = await this.storage.read(this.manifestPath());
+    return JSON.parse(new TextDecoder().decode(manifestBytes)) as LocalModelManifest;
+  }
+
+  private validateManifest(manifest: LocalModelManifest): void {
+    if (manifest.id !== this.descriptor.id || manifest.version !== this.descriptor.version || manifest.dimension !== this.descriptor.dimension || typeof manifest.modelSha256 !== "string" || typeof manifest.tokenizerSha256 !== "string") throw new Error("Installed local model manifest is stale or invalid; download the current model again.");
   }
 }
 

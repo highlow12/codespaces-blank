@@ -11,6 +11,9 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(settings, /<progress|createEl\("progress"/);
   assert.match(settings, /setBusy\(true\)/);
   assert.match(settings, /Download failed/);
+  assert.match(settings, /verifyStatus\(\)/);
+  assert.match(settings, /refresh\(true\)/);
+  assert.match(settings, /manifest ready/);
   assert.match(main, /new AtomicClustersProgress/);
   assert.match(main, /cache scan/);
   assert.match(main, /EmbeddingLogStore/);
