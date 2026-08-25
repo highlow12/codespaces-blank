@@ -160,6 +160,8 @@ export interface LocalTokenBatch { inputIds: number[][]; attentionMask: number[]
 export interface LocalTokenizer { encode(texts: string[], maxLength: number): LocalTokenBatch; }
 export interface LocalInferenceRuntime { embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]>; }
 
+export interface LocalRuntimeProgress { phase: "configuration" | "model" | "session" | "probe" | "complete"; progress: number; detail?: string; }
+
 /** Errors raised while initializing/loading the ONNX backend must not be retried per note. */
 export class LocalInferenceBackendError extends Error {
   constructor(message: string, cause?: unknown) { super(message); this.name = "LocalInferenceBackendError"; if (cause !== undefined) (this as Error & { cause?: unknown }).cause = cause; }
@@ -210,11 +212,10 @@ export class UnigramTokenizer implements LocalTokenizer {
 
 /** Runtime seam for the optional ONNX binding and tokenizer implementation. */
 export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
+  private sessionPromise?: Promise<any>;
   constructor(private readonly ort: { Tensor: new (type: string, data: ArrayLike<number> | BigInt64Array, dims: number[]) => any; InferenceSession: { create(model: ArrayBuffer): Promise<any> } }, private readonly tokenizer: LocalTokenizer, private readonly batchSize = 16, private readonly maxLength = 512) {}
   async embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]> {
-    let session: any;
-    try { session = await this.ort.InferenceSession.create(artifact.model); }
-    catch (error) { throw new LocalInferenceBackendError("Local ONNX backend initialization failed; verify the bundled ORT assets and installed model.", error); }
+    const session = await this.getSession(artifact);
     const output: number[][] = [];
     for (let start = 0; start < texts.length; start += this.batchSize) {
       const batch = texts.slice(start, start + this.batchSize);
@@ -243,6 +244,16 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
       onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
     }
     return output;
+  }
+
+  private async getSession(artifact: LocalModelArtifact): Promise<any> {
+    if (!this.sessionPromise) {
+      this.sessionPromise = this.ort.InferenceSession.create(artifact.model).catch((error) => {
+        this.sessionPromise = undefined;
+        throw new LocalInferenceBackendError("Local ONNX backend initialization failed; verify the bundled ORT assets and installed model.", error);
+      });
+    }
+    return this.sessionPromise;
   }
 }
 
@@ -322,8 +333,26 @@ export async function defaultLocalRuntimeFactory(artifact: LocalModelArtifact): 
 
 export class LocalEmbeddingProvider implements EmbeddingProvider {
   readonly id = "local" as const;
+  private runtimeState?: { artifact: LocalModelArtifact; runtime: LocalInferenceRuntime };
   constructor(private readonly settings: PluginSettings, private readonly runner?: (texts: string[], model: string) => Promise<number[][]>, private readonly manager?: LocalModelManager, private readonly runtimeFactory: LocalRuntimeFactory = defaultLocalRuntimeFactory) {}
   get model(): string { return `${this.settings.localModel}@${LOCAL_MODEL_VERSION}`; }
+
+  async preflight(onProgress?: (progress: LocalRuntimeProgress) => void): Promise<void> {
+    onProgress?.({ phase: "configuration", progress: 0.05, detail: "Checking bundled ORT renderer assets" });
+    if (this.runner) {
+      onProgress?.({ phase: "probe", progress: 0.5, detail: "Running a safe local embedding probe" });
+      const vectors = await this.runner(["passage: Atomic Clusters local runtime preflight"], this.model);
+      if (vectors.length !== 1) throw new Error("Local runtime preflight returned an invalid number of vectors.");
+      if (vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
+    } else {
+      onProgress?.({ phase: "model", progress: 0.25, detail: "Loading and verifying the installed model" });
+      const runtimeState = await this.getRuntime();
+      onProgress?.({ phase: "session", progress: 0.5, detail: "Initializing the ONNX session" });
+      const vectors = await runtimeState.runtime.embed(["passage: Atomic Clusters local runtime preflight"], runtimeState.artifact);
+      if (vectors.length !== 1 || vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
+    }
+    onProgress?.({ phase: "complete", progress: 1, detail: "Local runtime is ready" });
+  }
 
   async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger): Promise<CachedEmbedding[]> {
     const texts = notes.map((note) => `passage: ${note.title}\n${note.content}`);
@@ -351,8 +380,7 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
       catch { result.length = 0; await recoverIndividually((index) => this.runner!([texts[index]], this.model)); }
     } else {
       if (!this.manager) throw new Error("Local model is not configured. Download multilingual-e5-small from Settings first.");
-      const artifact = await this.manager.load();
-      const runtime = await this.runtimeFactory(artifact);
+      const { artifact, runtime } = await this.getRuntime();
       const started = performance.now();
       try { const vectors = await runtime.embed(texts, artifact, (done) => reportProgress(done)); if (vectors.length !== notes.length) throw new Error("Local embedding runtime returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); }
       catch (error) {
@@ -365,6 +393,16 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     }
     reportProgress(notes.length);
     return result;
+  }
+
+  private async getRuntime(): Promise<{ artifact: LocalModelArtifact; runtime: LocalInferenceRuntime }> {
+    if (!this.runtimeState) {
+      if (!this.manager) throw new Error("Local model is not configured. Download multilingual-e5-small from Settings first.");
+      const artifact = await this.manager.load();
+      const runtime = await this.runtimeFactory(artifact);
+      this.runtimeState = { artifact, runtime };
+    }
+    return this.runtimeState;
   }
 
   get status(): "unavailable" | "ready" { return this.runner || this.manager ? "ready" : "unavailable"; }

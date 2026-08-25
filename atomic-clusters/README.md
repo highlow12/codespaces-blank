@@ -97,6 +97,11 @@ The Settings tab also provides **Build clusters** and **Cancel** controls for
 the same command-palette pipeline; while running, the build control is
 disabled and progress remains in the persistent Notice.
 
+When the local provider is selected, **Test local runtime** verifies the
+installed model, bundled renderer-safe ORT assets, ONNX session initialization,
+and one safe probe before a bulk embedding run. The preflight result and any
+sanitized cause are written as a run-level entry in the embedding log.
+
 Use the **Open embedding log** button in Settings or the command-palette
 command after the Notice disappears. It opens the persisted JSON in the
 operating system's default text editor (for example, Notepad on a Windows

@@ -45,6 +45,7 @@ test("installed plugin exposes persistent progress for model and clustering flow
 });
 
 test("embedding log contract contains diagnostics but no payload fields", async () => {
+  const settings = await readFile(new URL("../src/settings.ts", import.meta.url), "utf8");
   const types = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
   const storage = await readFile(new URL("../src/storage.ts", import.meta.url), "utf8");
   const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
@@ -54,7 +55,11 @@ test("embedding log contract contains diagnostics but no payload fields", async 
   assert.match(storage, /embedding-log\.json/);
   assert.match(storage, /async load\(\): Promise<EmbeddingRunLog \| null>/);
   assert.match(types, /status\?: "completed" \| "failed" \| "cancelled"/);
-  assert.match(types, /stage\?: "embedding" \| "clustering"/);
+  assert.match(types, /stage\?: "preflight" \| "embedding" \| "clustering"/);
+  assert.match(settings, /Test local runtime/);
+  assert.match(settings, /runtime \$\{update\.phase\}/);
+  assert.match(main, /provider\.preflight/);
+  assert.match(main, /stage: "preflight"/);
   assert.match(types, /error\?: string/);
   assert.doesNotMatch(main, /entry\.content|entry\.vector/);
   assert.doesNotMatch(main, /EmbeddingLogModal|atomic-clusters-log-table/);

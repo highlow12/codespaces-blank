@@ -1,7 +1,7 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
-import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
+import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LocalRuntimeProgress, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { ClusterResultStore, EmbeddingCache, EmbeddingLogStore, NoteStore } from "./storage";
-import { AtomicClustersSettingTab, ClusterRunControls } from "./settings";
+import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
 import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, PluginSettings } from "./types";
 import { NodeClusteringWorker } from "./worker-client";
@@ -44,7 +44,8 @@ export default class AtomicClustersPlugin extends Plugin {
     this.addCommand({ id: "open-embedding-log", name: "Open embedding log", callback: () => void this.openEmbeddingLog() });
     this.addCommand({ id: "cancel-clustering", name: "Cancel clustering", callback: () => this.cancelClustering() });
     const clusterRun: ClusterRunControls = { build: () => this.buildClusters(), cancel: () => this.cancelClustering(), isRunning: () => this.running };
-    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun));
+    const testLocalRuntime: LocalRuntimeTest = (onProgress) => this.testLocalRuntime(onProgress);
+    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun, testLocalRuntime));
   }
 
   async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; disposeLocalOrtAssets(); }
@@ -67,7 +68,7 @@ export default class AtomicClustersPlugin extends Plugin {
     this.running = true;
     const progress = new AtomicClustersProgress("Atomic Clusters");
     this.operationProgress = progress;
-    const startedAt = new Date().toISOString(); const logEntries: EmbeddingLogEntry[] = []; let persistedRunLog: EmbeddingRunLog | null = null; let runTotal = 0;
+    const startedAt = new Date().toISOString(); const logEntries: EmbeddingLogEntry[] = []; let persistedRunLog: EmbeddingRunLog | null = null; let runTotal = 0; let runStage: EmbeddingRunLog["stage"] = "embedding";
     const logStore = new EmbeddingLogStore(this.app.vault);
     const counts = () => ({ succeeded: logEntries.filter((entry) => entry.status === "success").length, failed: logEntries.filter((entry) => entry.status === "failure").length, cached: logEntries.filter((entry) => entry.status === "cached").length });
     let runProvider = this.settings.embeddingProvider; let runModel = this.settings.embeddingProvider === "gemini" ? this.settings.geminiModel : `${this.settings.localModel}@2024-05-01`;
@@ -85,6 +86,11 @@ export default class AtomicClustersPlugin extends Plugin {
       const fresh = notes.filter((note) => !cache.get(note, provider.id, provider.model, entries));
       notes.filter((note) => !fresh.includes(note)).forEach((note) => logEntries.push({ path: note.path, timestamp: new Date().toISOString(), provider: provider.id, model: provider.model, status: "cached", durationMs: 0 }));
       progress.update({ phase: "cache scan", progress: 0.15, detail: `${fresh.length} notes need embeddings · ${notes.length - fresh.length} cached` });
+      if (provider.id === "local" && fresh.length) {
+        runStage = "preflight";
+        await (provider as LocalEmbeddingProvider).preflight((update) => progress.update({ phase: "preflight", progress: 0.15 + update.progress * 0.1, detail: update.detail || update.phase }));
+        runStage = "embedding";
+      }
       let processedFresh = 0;
       const embedded = fresh.length ? await provider.embed(fresh, (done, total) => progress.update({ phase: "embedding", progress: 0.15 + (total ? done / total * 0.55 : 0), detail: `${done}/${total} notes processed` }), (entry) => { logEntries.push(entry); processedFresh++; progress.update({ phase: "embedding", progress: 0.15 + (processedFresh / Math.max(1, fresh.length)) * 0.55, detail: `${entry.status === "failure" ? "Failed" : "Embedded"}: ${entry.path}` }); }) : [];
       embedded.forEach((item) => entries.set(`${item.provider}:${item.model}:${item.path}`, item)); await cache.save(entries.values());
@@ -115,12 +121,25 @@ export default class AtomicClustersPlugin extends Plugin {
       progress.fail(cancelled ? "Clustering cancelled" : `Build failed: ${message}`);
       const status = cancelled ? "cancelled" : "failed";
       const failedLog: EmbeddingRunLog = persistedRunLog
-        ? { ...persistedRunLog, completedAt: new Date().toISOString(), status, error: safeRunError(error), ...(persistedRunLog.stage === "embedding" ? {} : { stage: "clustering" }) }
-        : { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: runTotal, ...counts(), entries: logEntries, status, stage: "embedding", error: safeRunError(error) };
+        ? { ...persistedRunLog, completedAt: new Date().toISOString(), status, error: safeRunError(error) }
+        : { version: 1, startedAt, completedAt: new Date().toISOString(), provider: runProvider, model: runModel, total: runTotal, ...counts(), entries: logEntries, status, stage: runStage, error: safeRunError(error) };
       await logStore.save(failedLog).catch(() => undefined);
       if (!cancelled) new Notice(`Atomic Clusters failed: ${safeRunError(error)}`);
     }
     finally { this.running = false; this.operationProgress = null; }
+  }
+
+  private async testLocalRuntime(onProgress: (progress: LocalRuntimeProgress) => void): Promise<void> {
+    const startedAt = new Date().toISOString();
+    const provider = new LocalEmbeddingProvider(this.settings, undefined, this.localModelManager);
+    const store = new EmbeddingLogStore(this.app.vault);
+    try {
+      await provider.preflight(onProgress);
+      await store.save({ version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: 0, succeeded: 0, failed: 0, cached: 0, entries: [], status: "completed", stage: "preflight" });
+    } catch (error) {
+      await store.save({ version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: 0, succeeded: 0, failed: 0, cached: 0, entries: [], status: "failed", stage: "preflight", error: safeRunError(error) }).catch(() => undefined);
+      throw error;
+    }
   }
 
   private async getWorker(): Promise<NodeClusteringWorker | PyodideClusteringWorker> {

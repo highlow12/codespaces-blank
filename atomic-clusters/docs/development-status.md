@@ -73,6 +73,10 @@ vault adapter에서 계산한 절대 경로로 OS 기본 텍스트 편집기(Win
 일반적으로 Notepad)에 연다. 파일이 없거나 열기에 실패하면 Notice로 알린다.
 API key, 모델 누락, 동의 취소 같은 provider setup 실패는 note별 실패로 위조하지
 않고 run-level failed/cancelled 상태와 오류로 기록한다.
+Local provider를 사용할 때 설정의 `Test local runtime`은 설치된 model/tokenizer,
+renderer용 ORT asset, ONNX session과 안전한 1회 probe를 먼저 확인한다. bulk embedding도
+같은 provider runtime의 초기화된 session을 재사용하며, preflight 단계와 제한된 원인만
+run-level log에 기록한다.
 
 ## 현재 기본값과 파이프라인 의미
 

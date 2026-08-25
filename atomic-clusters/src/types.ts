@@ -57,7 +57,7 @@ export interface EmbeddingRunLog {
   cached: number;
   entries: EmbeddingLogEntry[];
   status?: "completed" | "failed" | "cancelled";
-  stage?: "embedding" | "clustering";
+  stage?: "preflight" | "embedding" | "clustering";
   error?: string;
 }
 

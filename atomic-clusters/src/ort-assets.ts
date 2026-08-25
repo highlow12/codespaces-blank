@@ -11,22 +11,27 @@ function countOccurrences(source: string, marker: string): number {
 /**
  * Make the pinned ORT WASM module safe for Electron's renderer. Electron
  * exposes process.versions.node even though this is not a Node worker; the
- * upstream module would otherwise import `module`/`worker_threads`.
+ * upstream module would otherwise import `module`/`worker_threads`. The
+ * pinned module also constructs a relative WASM URL at evaluation time; a
+ * blob: import has no hierarchical base, so that expression is replaced with
+ * a harmless absolute data URL while wasmBinary supplies the real bytes.
  */
 export function prepareLocalOrtRendererModule(source: string): string {
   const legacyNodeMarker = 'B="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node';
   const modernNodeMarker = "var isNode = typeof globalThis.process?.versions?.node == 'string';";
   const nodeBranchMarker = "if(B){";
   const modernBranchMarker = "if (isNode) isPthread = (await import('worker_threads')).workerData === 'em-pthread';";
-  if (countOccurrences(source, legacyNodeMarker) !== 1 || countOccurrences(source, modernNodeMarker) !== 1 || countOccurrences(source, nodeBranchMarker) !== 3 || countOccurrences(source, modernBranchMarker) !== 1) {
+  const relativeWasmUrlMarker = '(new URL("ort-wasm-simd-threaded.wasm",import.meta.url)).href';
+  if (countOccurrences(source, legacyNodeMarker) !== 1 || countOccurrences(source, modernNodeMarker) !== 1 || countOccurrences(source, nodeBranchMarker) !== 3 || countOccurrences(source, modernBranchMarker) !== 1 || countOccurrences(source, relativeWasmUrlMarker) !== 1) {
     throw new Error(`Unsupported ORT ${LOCAL_ORT_RENDERER_ASSET_VERSION} renderer asset format; refusing unsafe Node-branch transformation.`);
   }
   const transformed = source
     .replace(legacyNodeMarker, "B=false")
     .split(nodeBranchMarker).join("if(false){")
     .replace(modernNodeMarker, "var isNode = false;")
-    .replace(modernBranchMarker, "if (false) isPthread = (await import('worker_threads')).workerData === 'em-pthread';");
-  if (transformed.includes(nodeBranchMarker) || transformed.includes(modernNodeMarker) || transformed.includes(modernBranchMarker)) {
+    .replace(modernBranchMarker, "if (false) isPthread = (await import('worker_threads')).workerData === 'em-pthread';")
+    .replace(relativeWasmUrlMarker, '"data:application/wasm;base64,"');
+  if (transformed.includes(nodeBranchMarker) || transformed.includes(modernNodeMarker) || transformed.includes(modernBranchMarker) || transformed.includes(relativeWasmUrlMarker)) {
     throw new Error("ORT renderer asset Node-branch transformation did not apply completely.");
   }
   return transformed;

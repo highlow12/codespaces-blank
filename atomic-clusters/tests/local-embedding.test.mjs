@@ -103,6 +103,30 @@ test("ORT runtime reports every inference batch", async () => {
   assert.deepEqual(progress, [[2, 3], [3, 3]]);
 });
 
+test("ORT runtime caches the initialized session for preflight and bulk inference", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  let creates = 0;
+  const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { creates++; return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };
+  const runtime = new OrtEmbeddingRuntime(ort, { encode(texts) { return { inputIds: texts.map(() => [1]), attentionMask: texts.map(() => [1]) }; } });
+  const artifact = { model: new ArrayBuffer(1) };
+  await runtime.embed(["probe"], artifact);
+  await runtime.embed(["bulk"], artifact);
+  assert.equal(creates, 1);
+});
+
+test("local runtime preflight probes once and reuses the runtime for embedding", async () => {
+  const { LocalEmbeddingProvider } = await loadEmbedding();
+  let factoryCalls = 0;
+  let inferenceCalls = 0;
+  const provider = new LocalEmbeddingProvider({ localModel: "multilingual-e5-small" }, undefined, { async load() { return { model: new ArrayBuffer(1), tokenizer: new ArrayBuffer(1) }; } }, async () => { factoryCalls++; return { async embed() { inferenceCalls++; return [new Array(384).fill(0.1)]; } }; });
+  const phases = [];
+  await provider.preflight((update) => phases.push(update.phase));
+  await provider.embed([{ path: "a.md", title: "A", content: "hello", hash: "h", mtime: 1 }]);
+  assert.deepEqual(phases, ["configuration", "model", "session", "complete"]);
+  assert.equal(factoryCalls, 1);
+  assert.equal(inferenceCalls, 2);
+});
+
 test("default factory uses bundled Unigram tokenizer and ORT runtime without an override", async () => {
   const { configureLocalOrtAssets, defaultLocalRuntimeFactory } = await loadEmbedding();
   configureLocalOrtAssets("file:///vault/.obsidian/plugins/atomic-clusters/");
@@ -142,12 +166,14 @@ test("ORT assets resolve from a Windows vault path with spaces and manifest.dir"
 
 test("pinned ORT renderer transform disables both Electron Node-detection branches", async () => {
   const { prepareLocalOrtRendererModule } = await loadOrtAssets();
-  const source = 'var B="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node,C=0;if(B){const {createRequire:a}=await import("module");var D=require("worker_threads");}if(B){var fs=require("fs");}if(C){if(B){var port=require("worker_threads");}}var isNode = typeof globalThis.process?.versions?.node == \'string\';if (isNode) isPthread = (await import(\'worker_threads\')).workerData === \'em-pthread\';';
+  const source = 'var B="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node,C=0;if(B){const {createRequire:a}=await import("module");var D=require("worker_threads");}if(B){var fs=require("fs");}if(C){if(B){var port=require("worker_threads");}}var isNode = typeof globalThis.process?.versions?.node == \'string\';if (isNode) isPthread = (await import(\'worker_threads\')).workerData === \'em-pthread\';var wasm=(new URL("ort-wasm-simd-threaded.wasm",import.meta.url)).href;';
   const transformed = prepareLocalOrtRendererModule(source);
   assert.match(transformed, /B=false/);
   assert.equal((transformed.match(/if\(false\)\{/g) || []).length, 3);
   assert.match(transformed, /var isNode = false/);
   assert.match(transformed, /if \(false\) isPthread/);
+  assert.match(transformed, /data:application\/wasm;base64/);
+  assert.doesNotMatch(transformed, /new URL\("ort-wasm-simd-threaded\.wasm",import\.meta\.url\)/);
   assert.doesNotMatch(transformed, /if\(B\)\{|if \(isNode\)/);
 });
 

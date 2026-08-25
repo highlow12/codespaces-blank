@@ -1,6 +1,6 @@
 import * as Obsidian from "obsidian";
 import { App, Modal, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { LocalModelManager, LocalModelProgress } from "./embedding";
+import { LocalModelManager, LocalModelProgress, LocalRuntimeProgress } from "./embedding";
 import { PluginSettings } from "./types";
 
 export interface ClusterRunControls {
@@ -9,8 +9,10 @@ export interface ClusterRunControls {
   isRunning(): boolean;
 }
 
+export type LocalRuntimeTest = (onProgress: (progress: LocalRuntimeProgress) => void) => Promise<void>;
+
 export class AtomicClustersSettingTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls) { super(app, plugin); }
+  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest) { super(app, plugin); }
   display(): void {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Atomic Clusters" });
     new Setting(containerEl).setName("Embedding provider").setDesc("Gemini sends note text to Google; Local keeps inference on this device.").addDropdown((dropdown) => dropdown.addOption("gemini", "Gemini API").addOption("local", "Local multilingual-e5-small").setValue(this.settings.embeddingProvider).onChange(async (value) => { this.settings.embeddingProvider = value as PluginSettings["embeddingProvider"]; await this.save(); this.display(); }));
@@ -29,6 +31,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
       const controls: Array<{ setDisabled(disabled: boolean): unknown }> = [];
       const setBusy = (busy: boolean) => controls.forEach((control) => control.setDisabled(busy));
       const updateProgress = (update: LocalModelProgress) => { progress.value = Math.max(0, Math.min(1, update.progress)); const bytes = update.loadedBytes !== undefined && update.totalBytes ? ` · ${formatBytes(update.loadedBytes)}/${formatBytes(update.totalBytes)}` : ""; statusEl.setText(`${update.phase} · ${Math.round(update.progress * 100)}%${update.detail ? ` · ${update.detail}` : ""}${bytes}`); };
+      const updateRuntimeProgress = (update: LocalRuntimeProgress) => { progress.value = Math.max(0, Math.min(1, update.progress)); statusEl.setText(`runtime ${update.phase} · ${Math.round(update.progress * 100)}%${update.detail ? ` · ${update.detail}` : ""}`); };
       const refresh = async () => { try { const status = await this.localModels.status(); statusEl.setText(status === "installed" ? "Installed and integrity verified" : status === "corrupt" ? "Corrupt — delete and download again" : "Missing — download to enable offline inference"); progress.value = status === "installed" ? 1 : 0; } catch (error) { statusEl.setText(`Status check failed: ${safeUiError(error)}`); } };
       let checkButton: { setDisabled(disabled: boolean): unknown };
       modelSetting.addButton((button) => { checkButton = button; return button.setButtonText("Check model").onClick(async () => { setBusy(true); try { await refresh(); } finally { setBusy(false); } }); }); controls.push(checkButton!);
@@ -36,6 +39,8 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
       modelSetting.addButton((button) => { downloadButton = button; return button.setButtonText("Download").onClick(async () => { setBusy(true); try { await this.localModels.downloadModel(() => confirmLocalModelDownload(this.app), updateProgress); } catch (error) { statusEl.setText(error instanceof Error && error.message.includes("cancelled") ? "Download cancelled" : `Download failed: ${safeUiError(error)}`); } finally { setBusy(false); await refresh(); } }); }); controls.push(downloadButton!);
       let deleteButton: { setDisabled(disabled: boolean): unknown };
       modelSetting.addButton((button) => { deleteButton = button; return button.setButtonText("Delete").onClick(async () => { setBusy(true); try { await this.localModels.deleteModel(); statusEl.setText("Deleted"); progress.value = 0; } catch (error) { statusEl.setText(`Delete failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(deleteButton!);
+      let testButton: { setDisabled(disabled: boolean): unknown };
+      modelSetting.addButton((button) => { testButton = button; return button.setButtonText("Test local runtime").onClick(async () => { setBusy(true); try { await this.testLocalRuntime(updateRuntimeProgress); statusEl.setText("Local runtime ready for offline inference"); progress.value = 1; } catch (error) { statusEl.setText(`Runtime test failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(testButton!);
       void refresh();
     }
     new Setting(containerEl).setName("Embedding log").setDesc("Open the latest per-note embedding diagnostics in the operating system's default text editor.").addButton((button) => button.setButtonText("Open embedding log").onClick(() => { void this.openEmbeddingLog().catch(() => undefined); }));
