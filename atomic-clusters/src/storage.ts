@@ -52,8 +52,9 @@ export class ClusterResultStore {
       const result = JSON.parse(await this.vault.adapter.read(this.path)) as ClusterResult & { schemaVersion?: number };
       // v1 had no titles; v2 could contain model-generated titles and model
       // metadata. Both are intentionally discarded on first read.
+      if (result.schemaVersion === 3) return result;
       const migrated = { ...result, schemaVersion: 3 as const, titles: undefined, titleGeneration: undefined };
-      if (result.schemaVersion !== 3 || result.titles || result.titleGeneration) await this.save(migrated);
+      await this.save(migrated);
       return migrated;
     } catch { return null; }
   }

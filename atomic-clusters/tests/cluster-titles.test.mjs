@@ -48,3 +48,9 @@ test("production title path is dependency-free", async () => {
   const title = await readFile(new URL("../src/title.ts", import.meta.url), "utf8");
   assert.doesNotMatch(title, /pipeline\(|WebGPU|onnx|huggingface/i);
 });
+
+test("result storage preserves keyword titles in v3 and strips legacy titles only", async () => {
+  const storage = await readFile(new URL("../src/storage.ts", import.meta.url), "utf8");
+  assert.match(storage, /if \(result\.schemaVersion === 3\) return result;/);
+  assert.match(storage, /schemaVersion: 3 as const, titles: undefined, titleGeneration: undefined/);
+});
