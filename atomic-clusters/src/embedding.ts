@@ -220,13 +220,23 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
     for (let start = 0; start < texts.length; start += this.batchSize) {
       const batch = texts.slice(start, start + this.batchSize);
       const tokens = this.tokenizer.encode(batch, this.maxLength);
+      const inputNames = Array.isArray(session.inputNames) ? session.inputNames as string[] : ["input_ids", "attention_mask"];
+      const supportedInputs = new Set(["input_ids", "attention_mask", "token_type_ids"]);
+      const unsupportedInputs = inputNames.filter((name) => !supportedInputs.has(name));
+      if (unsupportedInputs.length) throw new Error(`Unsupported local ONNX required inputs: ${unsupportedInputs.join(", ")}. Expected input_ids, attention_mask, and optional token_type_ids.`);
+      if (!inputNames.includes("input_ids") || !inputNames.includes("attention_mask")) throw new Error("Local ONNX model must require input_ids and attention_mask.");
       const ids = flattenBigInt(tokens.inputIds);
       const mask = flattenBigInt(tokens.attentionMask);
+      const tokenWidth = tokens.inputIds[0]?.length || 0;
       const feeds: Record<string, unknown> = {
-        input_ids: new this.ort.Tensor("int64", ids, [batch.length, tokens.inputIds[0].length]),
+        input_ids: new this.ort.Tensor("int64", ids, [batch.length, tokenWidth]),
         attention_mask: new this.ort.Tensor("int64", mask, [batch.length, tokens.attentionMask[0].length])
       };
-      if (tokens.tokenTypeIds && session.inputNames?.includes("token_type_ids")) feeds.token_type_ids = new this.ort.Tensor("int64", flattenBigInt(tokens.tokenTypeIds), [batch.length, tokens.tokenTypeIds[0].length]);
+      if (inputNames.includes("token_type_ids")) {
+        const tokenTypeIds = tokens.tokenTypeIds || tokens.inputIds.map((row) => new Array(row.length).fill(0));
+        if (tokenTypeIds.length !== batch.length || tokenTypeIds.some((row) => row.length !== tokenWidth)) throw new Error("Local tokenizer token_type_ids shape does not match input_ids.");
+        feeds.token_type_ids = new this.ort.Tensor("int64", flattenBigInt(tokenTypeIds), [batch.length, tokenWidth]);
+      }
       const result = await session.run(feeds);
       const tensor = result[session.outputNames?.[0] || Object.keys(result)[0]];
       const dimensions = tensor?.dims as number[] | undefined;

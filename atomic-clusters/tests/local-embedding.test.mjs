@@ -93,6 +93,23 @@ test("ORT runtime mean-pools masked tokens and emits unit vectors", async () => 
   assert.ok(vector[0] > 0.99 && Math.abs(vector[1]) < 1e-6);
 });
 
+test("ORT runtime supplies zero token_type_ids when the model requires them", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  let captured;
+  const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask", "token_type_ids"], outputNames: ["last_hidden_state"], async run(feeds) { captured = feeds.token_type_ids; return { last_hidden_state: { dims: [1, 2, 2], data: new Float32Array([1, 0, 0, 1]) } }; } }; } } };
+  const runtime = new OrtEmbeddingRuntime(ort, { encode() { return { inputIds: [[1, 2]], attentionMask: [[1, 1]] }; } });
+  await runtime.embed(["probe"], { model: new ArrayBuffer(1) });
+  assert.deepEqual(Array.from(captured.data), [0n, 0n]);
+  assert.deepEqual(captured.dims, [1, 2]);
+});
+
+test("ORT runtime rejects unknown required model inputs clearly", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  const ort = { Tensor: class {}, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask", "position_ids"], outputNames: ["last_hidden_state"] }; } } };
+  const runtime = new OrtEmbeddingRuntime(ort, { encode() { return { inputIds: [[1]], attentionMask: [[1]] }; } });
+  await assert.rejects(() => runtime.embed(["probe"], { model: new ArrayBuffer(1) }), /Unsupported local ONNX required inputs: position_ids/);
+});
+
 test("ORT runtime reports every inference batch", async () => {
   const { OrtEmbeddingRuntime } = await loadEmbedding();
   const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };
