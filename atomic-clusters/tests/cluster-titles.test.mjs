@@ -54,6 +54,7 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.doesNotMatch(worker, /apply_chat_template/);
   assert.match(worker, /generationQueue/);
   assert.doesNotMatch(worker, /Promise\.all\(request\.prompts/);
+  assert.doesNotMatch(worker, /<think><\/think>/);
   // Transformers.js fills env.backends.onnx only when its backend module is
   // first loaded; checking it before pipeline() regresses to a false failure.
   assert.doesNotMatch(worker, /const onnxWasm = env\.backends\?\.onnx\?\.wasm/);
@@ -149,7 +150,7 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.equal(posted.at(-1).id, 1);
   assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
   assert.equal(typeof context.__titleGenerationInput, "string");
-  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n<think></think>\n");
+  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
   assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 

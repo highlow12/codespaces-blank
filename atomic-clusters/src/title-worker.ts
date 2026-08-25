@@ -39,7 +39,7 @@ function renderQwenChatML(userPrompt: string): string {
   // markers: this prevents the small generation budget from being spent on
   // hidden reasoning while remaining compatible with ONNX tokenizer assets.
   const user = stripChatMLDelimiters(userPrompt).trimEnd() + "\n/no_think";
-  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n<think></think>\n`;
+  return `<|im_start|>system\n${system}<|im_end|>\n<|im_start|>user\n${user}<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n`;
 }
 
 function getOnnxRuntime(): OnnxRuntimeModule {

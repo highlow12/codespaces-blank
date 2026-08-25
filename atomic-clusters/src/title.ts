@@ -6,7 +6,7 @@ export const TITLE_MODEL_ID = "qwen3-0.6b-q4f16";
 export const TITLE_MODEL_REVISION = "558750086ed49d78cb701ed6fa85af33fd16453f";
 export const TITLE_MODEL_MODEL_SHA256 = "9e33a5911974174761d0dfdcc0bec975d9c45af0eae5e9eb647b8ba9442a8f91";
 export const TITLE_MODEL_SIZE_BYTES = 569_789_750;
-export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v3-qwen3-no-think-clean-validated";
+export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v4-qwen3-no-think-clean-validated";
 export const TITLE_MODEL_DESCRIPTOR = {
   id: TITLE_MODEL_ID,
   revision: TITLE_MODEL_REVISION,
