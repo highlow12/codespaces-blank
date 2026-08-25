@@ -80,7 +80,7 @@ function pythonResultToPluginResult(raw: Record<string, any>, ids: string[]): Py
   }));
   const leaves = (tree.leaves || []).map((leaf: Record<string, any>) => Number(leaf.leaf));
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     ids: Array.isArray(raw.ids) ? raw.ids.map(String) : ids,
     leafLabels: (discovery.leaf_labels || []).map(Number),
     probabilities: (discovery.probabilities || []).map(Number),

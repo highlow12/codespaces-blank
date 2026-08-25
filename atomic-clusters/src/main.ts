@@ -1,9 +1,9 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
 import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LocalRuntimeDiagnostics, LocalRuntimeProgress, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, LOCAL_ORT_WEBGPU_MJS_ASSET, LOCAL_ORT_WEBGPU_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
-import { ClusterResultStore, ClusterTitleCache, ClusterTitleLogStore, EmbeddingCache, EmbeddingLogStore, NoteStore, TitleRuntimeDiagnosticLogStore } from "./storage";
-import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest, TitleRuntimeTest, TitleRuntimeTestResult } from "./settings";
+import { ClusterResultStore, EmbeddingCache, EmbeddingLogStore, KeywordTitleLogStore, NoteStore } from "./storage";
+import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
-import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, NoteRecord, PluginSettings, TitleRuntimeDiagnosticCase } from "./types";
+import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, NoteRecord, PluginSettings } from "./types";
 import { BrowserClusteringWorker, InProcessClusteringWorker, NodeClusteringWorker } from "./worker-client";
 import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
@@ -12,14 +12,12 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { shell } from "electron";
 import { AtomicClustersProgress } from "./progress";
 import { prepareLocalOrtRendererModule, resolveLocalOrtAssetPrefix } from "./ort-assets";
-import { LocalClusterTitleGenerator, TitleModelManager, TitleModelProgress, TITLE_MODEL_PROMPT_VERSION, TITLE_MODEL_REVISION, VaultTitleModelStorage, validateTitle } from "./title";
-import { BrowserTitleRuntime } from "./title-worker-client";
-import titleWorkerSource from "./title-worker-source";
+import { generateKeywordTitles, KEYWORD_TITLE_ALGORITHM_VERSION } from "./title";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
   localModel: "multilingual-e5-small", localExecutionProvider: "auto", excludedFolders: [], minClusterSize: 5, minSamples: 3,
-  umapNeighbors: 15, umapMinDist: 0.1, pcaVarianceTarget: 0.9, clusterTitlesEnabled: true, clusterTitleLanguage: "auto"
+  umapNeighbors: 15, umapMinDist: 0.1, pcaVarianceTarget: 0.9, clusterTitlesEnabled: true
   , clusteringRuntime: "wasm", pyodideUrl: ""
 };
 
@@ -29,10 +27,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private latestResult: ClusterResult | null = null;
   private running = false;
   private localModelManager!: LocalModelManager;
-  private titleModelManager!: TitleModelManager;
-  private titleRuntime: BrowserTitleRuntime | null = null;
-  // Titles and local embeddings use the same ORT WebGPU JSEP binary. Keeping
-  // one buffer here prevents the two runtimes from drifting apart again.
+  // Keep the renderer's optional local embedding runtime assets in memory.
   private localOrtWebgpuWasmBinary: ArrayBuffer | null = null;
   private operationProgress: AtomicClustersProgress | null = null;
   private runAbortController: AbortController | null = null;
@@ -48,7 +43,6 @@ export default class AtomicClustersPlugin extends Plugin {
     } catch { /* Local inference reports a useful error if this cannot be resolved. */ }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings> || {});
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
-    this.titleModelManager = new TitleModelManager(new VaultTitleModelStorage(this.app.vault.adapter));
     this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf));
     this.addCommand({ id: "build-note-clusters", name: "Build note clusters", callback: () => void this.buildClusters() });
     this.addCommand({ id: "regenerate-cluster-titles", name: "Regenerate cluster titles", callback: () => void this.regenerateTitles() });
@@ -57,11 +51,10 @@ export default class AtomicClustersPlugin extends Plugin {
     this.addCommand({ id: "cancel-clustering", name: "Cancel clustering", callback: () => this.cancelClustering() });
     const clusterRun: ClusterRunControls = { build: () => this.buildClusters(), regenerateTitles: () => this.regenerateTitles(), cancel: () => this.cancelClustering(), isRunning: () => this.running };
     const testLocalRuntime: LocalRuntimeTest = (onProgress) => this.testLocalRuntime(onProgress);
-    const testTitleRuntime: TitleRuntimeTest = (onProgress) => this.testTitleRuntime(onProgress);
-    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, this.titleModelManager, () => this.openEmbeddingLog(), clusterRun, testLocalRuntime, testTitleRuntime, () => this.confirmTitleDownload()));
+    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun, testLocalRuntime));
   }
 
-  async onunload(): Promise<void> { await this.worker?.terminate(); await this.titleRuntime?.terminate(); this.titleRuntime = null; this.worker = null; disposeLocalOrtAssets(); }
+  async onunload(): Promise<void> { await this.worker?.terminate(); this.worker = null; disposeLocalOrtAssets(); }
 
   private async configureRendererOrtAssets(adapter: { exists(path: string): Promise<boolean>; readBinary(path: string): Promise<ArrayBuffer> }, prefix: string): Promise<void> {
     const manifestDir = this.manifest.dir?.replace(/\\/g, "/").replace(/\/$/, "");
@@ -144,12 +137,12 @@ export default class AtomicClustersPlugin extends Plugin {
       const config: ClusteringConfig = { minClusterSize: this.settings.minClusterSize, minSamples: this.settings.minSamples, umapNeighbors: this.settings.umapNeighbors, umapMinDist: this.settings.umapMinDist, pcaVarianceTarget: this.settings.pcaVarianceTarget, seed: 42 };
       this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
       const resultStore = new ClusterResultStore(this.app.vault);
-      // Persist the structural result before touching the optional title model.
-      this.latestResult = { ...this.latestResult, schemaVersion: 2 };
+      // Persist the structural result before computing optional keyword titles.
+      this.latestResult = { ...this.latestResult, schemaVersion: 3, titles: undefined, titleGeneration: undefined };
       await resultStore.save(this.latestResult); await this.publishResult(this.latestResult);
       if (this.settings.clusterTitlesEnabled !== false) {
         try {
-          this.latestResult = await this.generateTitlesForResult(this.latestResult, activeNotes, runSignal, progress, false);
+          this.latestResult = await this.generateTitlesForResult(this.latestResult, notes, runSignal, progress, false);
         } catch (titleError) {
           if (runSignal.aborted || (titleError instanceof Error && titleError.message.toLowerCase().includes("cancel"))) throw titleError;
           progress.update({ phase: "cluster titles", progress: 1, detail: `Titles skipped: ${safeRunError(titleError)}` });
@@ -170,7 +163,7 @@ export default class AtomicClustersPlugin extends Plugin {
     finally { this.running = false; this.operationProgress = null; this.runAbortController = null; }
   }
 
-  /** Regenerate titles from the persisted hierarchy without touching embeddings or clustering. */
+  /** Regenerate keyword titles from the persisted hierarchy without touching embeddings or clustering. */
   private async regenerateTitles(): Promise<void> {
     if (this.running) { new Notice("Atomic Clusters is already running."); return; }
     this.running = true;
@@ -188,12 +181,10 @@ export default class AtomicClustersPlugin extends Plugin {
       if (missing.length) throw new Error(`${missing.length} note${missing.length === 1 ? " is" : "s are"} missing from the saved cluster result; build clusters again before regenerating titles.`);
       const orderedNotes = result.ids.map((path) => byPath.get(path)!);
       progress.update({ phase: "result load", progress: 0.1, detail: `${orderedNotes.length} current notes · ${result.hierarchy.leaves.length + result.hierarchy.merges.length} hierarchy nodes` });
-      const modelStatus = await this.titleModelManager.verifyStatus();
-      if (modelStatus !== "installed") throw new Error(`Title model is not installed (${modelStatus}); download and verify it before regenerating titles.`);
-      this.latestResult = { ...result, schemaVersion: 2 };
+      this.latestResult = { ...result, schemaVersion: 3, titles: undefined, titleGeneration: undefined };
       await this.publishResult(this.latestResult);
       this.latestResult = await this.generateTitlesForResult(this.latestResult, orderedNotes, runSignal, progress, true);
-      progress.complete(`Regenerated ${this.latestResult.titleGeneration ? Object.keys(this.latestResult.titleGeneration.statuses).length : 0} cluster titles`);
+      progress.complete(`Regenerated ${Object.keys(this.latestResult.titles || {}).length} keyword titles`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = message.toLowerCase().includes("cancel");
@@ -206,54 +197,15 @@ export default class AtomicClustersPlugin extends Plugin {
     }
   }
 
-  private async generateTitlesForResult(result: ClusterResult, notes: NoteRecord[], signal: AbortSignal, progress: AtomicClustersProgress, forceRegenerate: boolean): Promise<ClusterResult> {
-    const titleCache = await new ClusterTitleCache(this.app.vault).load();
-    const titleStarted = new Date().toISOString();
-    const titleGenerator = new LocalClusterTitleGenerator(this.titleModelManager, async (artifact) => {
-      if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
-      this.titleRuntime = new BrowserTitleRuntime(titleWorkerSource, artifact, this.localOrtWebgpuWasmBinary.slice(0));
-      await this.titleRuntime.initialize();
-      return this.titleRuntime;
-    });
-    const startProgress = forceRegenerate ? 0.12 : 0.96;
-    const progressSpan = forceRegenerate ? 0.82 : 0.035;
-    progress.update({ phase: "title model", progress: startProgress, detail: forceRegenerate ? "Loading local title model for regeneration" : "Loading local title model" });
-    const persist = async (partial: ClusterResult): Promise<void> => {
-      this.latestResult = partial;
-      await new ClusterResultStore(this.app.vault).save(partial);
-      await titleCache.save();
-      await this.publishResult(partial);
-      await this.saveTitleLog(partial, titleStarted);
-    };
-    const titled = await titleGenerator.generate(result, notes, {
-      language: this.settings.clusterTitleLanguage || "auto",
-      signal,
-      cache: titleCache,
-      forceRegenerate,
-      onProgress: (done, total) => progress.update({ phase: forceRegenerate ? "regenerating titles" : "cluster titles", progress: startProgress + (total ? done / total * progressSpan : 0), detail: `${done}/${total} hierarchy nodes` }),
-      onBatch: persist
-    });
-    await persist(titled);
+  private async generateTitlesForResult(result: ClusterResult, notes: NoteRecord[], signal: AbortSignal, progress: AtomicClustersProgress, _forceRegenerate: boolean): Promise<ClusterResult> {
+    const started = Date.now();
+    progress.update({ phase: "keyword titles", progress: 0.9, detail: "Selecting representative keywords" });
+    const titled = generateKeywordTitles(result, notes, { signal, onProgress: (done, total) => progress.update({ phase: "keyword titles", progress: 0.9 + (total ? done / total * 0.09 : 0), detail: `${done}/${total} hierarchy nodes` }) });
+    this.latestResult = titled;
+    await new ClusterResultStore(this.app.vault).save(titled);
+    await new KeywordTitleLogStore(this.app.vault).save({ version: 1, method: "keywords", algorithmVersion: KEYWORD_TITLE_ALGORITHM_VERSION, startedAt: new Date(started).toISOString(), completedAt: new Date().toISOString(), durationMs: Date.now() - started, nodeCount: titled.titleGeneration?.nodeCount || 0, nodes: Object.fromEntries(Object.entries(titled.titles || {}).map(([id, title]) => [id, { title, scores: titled.titleGeneration?.scores?.[id] || [] }])) });
+    await this.publishResult(titled);
     return titled;
-  }
-
-  private async saveTitleLog(result: ClusterResult, startedAt: string): Promise<void> {
-    const statuses = Object.values(result.titleGeneration?.statuses || {});
-    const titleStatuses = result.titleGeneration?.statuses || {};
-    const titleDurations = result.titleGeneration?.durationsMs || {};
-    await new ClusterTitleLogStore(this.app.vault).save({
-      version: 1,
-      startedAt,
-      completedAt: new Date().toISOString(),
-      modelRevision: TITLE_MODEL_REVISION,
-      promptVersion: TITLE_MODEL_PROMPT_VERSION,
-      backend: result.titleGeneration?.backend || "unavailable",
-      generated: statuses.filter((value) => value === "generated").length,
-      failed: statuses.filter((value) => value === "failed").length,
-      cached: statuses.filter((value) => value === "cached").length,
-      skipped: statuses.filter((value) => value === "skipped").length,
-      entries: Object.entries(titleStatuses).map(([nodeId, status]) => ({ nodeId: Number(nodeId), status, durationMs: titleDurations[nodeId] || 0, ...(result.titleGeneration?.errors?.[nodeId] ? { error: result.titleGeneration.errors[nodeId] } : {}) }))
-    });
   }
 
   private async testLocalRuntime(onProgress: (progress: LocalRuntimeProgress) => void): Promise<void> {
@@ -267,83 +219,6 @@ export default class AtomicClustersPlugin extends Plugin {
       await store.save({ version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: 0, succeeded: 0, failed: 0, cached: 0, entries: [], status: "failed", stage: "preflight", error: safeRunError(error) }).catch(() => undefined);
       throw error;
     }
-  }
-
-  private async testTitleRuntime(onProgress: (progress: TitleModelProgress) => void): Promise<TitleRuntimeTestResult> {
-    const diagnosticStore = new TitleRuntimeDiagnosticLogStore(this.app.vault);
-    const diagnosticPath = diagnosticStore.path;
-    const startedAt = new Date().toISOString();
-    const checks: Array<{ label: string; prompt: string; expectation: TitleRuntimeDiagnosticCase["expectation"] }> = [
-      {
-        label: "korean-factual-qa",
-        prompt: "대한민국의 수도는? 한 단어로만 답하세요.",
-        expectation: { type: "contains", signal: "서울" }
-      },
-      {
-        label: "clean-cluster-title",
-        prompt: "Create one title in English. Use 2-6 words and output the title only. Shared topics: React hooks, state management, and effect dependencies.",
-        expectation: { type: "valid-title" }
-      }
-    ];
-    const cases: TitleRuntimeDiagnosticCase[] = [];
-    let runtime: BrowserTitleRuntime | null = null;
-    let backend: "webgpu" | "unavailable" = "unavailable";
-    let persisted = false;
-    const failedCases = (message: string): TitleRuntimeDiagnosticCase[] => checks.map((check) => ({ label: check.label, output: "", durationMs: 0, passed: false, expectation: check.expectation, error: message }));
-    const persist = async (error?: string): Promise<TitleRuntimeTestResult> => {
-      const passed = cases.filter((item) => item.passed).length;
-      await diagnosticStore.save({ version: 1, timestamp: startedAt, completedAt: new Date().toISOString(), modelRevision: TITLE_MODEL_REVISION, promptVersion: TITLE_MODEL_PROMPT_VERSION, backend, passed, total: checks.length, cases, ...(error ? { error } : {}) });
-      persisted = true;
-      return { passed, total: checks.length, backend, logPath: diagnosticPath, summary: `Runtime diagnostic ${passed}/${checks.length} passed (${backend})` };
-    };
-    try {
-      onProgress({ phase: "consent", progress: 0, detail: "Checking installed title model" });
-      if (await this.titleModelManager.status() !== "installed") throw new Error("Title model is not installed; download it before testing the runtime.");
-      onProgress({ phase: "verify", progress: 0.2, detail: "Checking model integrity" });
-      if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
-      const artifact = await this.titleModelManager.load();
-      runtime = new BrowserTitleRuntime(titleWorkerSource, artifact, this.localOrtWebgpuWasmBinary.slice(0));
-      let initializationError: string | undefined;
-      try {
-        onProgress({ phase: "verify", progress: 0.35, detail: "Initializing WebGPU title runtime" });
-        await runtime.initialize();
-        backend = runtime.diagnostics.backend;
-      } catch (error) {
-        initializationError = safeRunError(error);
-        cases.push(...failedCases(initializationError));
-      }
-      if (backend === "webgpu") {
-        for (const [index, check] of checks.entries()) {
-          const started = performance.now();
-          let output = "";
-          let passed = false;
-          let error: string | undefined;
-          onProgress({ phase: "verify", progress: 0.4 + index * 0.25, detail: `Running ${check.label}` });
-          try {
-            const values = await runtime.generate([check.prompt], { maxNewTokens: 12, doSample: false, temperature: 0, mode: "diagnostic" });
-            output = String(values[0] || "").slice(0, 500);
-            passed = check.expectation.type === "contains" ? output.includes(check.expectation.signal || "") : validateTitle(output, check.prompt).valid;
-          } catch (runError) {
-            error = safeRunError(runError);
-          }
-          cases.push({ label: check.label, output, durationMs: Math.max(0, Math.round(performance.now() - started)), passed, expectation: check.expectation, ...(error ? { error } : {}) });
-        }
-      }
-      const result = await persist(initializationError);
-      onProgress({ phase: "complete", progress: 1, detail: `${result.summary} · ${diagnosticPath}` });
-      return result;
-    } catch (error) {
-      const message = safeRunError(error);
-      if (!cases.length) cases.push(...failedCases(message));
-      if (!persisted) await persist(message).catch(() => undefined);
-      throw error;
-    } finally {
-      await runtime?.terminate().catch(() => undefined);
-    }
-  }
-
-  private confirmTitleDownload(): Promise<boolean> {
-    return new Promise((resolve) => new TitleModelConsentModal(this.app, resolve).open());
   }
 
   private async getWorker(): Promise<NodeClusteringWorker | BrowserClusteringWorker | InProcessClusteringWorker | PyodideClusteringWorker> {
@@ -416,20 +291,6 @@ class GeminiTransmissionModal extends Modal {
     const buttons = this.contentEl.createDiv({ cls: "modal-button-container" });
     buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.finish(false));
     buttons.createEl("button", { text: "Send note text", cls: "mod-cta" }).addEventListener("click", () => this.finish(true));
-  }
-  onClose(): void { this.finish(false); }
-  private finish(value: boolean): void { if (this.settled) return; this.settled = true; this.resolveChoice(value); this.close(); }
-}
-
-class TitleModelConsentModal extends Modal {
-  private settled = false;
-  constructor(app: App, private readonly resolveChoice: (value: boolean) => void) { super(app); }
-  onOpen(): void {
-    this.contentEl.createEl("h2", { text: "Download cluster title model?" });
-    this.contentEl.createEl("p", { text: "This downloads the approximately 544 MiB (570 MB) Qwen3-0.6B Q4F16 ONNX model and tokenizer from Hugging Face. It is stored in the vault and title inference runs locally on WebGPU; CPU fallback is not used." });
-    const buttons = this.contentEl.createDiv({ cls: "modal-button-container" });
-    buttons.createEl("button", { text: "Cancel" }).addEventListener("click", () => this.finish(false));
-    buttons.createEl("button", { text: "Download", cls: "mod-cta" }).addEventListener("click", () => this.finish(true));
   }
   onClose(): void { this.finish(false); }
   private finish(value: boolean): void { if (this.settled) return; this.settled = true; this.resolveChoice(value); this.close(); }

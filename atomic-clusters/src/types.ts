@@ -19,7 +19,6 @@ export interface PluginSettings {
   pyodideUrl?: string;
   /** Generate titles for every leaf and merge node after a successful build. */
   clusterTitlesEnabled?: boolean;
-  clusterTitleLanguage?: "auto" | string;
 }
 
 export interface NoteRecord {
@@ -127,30 +126,22 @@ export interface HierarchyTree {
   root: number | null;
 }
 
-export type ClusterTitleStatus = "generated" | "cached" | "failed" | "skipped";
+export type ClusterTitleStatus = "generated" | "empty";
 
-/** Metadata persisted with a v2 result.  It intentionally contains no note text. */
+/** Metadata persisted with a v3 result. It intentionally contains no note text. */
 export interface ClusterTitleGeneration {
-  modelRevision: string;
-  promptVersion: string;
-  language: string;
+  method: "keywords";
+  algorithmVersion: string;
   inputFingerprint: string;
-  backend?: "webgpu" | "unavailable";
   generatedAt?: string;
   statuses: Record<string, ClusterTitleStatus>;
-  durationsMs?: Record<string, number>;
-  errors?: Record<string, string>;
-}
-
-export interface ClusterTitleCacheEntry {
-  key: string;
-  title: string;
-  nodeMembersFingerprint: string;
-  savedAt: string;
+  nodeCount: number;
+  durationMs: number;
+  scores?: Record<string, Array<{ keyword: string; score: number }>>;
 }
 
 export interface ClusterResult {
-  schemaVersion: 1 | 2;
+  schemaVersion: 1 | 2 | 3;
   ids: string[];
   leafLabels: number[];
   probabilities: number[];
@@ -161,29 +152,6 @@ export interface ClusterResult {
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;
-}
-
-/** Fixed, vault-content-free checks for separating model/runtime failures from prompt quality. */
-export interface TitleRuntimeDiagnosticCase {
-  label: string;
-  output: string;
-  durationMs: number;
-  passed: boolean;
-  expectation: { type: "contains" | "valid-title"; signal?: string };
-  error?: string;
-}
-
-export interface TitleRuntimeDiagnosticLog {
-  version: 1;
-  timestamp: string;
-  completedAt: string;
-  modelRevision: string;
-  promptVersion: string;
-  backend: "webgpu" | "unavailable";
-  passed: number;
-  total: number;
-  cases: TitleRuntimeDiagnosticCase[];
-  error?: string;
 }
 
 export type WorkerRequest =
