@@ -75,7 +75,13 @@ test("built title worker hides Electron process before Transformers.js evaluates
           export async function pipeline(_task, _model, options) {
             if (!detectedDevices.includes(options.device)) throw new Error("Unsupported device: \\"" + options.device + "\\"");
             globalThis.__titlePipelineDevice = options.device;
-            return async () => [{ generated_text: "WebGPU title" }];
+            return async () => {
+              // ORT initializes lazily. This runs after the dynamic import has
+              // completed and catches a bootstrap that restores Electron's
+              // process too early.
+              if (typeof process !== "undefined") throw new Error("process restored before delayed title generation");
+              return [{ generated_text: "WebGPU title" }];
+            };
           }
         `
       }));
@@ -108,6 +114,12 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.equal(Array.from(context.__titleDetectedDevices).join(","), "webgpu,wasm");
   assert.equal(context.__titlePipelineDevice, "webgpu");
   assert.deepEqual(posted.map((message) => ({ type: message.type, backend: message.backend })), [{ type: "READY", backend: "webgpu" }]);
+  assert.equal(vm.runInContext("typeof process", context), "undefined");
+  await context.onmessage({ data: { type: "GENERATE", id: 1, prompts: ["Name this cluster"], maxNewTokens: 12 } });
+  assert.equal(posted.at(-1).type, "RESULT");
+  assert.equal(posted.at(-1).id, 1);
+  assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
+  assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 
 test("title prompt selection uses probability-ranked notes and bounded cleaned snippets", async () => {

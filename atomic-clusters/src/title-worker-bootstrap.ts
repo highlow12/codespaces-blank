@@ -24,13 +24,9 @@ const scope = globalThis as RuntimeGlobal;
 // Transformers backend has evaluated and selected WebGPU.
 void ortWeb;
 
-type ProcessRestore = () => void;
-
-function hideElectronProcess(): ProcessRestore {
+function hideElectronProcess(): void {
   const target = globalThis as unknown as { process?: unknown };
-  const hadOwnProcess = Object.prototype.hasOwnProperty.call(target, "process");
   const descriptor = Object.getOwnPropertyDescriptor(target, "process");
-  const previous = target.process;
 
   try {
     if (descriptor?.configurable) {
@@ -46,30 +42,19 @@ function hideElectronProcess(): ProcessRestore {
   } catch (error) {
     throw error instanceof Error ? error : new Error(String(error));
   }
-
-  return () => {
-    try {
-      if (descriptor) Object.defineProperty(target, "process", descriptor);
-      else if (hadOwnProcess) target.process = previous;
-      else delete (target as { [key: string]: unknown }).process;
-    } catch {
-      // Restoring is best effort. The worker is no longer usable if module
-      // initialization failed, and leaving process hidden is safer than
-      // changing the host's process object to an unexpected value.
-    }
-  };
 }
 
 void (async () => {
-  let restoreProcess: ProcessRestore | undefined;
   try {
-    restoreProcess = hideElectronProcess();
+    // Keep Electron's process global hidden for the entire worker lifetime.
+    // Transformers.js loads the ONNX backend lazily: restoring process after
+    // this import would make a later pipeline/generator call detect Node and
+    // try to import the unavailable `worker_threads` module.
+    hideElectronProcess();
     // esbuild lowers this dynamic import into a deferred module initializer
     // for the inline IIFE, preserving the ordering above in the built worker.
     await import("./title-worker");
   } catch (error) {
     scope.postMessage?.({ type: "ERROR", message: error instanceof Error ? error.message : String(error) });
-  } finally {
-    restoreProcess?.();
   }
 })();
