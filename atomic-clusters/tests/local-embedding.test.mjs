@@ -117,7 +117,43 @@ test("ORT runtime reports every inference batch", async () => {
   const runtime = new OrtEmbeddingRuntime(ort, { encode(texts) { return { inputIds: texts.map(() => [1]), attentionMask: texts.map(() => [1]) }; } }, 2);
   const vectors = await runtime.embed(["a", "b", "c"], { model: new ArrayBuffer(1) }, (done, total) => progress.push([done, total]));
   assert.equal(vectors.length, 3);
-  assert.deepEqual(progress, [[2, 3], [3, 3]]);
+  assert.deepEqual(progress, [[0, 3], [2, 3], [2, 3], [3, 3]]);
+});
+
+test("ORT runtime cancellation stops before the next batch", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  const controller = new AbortController();
+  let runs = 0;
+  const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { runs++; controller.abort(); const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };
+  const runtime = new OrtEmbeddingRuntime(ort, { encode(texts) { return { inputIds: texts.map(() => [1]), attentionMask: texts.map(() => [1]) }; } }, 1);
+  await assert.rejects(() => runtime.embed(["a", "b"], { model: new ArrayBuffer(1) }, undefined, controller.signal), /Clustering cancelled/);
+  assert.equal(runs, 1);
+});
+
+test("local provider cancellation does not retry notes after a cancelled batch", async () => {
+  const { LocalEmbeddingProvider } = await loadEmbedding();
+  const controller = new AbortController();
+  let calls = 0;
+  const provider = new LocalEmbeddingProvider({ localModel: "multilingual-e5-small" }, async () => {
+    calls++;
+    controller.abort();
+    return [new Array(384).fill(0.1), new Array(384).fill(0.1)];
+  });
+  const notes = [
+    { path: "a.md", title: "A", content: "a", hash: "a", mtime: 1 },
+    { path: "b.md", title: "B", content: "b", hash: "b", mtime: 2 }
+  ];
+  await assert.rejects(() => provider.embed(notes, undefined, undefined, controller.signal), /Clustering cancelled/);
+  assert.equal(calls, 1);
+});
+
+test("Unigram tokenizer bounds very long notes before dynamic programming", async () => {
+  const { UnigramTokenizer } = await loadEmbedding();
+  const tokenizer = new UnigramTokenizer(JSON.stringify({ model: { type: "Unigram", unk_id: 3, vocab: [["▁", -0.1], ["a", -0.2], ["<unk>", -5]] }, added_tokens: [{ id: 0, content: "<s>" }, { id: 1, content: "<pad>" }, { id: 2, content: "</s>" }] }));
+  const batch = tokenizer.encode(["a".repeat(2_000_000)], 512);
+  assert.equal(batch.inputIds.length, 1);
+  assert.ok(batch.inputIds[0].length <= 512);
+  assert.equal(batch.attentionMask[0].length, batch.inputIds[0].length);
 });
 
 test("ORT runtime caches the initialized session for preflight and bulk inference", async () => {

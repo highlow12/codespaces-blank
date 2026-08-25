@@ -26,6 +26,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private running = false;
   private localModelManager!: LocalModelManager;
   private operationProgress: AtomicClustersProgress | null = null;
+  private runAbortController: AbortController | null = null;
 
   async onload(): Promise<void> {
     // Obsidian may eval-load the plugin bundle, so loader-relative paths can
@@ -66,6 +67,8 @@ export default class AtomicClustersPlugin extends Plugin {
   private async buildClusters(): Promise<void> {
     if (this.running) { new Notice("Atomic Clusters is already running."); return; }
     this.running = true;
+    this.runAbortController = new AbortController();
+    const runSignal = this.runAbortController.signal;
     const progress = new AtomicClustersProgress("Atomic Clusters");
     this.operationProgress = progress;
     const startedAt = new Date().toISOString(); const logEntries: EmbeddingLogEntry[] = []; let persistedRunLog: EmbeddingRunLog | null = null; let runTotal = 0; let runStage: EmbeddingRunLog["stage"] = "embedding";
@@ -88,11 +91,11 @@ export default class AtomicClustersPlugin extends Plugin {
       progress.update({ phase: "cache scan", progress: 0.15, detail: `${fresh.length} notes need embeddings · ${notes.length - fresh.length} cached` });
       if (provider.id === "local" && fresh.length) {
         runStage = "preflight";
-        await (provider as LocalEmbeddingProvider).preflight((update) => progress.update({ phase: "preflight", progress: 0.15 + update.progress * 0.1, detail: update.detail || update.phase }));
+        await (provider as LocalEmbeddingProvider).preflight((update) => progress.update({ phase: "preflight", progress: 0.15 + update.progress * 0.1, detail: update.detail || update.phase }), runSignal);
         runStage = "embedding";
       }
       let processedFresh = 0;
-      const embedded = fresh.length ? await provider.embed(fresh, (done, total) => progress.update({ phase: "embedding", progress: 0.15 + (total ? done / total * 0.55 : 0), detail: `${done}/${total} notes processed` }), (entry) => { logEntries.push(entry); processedFresh++; progress.update({ phase: "embedding", progress: 0.15 + (processedFresh / Math.max(1, fresh.length)) * 0.55, detail: `${entry.status === "failure" ? "Failed" : "Embedded"}: ${entry.path}` }); }) : [];
+      const embedded = fresh.length ? await provider.embed(fresh, (done, total) => progress.update({ phase: "embedding", progress: 0.25 + (total ? done / total * 0.55 : 0), detail: `${done}/${total} notes processed` }), (entry) => { logEntries.push(entry); processedFresh++; progress.update({ phase: "embedding", progress: 0.25 + (processedFresh / Math.max(1, fresh.length)) * 0.55, detail: `${entry.status === "failure" ? "Failed" : "Embedded"}: ${entry.path}` }); }, runSignal) : [];
       embedded.forEach((item) => entries.set(`${item.provider}:${item.model}:${item.path}`, item)); await cache.save(entries.values());
       const activeNotes = notes.filter((note) => cache.get(note, provider.id, provider.model, entries));
       const freshEmbeddingFailed = fresh.length > 0 && embedded.length === 0;
@@ -102,7 +105,7 @@ export default class AtomicClustersPlugin extends Plugin {
       const embeddingCounts = counts();
       persistedRunLog = { version: 1, startedAt, completedAt: new Date().toISOString(), provider: provider.id, model: provider.model, total: notes.length, ...embeddingCounts, entries: logEntries, status: embeddingError ? "failed" : "completed", stage: "embedding", ...(embeddingError ? { error: safeRunError(embeddingError) } : {}) };
       await logStore.save(persistedRunLog);
-      progress.update({ phase: "cache save", progress: 0.72, detail: `${persistedRunLog.succeeded} embedded · ${persistedRunLog.failed} failed · ${persistedRunLog.cached} cached` });
+      progress.update({ phase: "cache save", progress: 0.82, detail: `${persistedRunLog.succeeded} embedded · ${persistedRunLog.failed} failed · ${persistedRunLog.cached} cached` });
       if (embeddingError) throw new Error(embeddingError);
       // The persisted log currently describes a completed embedding phase;
       // remember that subsequent failures belong to clustering.
@@ -111,9 +114,9 @@ export default class AtomicClustersPlugin extends Plugin {
       if (vectors.some((vector) => !vector)) throw new Error("Embedding cache is incomplete; please run the build again.");
       const ids = activeNotes.map((note) => note.path);
       const worker = await this.getWorker();
-      progress.update({ phase: "clustering", progress: 0.75, detail: `Clustering ${activeNotes.length} notes` });
+      progress.update({ phase: "clustering", progress: 0.84, detail: `Clustering ${activeNotes.length} notes` });
       const config: ClusteringConfig = { minClusterSize: this.settings.minClusterSize, minSamples: this.settings.minSamples, umapNeighbors: this.settings.umapNeighbors, umapMinDist: this.settings.umapMinDist, pcaVarianceTarget: this.settings.pcaVarianceTarget, seed: 42 };
-      this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.75 + value * 0.24, detail: `Clustering ${Math.round(value * 100)}%` }); });
+      this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
       await new ClusterResultStore(this.app.vault).save(this.latestResult); await this.publishResult(this.latestResult); progress.complete(`Built ${this.latestResult.hierarchy.leaves.length} clusters`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -126,7 +129,7 @@ export default class AtomicClustersPlugin extends Plugin {
       await logStore.save(failedLog).catch(() => undefined);
       if (!cancelled) new Notice(`Atomic Clusters failed: ${safeRunError(error)}`);
     }
-    finally { this.running = false; this.operationProgress = null; }
+    finally { this.running = false; this.operationProgress = null; this.runAbortController = null; }
   }
 
   private async testLocalRuntime(onProgress: (progress: LocalRuntimeProgress) => void): Promise<void> {
@@ -150,7 +153,7 @@ export default class AtomicClustersPlugin extends Plugin {
     }
     return this.worker;
   }
-  private cancelClustering(): void { if (!this.running) { new Notice("No clustering job is running."); return; } this.operationProgress?.fail("Cancellation requested"); this.worker?.cancel(); new Notice("Clustering cancellation requested."); }
+  private cancelClustering(): void { if (!this.running) { new Notice("No clustering job is running."); return; } this.runAbortController?.abort(); this.operationProgress?.fail("Cancellation requested"); this.worker?.cancel(); new Notice("Clustering cancellation requested."); }
   private async openExplorer(): Promise<void> { const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false); if (!leaf) return; await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true }); this.app.workspace.revealLeaf(leaf); if (!this.latestResult) this.latestResult = await new ClusterResultStore(this.app.vault).load(); if (this.latestResult) (leaf.view as ClusterExplorerView).setResult(this.latestResult); }
   private async openEmbeddingLog(): Promise<void> {
     const relativePath = ".obsidian/plugins/atomic-clusters/embedding-log.json";

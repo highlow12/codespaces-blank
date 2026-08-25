@@ -5,8 +5,10 @@ import { CachedEmbedding, EmbeddingLogEntry, EmbeddingProviderId, NoteRecord, Pl
 export interface EmbeddingProvider {
   readonly id: EmbeddingProviderId;
   readonly model: string;
-  embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: (entry: EmbeddingLogEntry) => void): Promise<CachedEmbedding[]>;
+  embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: (entry: EmbeddingLogEntry) => void, signal?: AbortSignal): Promise<CachedEmbedding[]>;
 }
+
+function checkCancelled(signal?: AbortSignal): void { if (signal?.aborted) throw new Error("Clustering cancelled"); }
 
 export type EmbeddingNoteLogger = (entry: EmbeddingLogEntry) => void;
 
@@ -50,6 +52,8 @@ export const LOCAL_MODEL_DESCRIPTOR = {
 
 export const LOCAL_ORT_MJS_ASSET = "ort-wasm-simd-threaded.mjs";
 export const LOCAL_ORT_WASM_ASSET = "ort-wasm-simd-threaded.wasm";
+/** Conservative bound: SentencePiece normally uses far fewer than 8 chars/token. */
+export const LOCAL_TOKENIZER_CHAR_FACTOR = 8;
 
 export interface LocalOrtAssetOverrides { mjs?: string; wasm?: string; wasmBinary?: ArrayBuffer; revoke?: () => void; }
 let localOrtAssetPrefix: string | null = null;
@@ -158,7 +162,7 @@ export class LocalModelManager {
 
 export interface LocalTokenBatch { inputIds: number[][]; attentionMask: number[][]; tokenTypeIds?: number[][]; }
 export interface LocalTokenizer { encode(texts: string[], maxLength: number): LocalTokenBatch; }
-export interface LocalInferenceRuntime { embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]>; }
+export interface LocalInferenceRuntime { embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<number[][]>; }
 
 export interface LocalRuntimeProgress { phase: "configuration" | "model" | "session" | "probe" | "complete"; progress: number; detail?: string; }
 
@@ -189,9 +193,16 @@ export class UnigramTokenizer implements LocalTokenizer {
   }
 
   encode(texts: string[], maxLength: number): LocalTokenBatch {
-    const sequences = texts.map((text) => { const ids = [this.bos, ...this.segment(text), this.eos]; return ids.length > maxLength ? [...ids.slice(0, Math.max(1, maxLength - 1)), this.eos] : ids; });
+    const charBudget = Math.max(maxLength, maxLength * LOCAL_TOKENIZER_CHAR_FACTOR);
+    const sequences = texts.map((text) => { const boundedText = this.boundText(text, charBudget); const ids = [this.bos, ...this.segment(boundedText), this.eos]; return ids.length > maxLength ? [...ids.slice(0, Math.max(1, maxLength - 1)), this.eos] : ids; });
     const width = Math.max(1, ...sequences.map((sequence) => sequence.length));
     return { inputIds: sequences.map((sequence) => [...sequence, ...new Array(width - sequence.length).fill(this.pad)]), attentionMask: sequences.map((sequence) => [...new Array(sequence.length).fill(1), ...new Array(width - sequence.length).fill(0)]) };
+  }
+
+  private boundText(text: string, charBudget: number): string {
+    let offset = 0; let count = 0;
+    while (offset < text.length && count < charBudget) { const codePoint = text.codePointAt(offset)!; offset += codePoint > 0xffff ? 2 : 1; count++; }
+    return text.slice(0, offset);
   }
 
   private segment(text: string): number[] {
@@ -214,12 +225,15 @@ export class UnigramTokenizer implements LocalTokenizer {
 export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
   private sessionPromise?: Promise<any>;
   constructor(private readonly ort: { Tensor: new (type: string, data: ArrayLike<number> | BigInt64Array, dims: number[]) => any; InferenceSession: { create(model: ArrayBuffer): Promise<any> } }, private readonly tokenizer: LocalTokenizer, private readonly batchSize = 16, private readonly maxLength = 512) {}
-  async embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void): Promise<number[][]> {
+  async embed(texts: string[], artifact: LocalModelArtifact, onProgress?: (done: number, total: number) => void, signal?: AbortSignal): Promise<number[][]> {
     const session = await this.getSession(artifact);
     const output: number[][] = [];
     for (let start = 0; start < texts.length; start += this.batchSize) {
+      checkCancelled(signal);
       const batch = texts.slice(start, start + this.batchSize);
+      onProgress?.(start, texts.length);
       const tokens = this.tokenizer.encode(batch, this.maxLength);
+      checkCancelled(signal);
       const inputNames = Array.isArray(session.inputNames) ? session.inputNames as string[] : ["input_ids", "attention_mask"];
       const supportedInputs = new Set(["input_ids", "attention_mask", "token_type_ids"]);
       const unsupportedInputs = inputNames.filter((name) => !supportedInputs.has(name));
@@ -238,6 +252,7 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
         feeds.token_type_ids = new this.ort.Tensor("int64", flattenBigInt(tokenTypeIds), [batch.length, tokenWidth]);
       }
       const result = await session.run(feeds);
+      checkCancelled(signal);
       const tensor = result[session.outputNames?.[0] || Object.keys(result)[0]];
       const dimensions = tensor?.dims as number[] | undefined;
       if (!tensor || !dimensions || (dimensions.length !== 2 && dimensions.length !== 3)) throw new Error("Local ONNX model output must be [batch, hidden] or [batch, sequence, hidden].");
@@ -252,6 +267,7 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
         output.push(norm > 1e-12 ? vector.map((value) => value / norm) : vector.fill(0));
       }
       onProgress?.(Math.min(start + batch.length, texts.length), texts.length);
+      if (start + batch.length < texts.length) { await new Promise<void>((resolve) => setTimeout(resolve, 0)); checkCancelled(signal); }
     }
     return output;
   }
@@ -276,7 +292,8 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
   constructor(private readonly settings: PluginSettings, private readonly secrets: SecretResolver, private readonly confirmTransmission: (count: number) => Promise<boolean> = async () => true) {}
   get model(): string { return this.settings.geminiModel; }
 
-  async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger): Promise<CachedEmbedding[]> {
+  async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger, signal?: AbortSignal): Promise<CachedEmbedding[]> {
+    checkCancelled(signal);
     const key = await this.secrets.getSecret(this.settings.geminiSecretRef);
     if (!key) throw new Error("Gemini API key is not configured. Store it in Obsidian SecretStorage and set its reference in settings.");
     if (!(await this.confirmTransmission(notes.length))) throw new Error("Gemini transmission cancelled");
@@ -284,6 +301,7 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
     const batchSize = 32;
     let processed = 0;
     const embedBatch = async (batch: NoteRecord[]): Promise<void> => {
+      checkCancelled(signal);
       const started = performance.now();
       try {
         const response = await withRetry(async () => requestUrl({
@@ -291,7 +309,8 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requests: batch.map((note) => ({ model: `models/${this.model}`, content: { parts: [{ text: `Represent this note for semantic clustering.\n\ntitle: ${note.title}\n\npassage: ${note.content}` }] }, outputDimensionality: 768 })) })
-        }));
+        }), signal);
+        checkCancelled(signal);
         const values = (response.json?.embeddings || []) as Array<{ values: number[] }>;
         if (values.length !== batch.length) throw new Error(`Gemini returned ${values.length} embeddings for ${batch.length} notes.`);
         if (values.some((value) => value.values.length !== 768)) throw new Error("Gemini embedding contract violation: expected 768-dimensional vectors.");
@@ -301,23 +320,25 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
         // Batch APIs can reject one malformed note along with its neighbours.
         // Split failed batches recursively so healthy notes still complete;
         // a single-note failure is recorded and skipped.
-        if (batch.length > 1) { const midpoint = Math.ceil(batch.length / 2); await embedBatch(batch.slice(0, midpoint)); await embedBatch(batch.slice(midpoint)); return; }
+        if (batch.length > 1) { checkCancelled(signal); const midpoint = Math.ceil(batch.length / 2); await embedBatch(batch.slice(0, midpoint)); await embedBatch(batch.slice(midpoint)); return; }
         processed++; onNote?.(logEntry(batch[0], this.id, this.model, "failure", started, error)); onProgress?.(processed, notes.length);
       }
     };
-    for (let start = 0; start < notes.length; start += batchSize) await embedBatch(notes.slice(start, start + batchSize));
+    for (let start = 0; start < notes.length; start += batchSize) { checkCancelled(signal); await embedBatch(notes.slice(start, start + batchSize)); }
     return result;
   }
 }
 
-async function withRetry<T>(request: () => Promise<T>, attempts = 4): Promise<T> {
+async function withRetry<T>(request: () => Promise<T>, signal?: AbortSignal, attempts = 4): Promise<T> {
   let lastError: unknown;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    checkCancelled(signal);
     try { return await request(); } catch (error) {
       lastError = error;
       const status = (error as { status?: number; response?: { status?: number } })?.status || (error as { response?: { status?: number } })?.response?.status;
       if (status !== 429 && (!status || status < 500) || attempt === attempts - 1) throw error;
       await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.floor(Math.random() * 200)));
+      checkCancelled(signal);
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
@@ -347,24 +368,29 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
   constructor(private readonly settings: PluginSettings, private readonly runner?: (texts: string[], model: string) => Promise<number[][]>, private readonly manager?: LocalModelManager, private readonly runtimeFactory: LocalRuntimeFactory = defaultLocalRuntimeFactory) {}
   get model(): string { return `${this.settings.localModel}@${LOCAL_MODEL_VERSION}`; }
 
-  async preflight(onProgress?: (progress: LocalRuntimeProgress) => void): Promise<void> {
+  async preflight(onProgress?: (progress: LocalRuntimeProgress) => void, signal?: AbortSignal): Promise<void> {
+    checkCancelled(signal);
     onProgress?.({ phase: "configuration", progress: 0.05, detail: "Checking bundled ORT renderer assets" });
     if (this.runner) {
       onProgress?.({ phase: "probe", progress: 0.5, detail: "Running a safe local embedding probe" });
+      checkCancelled(signal);
       const vectors = await this.runner(["passage: Atomic Clusters local runtime preflight"], this.model);
+      checkCancelled(signal);
       if (vectors.length !== 1) throw new Error("Local runtime preflight returned an invalid number of vectors.");
       if (vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
     } else {
       onProgress?.({ phase: "model", progress: 0.25, detail: "Loading and verifying the installed model" });
       const runtimeState = await this.getRuntime();
       onProgress?.({ phase: "session", progress: 0.5, detail: "Initializing the ONNX session" });
-      const vectors = await runtimeState.runtime.embed(["passage: Atomic Clusters local runtime preflight"], runtimeState.artifact);
+      const vectors = await runtimeState.runtime.embed(["passage: Atomic Clusters local runtime preflight"], runtimeState.artifact, undefined, signal);
+      checkCancelled(signal);
       if (vectors.length !== 1 || vectors[0].length !== LOCAL_MODEL_DIMENSION || vectors[0].some((value) => !Number.isFinite(value))) throw new Error(`Local runtime preflight returned an invalid ${LOCAL_MODEL_DIMENSION}-dimensional vector.`);
     }
     onProgress?.({ phase: "complete", progress: 1, detail: "Local runtime is ready" });
   }
 
-  async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger): Promise<CachedEmbedding[]> {
+  async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger, signal?: AbortSignal): Promise<CachedEmbedding[]> {
+    checkCancelled(signal);
     const texts = notes.map((note) => `passage: ${note.title}\n${note.content}`);
     let reportedProgress = 0;
     const reportProgress = (done: number): void => { reportedProgress = Math.max(reportedProgress, Math.min(notes.length, done)); onProgress?.(reportedProgress, notes.length); };
@@ -378,27 +404,28 @@ export class LocalEmbeddingProvider implements EmbeddingProvider {
     };
     const recoverIndividually = async (run: (index: number) => Promise<number[][]>): Promise<void> => {
       for (let index = 0; index < notes.length; index++) {
+        checkCancelled(signal);
         const started = performance.now();
-        try { const vectors = await run(index); if (vectors.length !== 1) throw new Error("Local embedding runtime returned an invalid number of vectors."); appendOne(index, vectors[0], started); }
+        try { const vectors = await run(index); checkCancelled(signal); if (vectors.length !== 1) throw new Error("Local embedding runtime returned an invalid number of vectors."); appendOne(index, vectors[0], started); }
         catch (error) { onNote?.(logEntry(notes[index], this.id, this.model, "failure", started, error)); }
         reportProgress(index + 1);
       }
     };
     if (this.runner) {
       const started = performance.now();
-      try { const vectors = await this.runner(texts, this.model); if (vectors.length !== notes.length) throw new Error("Local embedding runner returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); reportProgress(notes.length); }
+      try { const vectors = await this.runner(texts, this.model); checkCancelled(signal); if (vectors.length !== notes.length) throw new Error("Local embedding runner returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); reportProgress(notes.length); }
       catch { result.length = 0; await recoverIndividually((index) => this.runner!([texts[index]], this.model)); }
     } else {
       if (!this.manager) throw new Error("Local model is not configured. Download multilingual-e5-small from Settings first.");
       const { artifact, runtime } = await this.getRuntime();
       const started = performance.now();
-      try { const vectors = await runtime.embed(texts, artifact, (done) => reportProgress(done)); if (vectors.length !== notes.length) throw new Error("Local embedding runtime returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); }
+      try { const vectors = await runtime.embed(texts, artifact, (done) => reportProgress(done), signal); checkCancelled(signal); if (vectors.length !== notes.length) throw new Error("Local embedding runtime returned an invalid number of vectors."); vectors.forEach(validateVector); vectors.forEach((vector, index) => appendOne(index, vector, started)); }
       catch (error) {
         // Backend initialization/asset failures are systemic. Retrying every
         // note would only repeat the same failure hundreds of times. Runtime
         // implementations may opt into isolation for input-specific errors.
         if (error instanceof LocalInferenceBackendError) throw error;
-        result.length = 0; await recoverIndividually((index) => runtime.embed([texts[index]], artifact));
+        result.length = 0; await recoverIndividually((index) => runtime.embed([texts[index]], artifact, undefined, signal));
       }
     }
     reportProgress(notes.length);

@@ -38,6 +38,9 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(settings, /persistent progress Notice/);
   assert.match(main, /build: \(\) => this\.buildClusters\(\)/);
   assert.match(main, /cancel: \(\) => this\.cancelClustering\(\)/);
+  assert.match(main, /runAbortController/);
+  assert.match(main, /runSignal/);
+  assert.match(main, /\.abort\(\)/);
   assert.match(main, /Clustering cancelled/);
   assert.match(progress, /new Notice\("", 0\)/);
   assert.match(progress, /setTimeout\(\(\) => this\.hide/);
@@ -60,6 +63,8 @@ test("embedding log contract contains diagnostics but no payload fields", async 
   assert.match(settings, /runtime \$\{update\.phase\}/);
   assert.match(main, /provider\.preflight/);
   assert.match(main, /stage: "preflight"/);
+  assert.match(main, /progress: 0\.25 \+/);
+  assert.match(main, /progress: 0\.84 \+/);
   assert.match(types, /error\?: string/);
   assert.doesNotMatch(main, /entry\.content|entry\.vector/);
   assert.doesNotMatch(main, /EmbeddingLogModal|atomic-clusters-log-table/);
