@@ -120,7 +120,12 @@ function hdbscanOutput(output: HdbscanExtractWasmResult, count: number): Hdbscan
       throw new TypeError(`WASM HDBSCAN output is invalid at row ${index}`);
     }
   }
-  return { labels, probabilities, outlierProxy };
+  const memberships = Array.from({ length: count }, (_, row) => {
+    const values = new Array(output.cluster_count).fill(0);
+    if (labels[row] >= 0) values[labels[row]] = probabilities[row];
+    return values;
+  });
+  return { labels, probabilities, outlierProxy, memberships };
 }
 
 interface Edge { left: number; right: number; distance: number; }

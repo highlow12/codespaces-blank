@@ -65,7 +65,7 @@ kernel로 동작한다. 이 fallback은 개발 가능성을 위한 것이며 Pyt
 | --- | ---: | --- |
 | embedding provider | `gemini` | Gemini 전송 확인 후 768-dimensional embedding |
 | Gemini model | `gemini-embedding-2` | SecretStorage reference 기본값은 `gemini-api-key` |
-| local model | `multilingual-e5-small` | runner/asset 미포함으로 현재 unavailable |
+| local model | `multilingual-e5-small` | 명시적 설치 후 bundled ONNX/WASM + tokenizer로 offline |
 | excluded folders | `[]` | 모든 Markdown 파일 대상 |
 | HDBSCAN `minClusterSize` | `5` | 현재 설정 화면에는 직접 노출하지 않음 |
 | HDBSCAN `minSamples` | `3` | core-distance 이웃 수 |
@@ -154,9 +154,11 @@ row-major `f32` TypedArray 계약을 사용한다. 현재 export/adapter 경로�
 production adapter의 PCA quality 설정은 `pcaOversamples=16`,
 `pcaPowerIterations=3`, `pcaSeed=42`, cosine tile은 `256`이다. HDBSCAN 경로는
 Euclidean core distance와 mutual-reachability MST를 WASM 안에서 수행하고
-label/probability/outlier score를 JS로 돌려준다. 외부 `hdbscan-rs`
-wasm-bindgen provider는 `HdbscanProvider` 교체 지점으로 열어 두었지만 아직
-별도 crate를 vendor하고 audit한 상태는 아니다.
+label/probability/outlier score를 JS로 돌려준다. `ExternalHdbscanProviderAdapter`
+는 별도 hdbscan-rs/native 구현을 연결하는 명시적인 경계이며, provider는
+label permutation과 무관한 공통 label/probability/outlier 계약을 지켜야 한다.
+완전한 soft membership 행렬은 선택 필드다. 외부 crate 자체는 아직 vendor하지
+않았고, 현재 production provider는 checked-in Rust 구현이다.
 
 ## Python authoritative 경로와 JS/WASM 차이
 
@@ -195,6 +197,22 @@ center는 unnormalized selected PCA features와 memberships를 사용한다.
 Python 결과는 의미와 configuration의 authoritative alignment 기준이고, offline
 report는 실제 plugin orchestration과 WASM 경로의 연결을 확인하는 실행 결과다.
 두 구현의 label 번호나 cluster 수가 자동으로 같아진다는 약속은 없다.
+
+### HDBSCAN provider/member parity audit
+
+`npm run audit:hdbscan -- --dataset-sample-size 100 --dataset-sample-seed 42
+--fast`는 Python authoritative pipeline을 먼저 실행한 뒤, Python이 생성한
+동일 UMAP 좌표를 WASM HDBSCAN에 넣는다. 결과 JSON은 다음을 함께 기록한다.
+
+- 최적 label permutation 후의 label agreement와 noise agreement
+- probability MAE/RMSE 및 outlier-score MAE
+- Python full membership와 WASM assigned-membership의 MAE/max error
+- reference/candidate cluster 수와 선택된 label mapping
+
+따라서 이 도구는 HDBSCAN extraction을 수치적으로 감사하지만 end-to-end
+Python/plugin parity를 주장하지 않는다. `umap-learn`과 `umap-js`는 좌표가
+다를 수 있고, Python native membership은 WASM의 assigned probability보다
+풍부하다. `--strict`와 metric limit을 함께 줄 때만 CI 실패 조건으로 바뀐다.
 
 ## 검증 결과
 
@@ -287,11 +305,13 @@ git diff --check
 - WASM이 빠진 개발 빌드의 JS density-graph fallback은 HDBSCAN parity 경로가
   아니다. 큰 vault에는 generated WASM을 포함한 release build가 필요하다.
 - Rust core의 HDBSCAN extraction은 현재 내부 condensed-tree 구현이다. 외부
-  `hdbscan-rs` provider 교체와 Python native membership parity audit은 아직
-  끝나지 않았다.
+  `hdbscan-rs` crate는 아직 vendor하지 않았으며, 별도 provider 연결은
+  `ExternalHdbscanProviderAdapter` 계약을 통해 수행해야 한다. parity audit은
+  실행 가능하지만 informational 결과이며, Python full membership과의 완전한
+  일치를 보장하지 않는다.
 - exact Euclidean MST와 UMAP은 3,000행에서도 측정상 수 분이 걸린다. worker
   cancellation 경계, memory pressure, 더 큰 vault의 UX를 계속 측정해야 한다.
 
-다음 우선순위는 (1) 외부 HDBSCAN provider 및 memberships를 audit하고, (2)
-  3,000행 이상
-  vault에서 tiled memory/performance와 progress/cancel UX를 재측정하는 것이다.
+다음 우선순위는 (1) 필요성이 확인될 때 외부 HDBSCAN provider를 별도 crate로
+vendor하고 같은 audit 계약으로 검증하는 것, (2) 3,000행 이상 vault에서
+tiled memory/performance와 progress/cancel UX를 재측정하는 것이다.

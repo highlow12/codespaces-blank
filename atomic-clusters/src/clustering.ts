@@ -12,14 +12,72 @@ export interface NumericKernel {
   hdbscan?(rows: number[][], minClusterSize: number, minSamples: number): HdbscanOutput;
 }
 
-export interface HdbscanOutput { labels: number[]; probabilities: number[]; outlierProxy?: number[]; }
+/**
+ * Cross-runtime HDBSCAN result contract.  `probabilities` is the confidence
+ * of the assigned leaf (`0` for noise); `outlierProxy` is a bounded
+ * provider-specific outlier score (the WASM provider uses `1 - probability`).
+ * Providers that expose the complete soft membership matrix may also return
+ * `memberships`.  A missing matrix is represented by the assigned-membership
+ * matrix by the parity helpers, so a provider cannot accidentally claim soft
+ * cross-cluster memberships it did not compute.
+ */
+export interface HdbscanOutput { labels: number[]; probabilities: number[]; outlierProxy?: number[]; memberships?: number[][]; }
 
 /** Provider boundary; the packaged WASM kernel supplies true HDBSCAN extraction. */
 export interface HdbscanProvider { fit(rows: number[][], minClusterSize: number, minSamples: number, kernel: NumericKernel): HdbscanOutput; }
 
+/** Stable seam for a separately maintained/native HDBSCAN implementation. */
+export interface ExternalHdbscanProvider {
+  readonly id: string;
+  fit(rows: number[][], minClusterSize: number, minSamples: number): HdbscanOutput;
+}
+
+/** Adapt an external provider without letting it bypass the shared contract. */
+export class ExternalHdbscanProviderAdapter implements HdbscanProvider {
+  constructor(private readonly provider: ExternalHdbscanProvider) {}
+
+  fit(rows: number[][], minClusterSize: number, minSamples: number): HdbscanOutput {
+    const result = this.provider.fit(rows, minClusterSize, minSamples);
+    return validateHdbscanOutput(result, rows.length, `external provider ${this.provider.id}`);
+  }
+}
+
+export function validateHdbscanOutput(output: HdbscanOutput, rowCount: number, source = "HDBSCAN provider"): HdbscanOutput {
+  if (!output || !Array.isArray(output.labels) || output.labels.length !== rowCount) throw new TypeError(`${source} labels must have ${rowCount} rows`);
+  if (!Array.isArray(output.probabilities) || output.probabilities.length !== rowCount) throw new TypeError(`${source} probabilities must have ${rowCount} rows`);
+  const outlierProxy = output.outlierProxy || output.probabilities.map((value) => 1 - value);
+  if (!Array.isArray(outlierProxy) || outlierProxy.length !== rowCount) throw new TypeError(`${source} outlierProxy must have ${rowCount} rows`);
+  const labels = output.labels.map((label, index) => {
+    if (!Number.isSafeInteger(label) || label < -1) throw new TypeError(`${source} label ${index} must be -1 or a non-negative integer`);
+    return label;
+  });
+  const nonNoise = [...new Set(labels.filter((label) => label >= 0))].sort((left, right) => left - right);
+  if (nonNoise.some((label, index) => label !== index)) throw new TypeError(`${source} labels must be contiguous from zero (up to permutation)`);
+  const probabilities = output.probabilities.map((value, index) => {
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new TypeError(`${source} probability ${index} must be between 0 and 1`);
+    return value;
+  });
+  labels.forEach((label, index) => { if (label < 0 && probabilities[index] > 1e-6) throw new TypeError(`${source} noise probability ${index} must be zero`); });
+  const outliers = outlierProxy.map((value, index) => {
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new TypeError(`${source} outlierProxy ${index} must be between 0 and 1`);
+    return value;
+  });
+  if (output.memberships !== undefined) {
+    if (!Array.isArray(output.memberships) || output.memberships.length !== rowCount) throw new TypeError(`${source} memberships must have ${rowCount} rows`);
+    const width = output.memberships[0]?.length || 0;
+    for (const row of output.memberships) {
+      if (!Array.isArray(row) || row.length !== width || row.some((value) => !Number.isFinite(value) || value < 0 || value > 1)) throw new TypeError(`${source} memberships must be rectangular probabilities`);
+      if (row.reduce((sum, value) => sum + value, 0) > 1 + 1e-6) throw new TypeError(`${source} membership rows must sum to at most one`);
+    }
+    if (width !== nonNoise.length) throw new TypeError(`${source} memberships width must equal the number of clusters`);
+  }
+  return { labels, probabilities, outlierProxy: outliers, memberships: output.memberships };
+}
+
 export class DeterministicHdbscanProvider implements HdbscanProvider {
   fit(rows: number[][], minClusterSize: number, minSamples: number, kernel: NumericKernel): HdbscanOutput {
-    return kernel.hdbscan ? kernel.hdbscan(rows, minClusterSize, minSamples) : hdbscanFallback(rows, minClusterSize, minSamples, kernel);
+    const result = kernel.hdbscan ? kernel.hdbscan(rows, minClusterSize, minSamples) : hdbscanFallback(rows, minClusterSize, minSamples, kernel);
+    return validateHdbscanOutput(result, rows.length, "WASM/TypeScript HDBSCAN provider");
   }
 }
 

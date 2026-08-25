@@ -40,9 +40,12 @@ hierarchy while keeping UMAP/HDBSCAN native-extension packages out of Pyodide.
 The numerical boundary is `wasm-core/`. Its Rust/wasm-bindgen kernels own
 normalization, matrix multiplication, PCA/power iteration, tiled cosine
 distances, exact kNN, an HNSW-compatible index, and MST processing for the
-HDBSCAN graph. `HdbscanProvider` is the swap point for a hdbscan-rs
-wasm-bindgen provider when that external crate is vendored and audited. The
-current checked-in MVP uses the deterministic TypeScript
+HDBSCAN graph. `ExternalHdbscanProviderAdapter` is the explicit integration
+point for a separately maintained hdbscan-rs/native provider. Every provider
+must return the shared label/probability/outlier contract and may optionally
+return a complete soft membership matrix. No external crate is vendored yet;
+the checked-in Rust implementation remains the production provider. The
+current development build uses the deterministic TypeScript
 kernel when the generated WASM asset is not present, so development and tests
 remain runnable. This fallback is not a claim of HDBSCAN parity; production
 builds should generate and load the WASM module before enabling large vaults.
@@ -65,7 +68,18 @@ graph work through this module.
 npm install
 npm run build
 npm test
+npm run audit:hdbscan -- --dataset-sample-size 100 --dataset-sample-seed 42 --fast
 ```
+
+The HDBSCAN audit first fits the authoritative Python `hdbscan` result, then
+feeds its exact UMAP coordinates to the WASM extractor. Its report compares
+cluster labels after the best deterministic label permutation, noise agreement,
+probability MAE/RMSE, outlier MAE, and soft-membership error. It is an
+informational feature-level audit, not an end-to-end parity claim: Python's
+full cross-cluster membership matrix is richer than the WASM assigned-membership
+contract, and `umap-learn` versus `umap-js` remains a separate difference. The
+command explicitly rejects `dbpedia_label_embeddings.json` and uses the
+3,000-record Gemini dataset by default.
 
 Run an offline end-to-end check against the checked-in 3,000-record Gemini
 embedding dataset. This exercises the same `clusterEmbeddings` orchestration
