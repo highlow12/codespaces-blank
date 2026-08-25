@@ -1,9 +1,9 @@
 import { App, Modal, Notice, Plugin } from "obsidian";
 import { configureLocalOrtAssets, disposeLocalOrtAssets, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LocalRuntimeDiagnostics, LocalRuntimeProgress, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, LOCAL_ORT_WEBGPU_MJS_ASSET, LOCAL_ORT_WEBGPU_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
-import { ClusterResultStore, ClusterTitleCache, ClusterTitleLogStore, EmbeddingCache, EmbeddingLogStore, NoteStore } from "./storage";
-import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest, TitleRuntimeTest } from "./settings";
+import { ClusterResultStore, ClusterTitleCache, ClusterTitleLogStore, EmbeddingCache, EmbeddingLogStore, NoteStore, TitleRuntimeDiagnosticLogStore } from "./storage";
+import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest, TitleRuntimeTest, TitleRuntimeTestResult } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
-import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, NoteRecord, PluginSettings } from "./types";
+import { ClusteringConfig, ClusterResult, EmbeddingLogEntry, EmbeddingRunLog, NoteRecord, PluginSettings, TitleRuntimeDiagnosticCase } from "./types";
 import { BrowserClusteringWorker, InProcessClusteringWorker, NodeClusteringWorker } from "./worker-client";
 import { PyodideClusteringWorker } from "./pyodide-worker-client";
 import workerSource from "./worker-source";
@@ -12,7 +12,7 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { shell } from "electron";
 import { AtomicClustersProgress } from "./progress";
 import { prepareLocalOrtRendererModule, resolveLocalOrtAssetPrefix } from "./ort-assets";
-import { LocalClusterTitleGenerator, TitleModelManager, TitleModelProgress, TITLE_MODEL_PROMPT_VERSION, TITLE_MODEL_REVISION, VaultTitleModelStorage } from "./title";
+import { LocalClusterTitleGenerator, TitleModelManager, TitleModelProgress, TITLE_MODEL_PROMPT_VERSION, TITLE_MODEL_REVISION, VaultTitleModelStorage, validateTitle } from "./title";
 import { BrowserTitleRuntime } from "./title-worker-client";
 import titleWorkerSource from "./title-worker-source";
 
@@ -269,14 +269,77 @@ export default class AtomicClustersPlugin extends Plugin {
     }
   }
 
-  private async testTitleRuntime(onProgress: (progress: TitleModelProgress) => void): Promise<void> {
-    onProgress({ phase: "consent", progress: 0, detail: "Checking installed title model" });
-    if (await this.titleModelManager.status() !== "installed") throw new Error("Title model is not installed; download it before testing the runtime.");
-    onProgress({ phase: "verify", progress: 0.4, detail: "Checking model integrity" });
-    if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
-    const runtime = new BrowserTitleRuntime(titleWorkerSource, await this.titleModelManager.load(), this.localOrtWebgpuWasmBinary.slice(0));
-    await runtime.initialize(); await runtime.generate(["Generate a title for this note."], { maxNewTokens: 12, doSample: false, temperature: 0 }); await runtime.terminate();
-    onProgress({ phase: "complete", progress: 1, detail: "WebGPU title runtime ready" });
+  private async testTitleRuntime(onProgress: (progress: TitleModelProgress) => void): Promise<TitleRuntimeTestResult> {
+    const diagnosticStore = new TitleRuntimeDiagnosticLogStore(this.app.vault);
+    const diagnosticPath = diagnosticStore.path;
+    const startedAt = new Date().toISOString();
+    const checks: Array<{ label: string; prompt: string; expectation: TitleRuntimeDiagnosticCase["expectation"] }> = [
+      {
+        label: "korean-factual-qa",
+        prompt: "대한민국의 수도는? 한 단어로만 답하세요.",
+        expectation: { type: "contains", signal: "서울" }
+      },
+      {
+        label: "clean-cluster-title",
+        prompt: "Create one title in English. Use 2-6 words and output the title only. Shared topics: React hooks, state management, and effect dependencies.",
+        expectation: { type: "valid-title" }
+      }
+    ];
+    const cases: TitleRuntimeDiagnosticCase[] = [];
+    let runtime: BrowserTitleRuntime | null = null;
+    let backend: "webgpu" | "unavailable" = "unavailable";
+    let persisted = false;
+    const failedCases = (message: string): TitleRuntimeDiagnosticCase[] => checks.map((check) => ({ label: check.label, output: "", durationMs: 0, passed: false, expectation: check.expectation, error: message }));
+    const persist = async (error?: string): Promise<TitleRuntimeTestResult> => {
+      const passed = cases.filter((item) => item.passed).length;
+      await diagnosticStore.save({ version: 1, timestamp: startedAt, completedAt: new Date().toISOString(), modelRevision: TITLE_MODEL_REVISION, promptVersion: TITLE_MODEL_PROMPT_VERSION, backend, passed, total: checks.length, cases, ...(error ? { error } : {}) });
+      persisted = true;
+      return { passed, total: checks.length, backend, logPath: diagnosticPath, summary: `Runtime diagnostic ${passed}/${checks.length} passed (${backend})` };
+    };
+    try {
+      onProgress({ phase: "consent", progress: 0, detail: "Checking installed title model" });
+      if (await this.titleModelManager.status() !== "installed") throw new Error("Title model is not installed; download it before testing the runtime.");
+      onProgress({ phase: "verify", progress: 0.2, detail: "Checking model integrity" });
+      if (!this.localOrtWebgpuWasmBinary) throw new Error("Bundled ONNX WebGPU WASM asset is unavailable.");
+      const artifact = await this.titleModelManager.load();
+      runtime = new BrowserTitleRuntime(titleWorkerSource, artifact, this.localOrtWebgpuWasmBinary.slice(0));
+      let initializationError: string | undefined;
+      try {
+        onProgress({ phase: "verify", progress: 0.35, detail: "Initializing WebGPU title runtime" });
+        await runtime.initialize();
+        backend = runtime.diagnostics.backend;
+      } catch (error) {
+        initializationError = safeRunError(error);
+        cases.push(...failedCases(initializationError));
+      }
+      if (backend === "webgpu") {
+        for (const [index, check] of checks.entries()) {
+          const started = performance.now();
+          let output = "";
+          let passed = false;
+          let error: string | undefined;
+          onProgress({ phase: "verify", progress: 0.4 + index * 0.25, detail: `Running ${check.label}` });
+          try {
+            const values = await runtime.generate([check.prompt], { maxNewTokens: 12, doSample: false, temperature: 0, mode: "diagnostic" });
+            output = String(values[0] || "").slice(0, 500);
+            passed = check.expectation.type === "contains" ? output.includes(check.expectation.signal || "") : validateTitle(output, check.prompt).valid;
+          } catch (runError) {
+            error = safeRunError(runError);
+          }
+          cases.push({ label: check.label, output, durationMs: Math.max(0, Math.round(performance.now() - started)), passed, expectation: check.expectation, ...(error ? { error } : {}) });
+        }
+      }
+      const result = await persist(initializationError);
+      onProgress({ phase: "complete", progress: 1, detail: `${result.summary} · ${diagnosticPath}` });
+      return result;
+    } catch (error) {
+      const message = safeRunError(error);
+      if (!cases.length) cases.push(...failedCases(message));
+      if (!persisted) await persist(message).catch(() => undefined);
+      throw error;
+    } finally {
+      await runtime?.terminate().catch(() => undefined);
+    }
   }
 
   private confirmTitleDownload(): Promise<boolean> {

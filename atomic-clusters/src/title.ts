@@ -120,7 +120,8 @@ export class TitleModelManager {
 }
 
 export interface TitlePrompt { nodeId: number; members: number[]; memberFingerprint: string; text: string; }
-export interface TitleGenerationRuntime { generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; repetitionPenalty?: number; noRepeatNgramSize?: number; signal?: AbortSignal }): Promise<string[]>; diagnostics?: { backend: "webgpu" | "unavailable" }; }
+export type TitleGenerationMode = "title" | "diagnostic";
+export interface TitleGenerationRuntime { generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; repetitionPenalty?: number; noRepeatNgramSize?: number; mode?: TitleGenerationMode; signal?: AbortSignal }): Promise<string[]>; diagnostics?: { backend: "webgpu" | "unavailable" }; }
 
 /** A runtime seam keeps model orchestration testable and makes GPU failure non-fatal. */
 export type TitleRuntimeFactory = (artifact: TitleModelArtifact) => Promise<TitleGenerationRuntime>;

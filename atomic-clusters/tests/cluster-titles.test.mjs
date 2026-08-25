@@ -49,7 +49,8 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.match(worker, /blocked non-local asset request/);
   assert.match(worker, /input instanceof Request \? input\.url/);
   assert.match(worker, /for \(const prompt of request\.prompts\)/);
-  assert.match(worker, /renderQwenChatML\(prompt\)/);
+  assert.match(worker, /renderQwenChatML\(prompt, request\.mode\)/);
+  assert.match(worker, /DIAGNOSTIC_SYSTEM_PROMPT/);
   assert.doesNotMatch(worker, /generator\(\[\{\s*role:/);
   assert.doesNotMatch(worker, /apply_chat_template/);
   assert.match(worker, /generationQueue/);
@@ -83,6 +84,24 @@ test("main passes the shared embedding ORT WebGPU WASM asset to titles", async (
   assert.match(main, /localOrtWebgpuWasmBinary/);
   assert.match(main, /this\.localOrtWebgpuWasmBinary\s*=\s*webgpuBinary/);
   assert.doesNotMatch(main, /TITLE_ORT_WEBGPU_WASM_ASSET|titleWasmPath|title\.jsep\.wasm/);
+});
+
+test("title runtime test uses fixed vault-content-free diagnostics and persists its result", async () => {
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const settings = await readFile(new URL("../src/settings.ts", import.meta.url), "utf8");
+  const storage = await readFile(new URL("../src/storage.ts", import.meta.url), "utf8");
+  assert.match(main, /korean-factual-qa/);
+  assert.match(main, /대한민국의 수도는\?/);
+  assert.match(main, /signal: "서울"/);
+  assert.match(main, /clean-cluster-title/);
+  assert.match(main, /TitleRuntimeDiagnosticLogStore/);
+  assert.match(main, /await runtime\?\.terminate\(\)\.catch/);
+  assert.match(main, /mode: "diagnostic"/);
+  assert.match(main, /if \(!persisted\) await persist\(message\)/);
+  assert.match(main, /maxNewTokens: 12, doSample: false, temperature: 0/);
+  assert.match(storage, /cluster-title-runtime-test\.json/);
+  assert.match(main, /Runtime diagnostic \$\{passed\}\/\$\{checks\.length\} passed/);
+  assert.match(settings, /log: \$\{result\.logPath\}/);
 });
 
 test("built title worker hides Electron process before Transformers.js evaluates", async () => {
@@ -152,6 +171,9 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
   assert.equal(typeof context.__titleGenerationInput, "string");
   assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n");
+  await context.onmessage({ data: { type: "GENERATE", id: 2, prompts: ["대한민국의 수도는?"], mode: "diagnostic", maxNewTokens: 12 } });
+  assert.equal(posted.at(-1).type, "RESULT");
+  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nAnswer the user's request directly and concisely.<|im_end|>\n<|im_start|>user\n대한민국의 수도는?\n/no_think<|im_end|>\n<|im_start|>assistant\n");
   assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 
@@ -253,8 +275,10 @@ test("title worker generation timeout terminates the worker and rejects the requ
     onmessage = null;
     onerror = null;
     terminated = false;
+    messages = [];
     constructor() { workers.push(this); }
     postMessage(message) {
+      this.messages.push(message);
       if (message.type === "INIT") queueMicrotask(() => this.onmessage?.({ data: { type: "READY", backend: "webgpu" } }));
     }
     terminate() { this.terminated = true; }
@@ -266,8 +290,9 @@ test("title worker generation timeout terminates the worker and rejects the requ
     const { BrowserTitleRuntime } = await import(moduleUrl);
     const buffer = () => new ArrayBuffer(1);
     const runtime = new BrowserTitleRuntime("worker", { model: buffer(), tokenizer: buffer(), config: buffer(), generationConfig: buffer(), tokenizerConfig: buffer() }, buffer(), { generationTimeoutMs: 10 });
-    await assert.rejects(() => runtime.generate(["prompt"], { maxNewTokens: 12, doSample: false, temperature: 0 }), /timed out after 10ms/);
+    await assert.rejects(() => runtime.generate(["prompt"], { maxNewTokens: 12, doSample: false, temperature: 0, mode: "diagnostic" }), /timed out after 10ms/);
     assert.equal(workers.length, 1);
+    assert.equal(workers[0].messages.at(-1).mode, "diagnostic");
     assert.equal(workers[0].terminated, true);
     await assert.rejects(() => runtime.generate(["prompt"], { maxNewTokens: 12, doSample: false, temperature: 0 }), /no longer available/);
   } finally {

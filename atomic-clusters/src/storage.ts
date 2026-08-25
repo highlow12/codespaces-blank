@@ -1,5 +1,5 @@
 import { normalizePath, Plugin, Vault } from "obsidian";
-import { CachedEmbedding, ClusterResult, ClusterTitleCacheEntry, EmbeddingRunLog, NoteRecord } from "./types";
+import { CachedEmbedding, ClusterResult, ClusterTitleCacheEntry, EmbeddingRunLog, NoteRecord, TitleRuntimeDiagnosticLog } from "./types";
 
 interface CacheDocument { version: 1; embeddings: CachedEmbedding[]; }
 
@@ -71,6 +71,17 @@ export class ClusterTitleLogStore {
   constructor(private readonly vault: Vault) {}
   async save(log: ClusterTitleLog): Promise<void> { const parent = ".obsidian/plugins/atomic-clusters"; if (!(await this.vault.adapter.exists(parent))) await this.vault.adapter.mkdir(parent); await this.vault.adapter.write(this.path, JSON.stringify(log)); }
   async load(): Promise<ClusterTitleLog | null> { try { return JSON.parse(await this.vault.adapter.read(this.path)) as ClusterTitleLog; } catch { return null; } }
+}
+
+export class TitleRuntimeDiagnosticLogStore {
+  readonly path = normalizePath(".obsidian/plugins/atomic-clusters/cluster-title-runtime-test.json");
+  constructor(private readonly vault: Vault) {}
+  async save(log: TitleRuntimeDiagnosticLog): Promise<void> {
+    const parent = ".obsidian/plugins/atomic-clusters";
+    if (!(await this.vault.adapter.exists(parent))) await this.vault.adapter.mkdir(parent);
+    await this.vault.adapter.write(this.path, JSON.stringify(log));
+  }
+  async load(): Promise<TitleRuntimeDiagnosticLog | null> { try { return JSON.parse(await this.vault.adapter.read(this.path)) as TitleRuntimeDiagnosticLog; } catch { return null; } }
 }
 
 export class EmbeddingLogStore {

@@ -12,7 +12,14 @@ export interface ClusterRunControls {
 }
 
 export type LocalRuntimeTest = (onProgress: (progress: LocalRuntimeProgress) => void) => Promise<void>;
-export type TitleRuntimeTest = (onProgress: (progress: TitleModelProgress) => void) => Promise<void>;
+export interface TitleRuntimeTestResult {
+  passed: number;
+  total: number;
+  backend: "webgpu" | "unavailable";
+  logPath: string;
+  summary: string;
+}
+export type TitleRuntimeTest = (onProgress: (progress: TitleModelProgress) => void) => Promise<TitleRuntimeTestResult>;
 
 export class AtomicClustersSettingTab extends PluginSettingTab {
   constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly titleModels: TitleModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest, private readonly testTitleRuntime: TitleRuntimeTest, private readonly confirmTitleDownload: () => Promise<boolean>) { super(app, plugin); }
@@ -68,7 +75,7 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     let remove: { setDisabled(disabled: boolean): unknown };
     setting.addButton((button) => { remove = button; return button.setButtonText("Delete").onClick(async () => { setBusy(true); try { await this.titleModels.deleteModel(); statusEl.setText("Deleted"); progress.value = 0; } catch (error) { statusEl.setText(`Delete failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(remove!);
     let test: { setDisabled(disabled: boolean): unknown };
-    setting.addButton((button) => { test = button; return button.setButtonText("Test runtime").onClick(async () => { setBusy(true); try { await this.testTitleRuntime(update); statusEl.setText("Title runtime ready (WebGPU)"); progress.value = 1; } catch (error) { statusEl.setText(`Runtime test failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(test!);
+    setting.addButton((button) => { test = button; return button.setButtonText("Test runtime").onClick(async () => { setBusy(true); try { const result = await this.testTitleRuntime(update); statusEl.setText(`${result.summary} · log: ${result.logPath}`); progress.value = 1; } catch (error) { statusEl.setText(`Runtime test failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(test!);
     new Setting(containerEl).setName("Title language").setDesc("Auto follows the dominant language in representative notes.").addText((text) => text.setValue(this.settings.clusterTitleLanguage || "auto").setPlaceholder("auto").onChange(async (value) => { this.settings.clusterTitleLanguage = value.trim() || "auto"; await this.save(); }));
     void refresh();
   }

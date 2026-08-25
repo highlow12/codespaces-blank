@@ -163,6 +163,29 @@ export interface ClusterResult {
   titleGeneration?: ClusterTitleGeneration;
 }
 
+/** Fixed, vault-content-free checks for separating model/runtime failures from prompt quality. */
+export interface TitleRuntimeDiagnosticCase {
+  label: string;
+  output: string;
+  durationMs: number;
+  passed: boolean;
+  expectation: { type: "contains" | "valid-title"; signal?: string };
+  error?: string;
+}
+
+export interface TitleRuntimeDiagnosticLog {
+  version: 1;
+  timestamp: string;
+  completedAt: string;
+  modelRevision: string;
+  promptVersion: string;
+  backend: "webgpu" | "unavailable";
+  passed: number;
+  total: number;
+  cases: TitleRuntimeDiagnosticCase[];
+  error?: string;
+}
+
 export type WorkerRequest =
   | { type: "INIT"; version: 1; pyodideUrl?: string; indexURL?: string }
   | { type: "CLUSTER"; jobId: string; ids: string[]; embeddings: number[][]; config: ClusteringConfig }

@@ -1,4 +1,4 @@
-import { TitleGenerationRuntime, TitleModelArtifact } from "./title";
+import { TitleGenerationMode, TitleGenerationRuntime, TitleModelArtifact } from "./title";
 
 interface TitleWorkerResponse { type: "READY" | "RESULT" | "ERROR"; backend?: "webgpu"; id?: number; values?: string[]; message?: string; }
 
@@ -73,7 +73,7 @@ export class BrowserTitleRuntime implements TitleGenerationRuntime {
     this.ready = ready;
     return ready;
   }
-  async generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; signal?: AbortSignal }): Promise<string[]> {
+  async generate(prompts: string[], options: { maxNewTokens: number; doSample: boolean; temperature: number; mode?: TitleGenerationMode; signal?: AbortSignal }): Promise<string[]> {
     await this.initialize();
     if (options.signal?.aborted) throw new Error("Clustering cancelled");
     const worker = this.worker;
@@ -96,7 +96,7 @@ export class BrowserTitleRuntime implements TitleGenerationRuntime {
       }, this.generationTimeoutMs);
       options.signal?.addEventListener("abort", abort, { once: true });
       try {
-        worker.postMessage({ type: "GENERATE", id, prompts, maxNewTokens: options.maxNewTokens, signal: options.signal?.aborted });
+        worker.postMessage({ type: "GENERATE", id, prompts, maxNewTokens: options.maxNewTokens, mode: options.mode || "title", signal: options.signal?.aborted });
       } catch (error) {
         this.pending.delete(id);
         cleanup();
