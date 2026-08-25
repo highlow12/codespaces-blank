@@ -2,7 +2,7 @@ import { isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 
 /** The shipped ORT asset is locked to the dependency version in package-lock.json. */
-export const LOCAL_ORT_RENDERER_ASSET_VERSION = "1.20.1";
+export const LOCAL_ORT_RENDERER_ASSET_VERSION = "1.22.0-dev.20250409-89f8206ba4";
 
 function countOccurrences(source: string, marker: string): number {
   return source.split(marker).length - 1;
@@ -19,9 +19,11 @@ function countOccurrences(source: string, marker: string): number {
 export function prepareLocalOrtRendererModule(source: string, wasmAsset = "ort-wasm-simd-threaded.wasm"): string {
   const legacyNodeMarker = 'B="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node';
   const jsepNodeMarker = 'D="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node';
+  const modernMinifiedNodeMarker = 'n="object"==typeof process&&"object"==typeof process.versions&&"string"==typeof process.versions.node&&"renderer"!=process.type';
   const modernNodeMarker = "var isNode = typeof globalThis.process?.versions?.node == 'string';";
   const nodeBranchMarker = "if(B){";
   const jsepBranchMarker = "if(D){";
+  const modernMinifiedBranchMarker = "if(n){";
   const modernBranchMarker = "if (isNode) isPthread = (await import('worker_threads')).workerData === 'em-pthread';";
   const relativeWasmUrlMarker = `(new URL("${wasmAsset}",import.meta.url)).href`;
   const nodeBaseUrlMarker = 'new URL("./",import.meta.url)';
@@ -30,7 +32,9 @@ export function prepareLocalOrtRendererModule(source: string, wasmAsset = "ort-w
   const branchCount = countOccurrences(source, nodeBranchMarker);
   const jsepCount = countOccurrences(source, jsepNodeMarker);
   const jsepBranchCount = countOccurrences(source, jsepBranchMarker);
-  const hasKnownLegacyFormat = (legacyCount === 1 && branchCount === 3 && jsepCount === 0 && jsepBranchCount === 0) || (legacyCount === 0 && branchCount === 0 && jsepCount === 1 && jsepBranchCount === 3) || (legacyCount === 0 && branchCount === 0 && jsepCount === 0 && jsepBranchCount === 0);
+  const modernMinifiedCount = countOccurrences(source, modernMinifiedNodeMarker);
+  const modernMinifiedBranchCount = countOccurrences(source, modernMinifiedBranchMarker);
+  const hasKnownLegacyFormat = (legacyCount === 1 && branchCount === 3 && jsepCount === 0 && jsepBranchCount === 0 && modernMinifiedCount === 0 && modernMinifiedBranchCount === 0) || (legacyCount === 0 && branchCount === 0 && jsepCount === 1 && jsepBranchCount === 3 && modernMinifiedCount === 0 && modernMinifiedBranchCount === 0) || (legacyCount === 0 && branchCount === 0 && jsepCount === 0 && jsepBranchCount === 0 && modernMinifiedCount === 1 && modernMinifiedBranchCount === 3) || (legacyCount === 0 && branchCount === 0 && jsepCount === 0 && jsepBranchCount === 0 && modernMinifiedCount === 0 && modernMinifiedBranchCount === 0);
   const nodeBaseUrlCount = countOccurrences(source, nodeBaseUrlMarker);
   const workerModuleUrlCount = countOccurrences(source, workerModuleUrlMarker);
   if (!hasKnownLegacyFormat || countOccurrences(source, modernNodeMarker) !== 1 || countOccurrences(source, modernBranchMarker) !== 1 || countOccurrences(source, relativeWasmUrlMarker) !== 1 || nodeBaseUrlCount > 1 || workerModuleUrlCount > 1) {
@@ -41,12 +45,14 @@ export function prepareLocalOrtRendererModule(source: string, wasmAsset = "ort-w
     .split(nodeBranchMarker).join(legacyCount ? "if(false){" : nodeBranchMarker)
     .replace(jsepNodeMarker, jsepCount ? "D=false" : jsepNodeMarker)
     .split(jsepBranchMarker).join(jsepCount ? "if(false){" : jsepBranchMarker)
+    .replace(modernMinifiedNodeMarker, modernMinifiedCount ? "n=false" : modernMinifiedNodeMarker)
+    .split(modernMinifiedBranchMarker).join(modernMinifiedCount ? "if(false){" : modernMinifiedBranchMarker)
     .replace(modernNodeMarker, "var isNode = false;")
     .replace(modernBranchMarker, "if (false) isPthread = (await import('worker_threads')).workerData === 'em-pthread';")
     .replace(relativeWasmUrlMarker, '"data:application/wasm;base64,"')
     .replace(nodeBaseUrlMarker, 'new URL("data:text/javascript,")')
     .replace(workerModuleUrlMarker, 'new URL("data:text/javascript,")');
-  if (transformed.includes(nodeBranchMarker) || transformed.includes(jsepBranchMarker) || transformed.includes(modernNodeMarker) || transformed.includes(modernBranchMarker) || transformed.includes(relativeWasmUrlMarker) || transformed.includes(nodeBaseUrlMarker) || transformed.includes(workerModuleUrlMarker)) {
+  if (transformed.includes(nodeBranchMarker) || transformed.includes(jsepBranchMarker) || transformed.includes(modernMinifiedBranchMarker) || transformed.includes(modernNodeMarker) || transformed.includes(modernBranchMarker) || transformed.includes(relativeWasmUrlMarker) || transformed.includes(nodeBaseUrlMarker) || transformed.includes(workerModuleUrlMarker)) {
     throw new Error("ORT renderer asset Node-branch transformation did not apply completely.");
   }
   return transformed;

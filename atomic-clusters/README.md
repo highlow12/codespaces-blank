@@ -128,7 +128,7 @@ probability/outlier summaries, hierarchy counts, progress events, and row
 assignments. The runner accepts either the plain `.json` or gzip `.json.gz`
 Gemini dataset and deliberately refuses `dbpedia_label_embeddings.json`.
 
-Copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css`, and the two
+Copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css`, and the bundled
 `dist/ort-wasm-simd-threaded.*` assets to `.obsidian/plugins/atomic-clusters/`
 for a local install. The worker source and Python core are embedded in
 `main.js`; the ORT assets stay adjacent so the bundled local provider can load
