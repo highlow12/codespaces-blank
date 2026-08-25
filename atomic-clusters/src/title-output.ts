@@ -15,11 +15,14 @@ export function extractAssistantContent(output: unknown): string {
   if (Array.isArray(generated)) {
     const messages = generated as Array<{ role?: string; content?: unknown; text?: unknown }>;
     const assistant = [...messages].reverse().find((message) => message && message.role === "assistant") || [...messages].reverse().find((message) => message && typeof message.content === "string");
-    return assistant ? stripThinkingContent(assistant.content ?? assistant.text ?? "") : "";
+    // Preserve control/tag output for the title validator. Stripping a think
+    // block here would turn polluted model output into a false success and
+    // could cache the text that followed it as if it were intentional.
+    return assistant ? String(assistant.content ?? assistant.text ?? "") : "";
   }
   if (generated && typeof generated === "object") {
     const message = generated as { content?: unknown; text?: unknown; generated_text?: unknown };
-    return stripThinkingContent(message.content ?? message.text ?? message.generated_text ?? "");
+    return String(message.content ?? message.text ?? message.generated_text ?? "");
   }
-  return stripThinkingContent(typeof generated === "string" ? generated : String(generated ?? ""));
+  return typeof generated === "string" ? generated : String(generated ?? "");
 }

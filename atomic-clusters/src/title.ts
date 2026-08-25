@@ -6,7 +6,7 @@ export const TITLE_MODEL_ID = "qwen3-0.6b-q4f16";
 export const TITLE_MODEL_REVISION = "558750086ed49d78cb701ed6fa85af33fd16453f";
 export const TITLE_MODEL_MODEL_SHA256 = "9e33a5911974174761d0dfdcc0bec975d9c45af0eae5e9eb647b8ba9442a8f91";
 export const TITLE_MODEL_SIZE_BYTES = 569_789_750;
-export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v4-qwen3-no-think-clean-validated";
+export const TITLE_MODEL_PROMPT_VERSION = "cluster-title-v5-qwen3-assistant-prefix-validated-retry";
 export const TITLE_MODEL_DESCRIPTOR = {
   id: TITLE_MODEL_ID,
   revision: TITLE_MODEL_REVISION,
@@ -163,7 +163,16 @@ export function sanitizeTitle(raw: string): string {
 
 export interface TitleValidation { valid: boolean; reason?: string; }
 export function validateTitle(raw: string, prompt = ""): TitleValidation {
-  const title = sanitizeTitle(raw);
+  const rawText = String(raw || "").trim();
+  // Never sanitize control syntax away before validation. In particular,
+  // Qwen3 can emit reasoning, ChatML, or HTML-like tags; accepting the text
+  // after those tags would cache a polluted generation as a valid title.
+  // The small Qwen3 model has also emitted slash-prefixed control words
+  // (`/thought /Thought /Schooling ...`, `/thinking ...`). Match only the
+  // known control-word family, so ordinary titles such as "Thought Process"
+  // remain valid.
+  if (/<\|[^>\r\n]{1,80}\|>|<\/?[^>\r\n]{1,80}>|(?:^|\s)\/(?:no[_-]?think|think(?:ing|er|s)?|thought(?:s|ful)?|thin(?:k|king)?|assistant|user|system)(?=$|[\s/:])/i.test(rawText)) return { valid: false, reason: "control, HTML, or ChatML tag residue" };
+  const title = sanitizeTitle(rawText);
   if (!title) return { valid: false, reason: "empty output" };
   if (/\[[ xX]\]|```|\[\[[^\]]+\]\]|https?:\/\/|www\./i.test(title)) return { valid: false, reason: "markdown, checkbox, or URL residue" };
   if (/^(?:[-*+•]|\d+[.)])\s/.test(title) || /^(?:\d+\s*)+$/.test(title) || (!/[A-Za-z\u00c0-\uFFFF]/u.test(title) && /^[\d\W_]+$/.test(title))) return { valid: false, reason: "list or numeric garbage" };
@@ -221,6 +230,20 @@ export function buildTitlePrompts(result: ClusterResult, notes: NoteRecord[], la
   return prompts;
 }
 
+/**
+ * Make one deliberately small corrective prompt after polluted output. Keep
+ * the representative evidence, but remove the long multi-part instruction
+ * and child-title boilerplate that can encourage the tiny model to continue
+ * a formatted response. The worker still wraps this in the same safe Qwen
+ * ChatML envelope and appends /no_think.
+ */
+export function buildRetryTitlePrompt(prompt: TitlePrompt): string {
+  const language = prompt.text.match(/^Create one title in ([^.]+)\./i)?.[1] || "the requested input language";
+  const marker = "Representative context (use only for disambiguation):";
+  const context = prompt.text.split(marker, 2)[1]?.trim() || "the shared themes in the cluster";
+  return `Title only. 2-6 words in ${language}. No tags.\n${context}`.slice(0, 1800);
+}
+
 export interface TitleCacheLike { get(key: string): ClusterTitleCacheEntry | undefined; set(entry: ClusterTitleCacheEntry): void; }
 export interface GenerateTitlesOptions {
   language?: string;
@@ -269,7 +292,7 @@ export class LocalClusterTitleGenerator {
         // serialized WebGPU runtime, so this does not reintroduce GPU hangs.
         if (invalid.length) {
           try {
-            const retryValues = await runtime.generate(invalid.map((prompt) => `${prompt.text}\nYour previous response was invalid. Try again: output only a fresh 2-6 word title; do not copy a sentence, use a list, numbers, markdown, or an explanation.`), { maxNewTokens: 12, doSample: false, temperature: 0, repetitionPenalty: 1.2, noRepeatNgramSize: 3, signal: options.signal });
+            const retryValues = await runtime.generate(invalid.map(buildRetryTitlePrompt), { maxNewTokens: 12, doSample: false, temperature: 0, repetitionPenalty: 1.2, noRepeatNgramSize: 3, signal: options.signal });
             const retryByNode = new Map(invalid.map((prompt, index) => [prompt.nodeId, retryValues[index] || ""]));
             values = values.map((value, index) => retryByNode.has(uncached[index].nodeId) ? retryByNode.get(uncached[index].nodeId)! : value);
           } catch (retryError) {

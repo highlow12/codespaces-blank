@@ -55,6 +55,7 @@ test("title worker uses the bundled Transformers.js pipeline with local-only Web
   assert.match(worker, /generationQueue/);
   assert.doesNotMatch(worker, /Promise\.all\(request\.prompts/);
   assert.doesNotMatch(worker, /<think><\/think>/);
+  assert.doesNotMatch(worker, /<think>/);
   // Transformers.js fills env.backends.onnx only when its backend module is
   // first loaded; checking it before pipeline() regresses to a false failure.
   assert.doesNotMatch(worker, /const onnxWasm = env\.backends\?\.onnx\?\.wasm/);
@@ -150,16 +151,22 @@ test("built title worker hides Electron process before Transformers.js evaluates
   assert.equal(posted.at(-1).id, 1);
   assert.deepEqual(Array.from(posted.at(-1).values), ["WebGPU title"]);
   assert.equal(typeof context.__titleGenerationInput, "string");
-  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n");
+  assert.equal(context.__titleGenerationInput, "<|im_start|>system\nYou name knowledge clusters. Return only one useful, specific title. Never return an explanation, list, checkbox, markdown, URL, path, quotation, or label. Use 2-6 words and the requested input language.<|im_end|>\n<|im_start|>user\nName  this  cluster\n/no_think<|im_end|>\n<|im_start|>assistant\n");
   assert.equal(vm.runInContext("typeof process", context), "undefined");
 });
 
 test("title prompt selection uses probability-ranked notes and bounded cleaned snippets", async () => {
-  const { buildTitlePrompts, sanitizeTitle } = await loadTitle();
+  const { buildTitlePrompts, sanitizeTitle, validateTitle } = await loadTitle();
   const result = { schemaVersion: 2, ids: ["low.md", "high.md"], leafLabels: [0, 0], probabilities: [0.1, 0.9], outlierProxy: [0.9, 0.1], hierarchy: { leaves: [0], merges: [], root: 0 }, pca: {}, timings: {} };
   const notes = [{ path: "low.md", title: "Low", content: "*low*", hash: "a" }, { path: "high.md", title: "High", content: "# high", hash: "b" }];
   const prompt = buildTitlePrompts(result, notes)[0]; assert.match(prompt.text, /High/); assert.ok(prompt.text.indexOf("High") < prompt.text.indexOf("Low"));
   assert.equal(sanitizeTitle('"Title:  Hello\nworld"'), "Hello world"); assert.ok(prompt.text.length < 5000);
+  assert.equal(validateTitle("<think>reasoning</think>Useful title", prompt.text).valid, false);
+  assert.equal(validateTitle("<html>Useful title</html>", prompt.text).valid, false);
+  assert.equal(validateTitle("<|im_end|>Useful title", prompt.text).valid, false);
+  assert.equal(validateTitle("/thought /Thought /Schooling /Creation of a", prompt.text).valid, false);
+  assert.equal(validateTitle("/thinking Thought Process: generated", prompt.text).valid, false);
+  assert.equal(validateTitle("Thought Process", prompt.text).valid, true);
 });
 
 test("title input cleanup removes Obsidian and markdown noise, including Korean notes", async () => {
@@ -186,9 +193,12 @@ test("invalid title output is retried once and only the validated Korean title i
   const calls = [];
   const cache = { get: () => undefined, set: (entry) => calls.push(entry) };
   let invocation = 0;
-  const runtime = async () => ({ generate: async (prompts) => { invocation++; assert.equal(prompts.length, 1); return invocation === 1 ? ["[ ] 1 2 3"] : ["한국어 문법 학습"]; }, diagnostics: { backend: "webgpu" } });
+  const runtimePrompts = [];
+  const runtime = async () => ({ generate: async (prompts) => { invocation++; assert.equal(prompts.length, 1); runtimePrompts.push(prompts[0]); return invocation === 1 ? ["<think>계획</think>한국어 문법 학습"] : ["한국어 문법 학습"]; }, diagnostics: { backend: "webgpu" } });
   const titled = await new LocalClusterTitleGenerator(manager, runtime).generate(result, notes, { language: "auto", cache });
   assert.equal(invocation, 2);
+  assert.ok(runtimePrompts[1].length < runtimePrompts[0].length);
+  assert.match(runtimePrompts[1], /Title only\. 2-6 words/);
   assert.equal(titled.titles["0"], "한국어 문법 학습");
   assert.equal(calls.length, 1);
 });
@@ -197,6 +207,7 @@ test("chat generation output extracts the final assistant content", async () => 
   const { extractAssistantContent, stripThinkingContent } = await loadTitleOutput();
   assert.equal(extractAssistantContent([{ generated_text: [{ role: "user", content: "요청" }, { role: "assistant", content: "지식 관리" }] }]), "지식 관리");
   assert.equal(extractAssistantContent([{ generated_text: "Plain title" }]), "Plain title");
+  assert.equal(extractAssistantContent([{ generated_text: [{ role: "assistant", content: "<think>reasoning</think>지식 관리" }] }]), "<think>reasoning</think>지식 관리");
   assert.equal(stripThinkingContent("<think>숨은 추론</think>지식 관리"), "지식 관리");
   assert.equal(stripThinkingContent("<think>잘린 추론"), "");
 });
