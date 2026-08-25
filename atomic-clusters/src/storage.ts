@@ -1,5 +1,5 @@
 import { normalizePath, Plugin, Vault } from "obsidian";
-import { CachedEmbedding, ClusterResult, NoteRecord } from "./types";
+import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord } from "./types";
 
 interface CacheDocument { version: 1; embeddings: CachedEmbedding[]; }
 
@@ -49,6 +49,17 @@ export class ClusterResultStore {
   constructor(private readonly vault: Vault) {}
   async load(): Promise<ClusterResult | null> { try { return JSON.parse(await this.vault.adapter.read(this.path)) as ClusterResult; } catch { return null; } }
   async save(result: ClusterResult): Promise<void> { const parent = ".obsidian/plugins/atomic-clusters"; if (!(await this.vault.adapter.exists(parent))) await this.vault.adapter.mkdir(parent); await this.vault.adapter.write(this.path, JSON.stringify(result)); }
+}
+
+export class EmbeddingLogStore {
+  private readonly path = normalizePath(".obsidian/plugins/atomic-clusters/embedding-log.json");
+  constructor(private readonly vault: Vault) {}
+  async save(log: EmbeddingRunLog): Promise<void> {
+    const parent = ".obsidian/plugins/atomic-clusters";
+    if (!(await this.vault.adapter.exists(parent))) await this.vault.adapter.mkdir(parent);
+    await this.vault.adapter.write(this.path, JSON.stringify(log));
+  }
+  async load(): Promise<EmbeddingRunLog | null> { try { return JSON.parse(await this.vault.adapter.read(this.path)) as EmbeddingRunLog; } catch { return null; } }
 }
 
 export function pluginSettingsPath(plugin: Plugin): string {

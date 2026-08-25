@@ -1,0 +1,46 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+
+test("installed plugin exposes persistent progress for model and clustering flows", async () => {
+  const settings = await readFile(new URL("../src/settings.ts", import.meta.url), "utf8");
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  const progress = await readFile(new URL("../src/progress.ts", import.meta.url), "utf8");
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(settings, /<progress|createEl\("progress"/);
+  assert.match(settings, /setBusy\(true\)/);
+  assert.match(settings, /Download failed/);
+  assert.match(main, /new AtomicClustersProgress/);
+  assert.match(main, /cache scan/);
+  assert.match(main, /EmbeddingLogStore/);
+  assert.match(main, /open-embedding-log/);
+  assert.match(main, /shell\.openPath/);
+  assert.match(main, /getBasePath/);
+  assert.match(main, /embedding-log\.json/);
+  assert.match(main, /No embedding log is available yet/);
+  assert.match(main, /Could not open embedding log/);
+  assert.doesNotMatch(main, /class EmbeddingLogModal/);
+  assert.doesNotMatch(main, /atomic-clusters-log-table/);
+  assert.match(settings, /Open embedding log/);
+  assert.match(main, /Clustering cancelled/);
+  assert.match(progress, /new Notice\("", 0\)/);
+  assert.match(progress, /setTimeout\(\(\) => this\.hide/);
+  assert.match(css, /atomic-clusters-progress-notice/);
+});
+
+test("embedding log contract contains diagnostics but no payload fields", async () => {
+  const types = await readFile(new URL("../src/types.ts", import.meta.url), "utf8");
+  const storage = await readFile(new URL("../src/storage.ts", import.meta.url), "utf8");
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(types, /EmbeddingLogEntry/);
+  assert.match(types, /durationMs/);
+  assert.match(types, /error\?: string/);
+  assert.match(storage, /embedding-log\.json/);
+  assert.match(storage, /async load\(\): Promise<EmbeddingRunLog \| null>/);
+  assert.match(types, /status\?: "completed" \| "failed" \| "cancelled"/);
+  assert.match(types, /error\?: string/);
+  assert.doesNotMatch(main, /entry\.content|entry\.vector/);
+  assert.doesNotMatch(main, /EmbeddingLogModal|atomic-clusters-log-table/);
+  assert.doesNotMatch(types, /content:\s*string.*EmbeddingLogEntry/);
+  assert.doesNotMatch(types, /vector:\s*number\[\].*EmbeddingLogEntry/);
+});

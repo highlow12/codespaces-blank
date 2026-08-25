@@ -32,6 +32,34 @@ export interface CachedEmbedding {
   vector: number[];
 }
 
+export type EmbeddingLogStatus = "success" | "failure" | "cached";
+
+/** Persisted diagnostics deliberately exclude note content, vectors, and secrets. */
+export interface EmbeddingLogEntry {
+  path: string;
+  timestamp: string;
+  provider: string;
+  model: string;
+  status: EmbeddingLogStatus;
+  durationMs: number;
+  error?: string;
+}
+
+export interface EmbeddingRunLog {
+  version: 1;
+  startedAt: string;
+  completedAt: string;
+  provider: string;
+  model: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cached: number;
+  entries: EmbeddingLogEntry[];
+  status?: "completed" | "failed" | "cancelled";
+  error?: string;
+}
+
 export interface ClusteringConfig {
   seed?: number;
   /**

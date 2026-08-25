@@ -1,10 +1,10 @@
 import * as Obsidian from "obsidian";
 import { App, Modal, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { LocalModelManager } from "./embedding";
+import { LocalModelManager, LocalModelProgress } from "./embedding";
 import { PluginSettings } from "./types";
 
 export class AtomicClustersSettingTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager) { super(app, plugin); }
+  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>) { super(app, plugin); }
   display(): void {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Atomic Clusters" });
     new Setting(containerEl).setName("Embedding provider").setDesc("Gemini sends note text to Google; Local keeps inference on this device.").addDropdown((dropdown) => dropdown.addOption("gemini", "Gemini API").addOption("local", "Local multilingual-e5-small").setValue(this.settings.embeddingProvider).onChange(async (value) => { this.settings.embeddingProvider = value as PluginSettings["embeddingProvider"]; await this.save(); this.display(); }));
@@ -16,10 +16,22 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = value.split(",").map((item) => item.trim()).filter(Boolean); await this.save(); }));
     if (this.settings.embeddingProvider === "local") {
       const modelSetting = new Setting(containerEl).setName("Local multilingual-e5-small").setDesc("Download once with explicit consent; inference uses the installed files without network access.");
-      modelSetting.addButton((button) => button.setButtonText("Check model").onClick(async () => { button.setDisabled(true); const status = await this.localModels.status(); button.setButtonText(status === "installed" ? "Installed" : status === "corrupt" ? "Corrupt" : "Missing"); button.setDisabled(false); }));
-      modelSetting.addButton((button) => button.setButtonText("Download").onClick(async () => { button.setDisabled(true); try { await this.localModels.downloadModel(() => confirmLocalModelDownload(this.app)); button.setButtonText("Installed"); } catch (error) { button.setButtonText("Download"); if (!(error instanceof Error && error.message.includes("cancelled"))) throw error; } finally { button.setDisabled(false); } }));
-      modelSetting.addButton((button) => button.setButtonText("Delete").onClick(async () => { button.setDisabled(true); await this.localModels.deleteModel(); button.setDisabled(false); }));
+      const statusSetting = new Setting(containerEl).setName("Local model status").setDesc("Installation progress and integrity status.");
+      const progress = statusSetting.controlEl.createEl("progress", { cls: "atomic-clusters-model-progress", attr: { max: "1", value: "0" } });
+      const statusEl = statusSetting.controlEl.createDiv({ cls: "atomic-clusters-model-status", text: "Checking…" });
+      const controls: Array<{ setDisabled(disabled: boolean): unknown }> = [];
+      const setBusy = (busy: boolean) => controls.forEach((control) => control.setDisabled(busy));
+      const updateProgress = (update: LocalModelProgress) => { progress.value = Math.max(0, Math.min(1, update.progress)); const bytes = update.loadedBytes !== undefined && update.totalBytes ? ` · ${formatBytes(update.loadedBytes)}/${formatBytes(update.totalBytes)}` : ""; statusEl.setText(`${update.phase} · ${Math.round(update.progress * 100)}%${update.detail ? ` · ${update.detail}` : ""}${bytes}`); };
+      const refresh = async () => { try { const status = await this.localModels.status(); statusEl.setText(status === "installed" ? "Installed and integrity verified" : status === "corrupt" ? "Corrupt — delete and download again" : "Missing — download to enable offline inference"); progress.value = status === "installed" ? 1 : 0; } catch (error) { statusEl.setText(`Status check failed: ${safeUiError(error)}`); } };
+      let checkButton: { setDisabled(disabled: boolean): unknown };
+      modelSetting.addButton((button) => { checkButton = button; return button.setButtonText("Check model").onClick(async () => { setBusy(true); try { await refresh(); } finally { setBusy(false); } }); }); controls.push(checkButton!);
+      let downloadButton: { setDisabled(disabled: boolean): unknown };
+      modelSetting.addButton((button) => { downloadButton = button; return button.setButtonText("Download").onClick(async () => { setBusy(true); try { await this.localModels.downloadModel(() => confirmLocalModelDownload(this.app), updateProgress); } catch (error) { statusEl.setText(error instanceof Error && error.message.includes("cancelled") ? "Download cancelled" : `Download failed: ${safeUiError(error)}`); } finally { setBusy(false); await refresh(); } }); }); controls.push(downloadButton!);
+      let deleteButton: { setDisabled(disabled: boolean): unknown };
+      modelSetting.addButton((button) => { deleteButton = button; return button.setButtonText("Delete").onClick(async () => { setBusy(true); try { await this.localModels.deleteModel(); statusEl.setText("Deleted"); progress.value = 0; } catch (error) { statusEl.setText(`Delete failed: ${safeUiError(error)}`); } finally { setBusy(false); } }); }); controls.push(deleteButton!);
+      void refresh();
     }
+    new Setting(containerEl).setName("Embedding log").setDesc("Open the latest per-note embedding diagnostics in the operating system's default text editor.").addButton((button) => button.setButtonText("Open embedding log").onClick(() => { void this.openEmbeddingLog().catch(() => undefined); }));
   }
 
   private renderSecretStorageControl(containerEl: HTMLElement): void {
@@ -31,6 +43,9 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Gemini SecretStorage reference").setDesc("Name of the secret stored in Obsidian SecretStorage; never paste the key here.").addText((text) => text.setPlaceholder("gemini-api-key").setValue(this.settings.geminiSecretRef).onChange(async (value) => { this.settings.geminiSecretRef = value.trim() || "gemini-api-key"; await this.save(); }));
   }
 }
+
+function formatBytes(bytes: number): string { if (bytes < 1024) return `${bytes} B`; if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(1)} KB`; if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`; return `${(bytes / 1024 ** 3).toFixed(1)} GB`; }
+function safeUiError(error: unknown): string { return (error instanceof Error ? error.message : String(error)).replace(/((?:^|[?&\s])(?:key|token|secret|authorization)=)[^&\s]+/gi, "$1[redacted]").slice(0, 240); }
 
 class LocalModelConsentModal extends Modal {
   constructor(app: App, private readonly resolveConsent: (value: boolean) => void) { super(app); }

@@ -57,6 +57,20 @@ worker가 생성된 WASM asset을 발견하면 `WasmNumericKernel`을 사용한�
 kernel로 동작한다. 이 fallback은 개발 가능성을 위한 것이며 Python/HDBSCAN
 수치 parity를 보장하지 않는다.
 
+Build 진행 상태는 하나의 persistent Obsidian Notice에서 cache scan → embedding
+→ clustering → completion/error/cancellation으로 이어진다. Local 모델 Settings는
+동의, model/tokenizer 다운로드, SHA-256 검증, 설치 단계를 progress bar로 표시한다.
+각 embedding run은 `.obsidian/plugins/atomic-clusters/embedding-log.json`에
+경로·시각·provider/model·소요 시간·success/failure/cached와 제한된 오류만
+기록한다. 내용·벡터·secret은 기록하지 않는다. Gemini batch 실패는 가능한 경우
+batch를 재귀적으로 나누고, local runtime 실패는 note 단위 fallback을 사용해
+성공한 note를 계속 처리한다.
+설정의 `Open embedding log` 버튼 또는 명령 팔레트의 같은 명령은 이 JSON을
+vault adapter에서 계산한 절대 경로로 OS 기본 텍스트 편집기(Windows vault에서는
+일반적으로 Notepad)에 연다. 파일이 없거나 열기에 실패하면 Notice로 알린다.
+API key, 모델 누락, 동의 취소 같은 provider setup 실패는 note별 실패로 위조하지
+않고 run-level failed/cancelled 상태와 오류로 기록한다.
+
 ## 현재 기본값과 파이프라인 의미
 
 ### plugin settings 기본값 (`src/main.ts`)

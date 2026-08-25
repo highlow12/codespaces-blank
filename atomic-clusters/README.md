@@ -81,6 +81,25 @@ contract, and `umap-learn` versus `umap-js` remains a separate difference. The
 command explicitly rejects `dbpedia_label_embeddings.json` and uses the
 3,000-record Gemini dataset by default.
 
+Build note clusters uses one persistent Obsidian Notice for cache scan,
+embedding, clustering, completion, error, and cancellation progress; it does
+not create one Notice per embedding callback. Local model installation has a
+Settings progress bar with consent, model/tokenizer download, SHA-256 verify,
+and install phases. Embedding runs persist redacted per-note diagnostics at
+`.obsidian/plugins/atomic-clusters/embedding-log.json` (path, timestamp,
+provider/model, duration, success/failure/cached status, and bounded error
+message). Note content, vectors, API keys, and other secrets are never logged.
+Batch provider failures are split when the provider supports safe retries;
+local inference falls back to per-note attempts so healthy notes can still be
+clustered while failed notes remain visible in the log.
+
+Use the **Open embedding log** button in Settings or the command-palette
+command after the Notice disappears. It opens the persisted JSON in the
+operating system's default text editor (for example, Notepad on a Windows
+vault). Provider setup failures such as missing credentials, missing model, or
+cancelled consent are recorded as run-level failures/cancellations; they are
+not incorrectly assigned to every note.
+
 Run an offline end-to-end check against the checked-in 3,000-record Gemini
 embedding dataset. This exercises the same `clusterEmbeddings` orchestration
 as the worker and uses the packaged Rust/WASM kernels when `wasm-core/pkg` is

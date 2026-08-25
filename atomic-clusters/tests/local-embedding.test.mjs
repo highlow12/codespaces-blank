@@ -26,7 +26,10 @@ test("local model installation is explicit, integrity checked, and deletable", a
   const manager = new LocalModelManager(storage);
   assert.equal(await manager.status(), "missing");
   await assert.rejects(() => manager.downloadModel(async () => false), /cancelled/);
-  await manager.downloadModel(async () => true);
+  const progress = [];
+  await manager.downloadModel(async () => true, (update) => progress.push(update));
+  assert.deepEqual(progress.map((update) => update.phase), ["consent", "consent", "model", "model", "tokenizer", "tokenizer", "verify", "install", "complete"]);
+  assert.equal(progress.at(-1).progress, 1);
   assert.equal(await manager.status(), "installed");
   const artifact = await manager.load();
   assert.ok(artifact.model.byteLength > 0);
@@ -43,7 +46,24 @@ test("local provider versions cache keys and validates 384-dimensional vectors",
   const provider = new LocalEmbeddingProvider(settings, async () => [new Array(384).fill(0).map((_, index) => index / 384)]);
   const result = await provider.embed(notes);
   assert.equal(result[0].model, `multilingual-e5-small@${LOCAL_MODEL_VERSION}`);
-  await assert.rejects(() => new LocalEmbeddingProvider(settings, async () => [[1, 2]]).embed(notes), /384-dimensional/);
+  assert.deepEqual(await new LocalEmbeddingProvider(settings, async () => [[1, 2]]).embed(notes), []);
+});
+
+test("local provider logs per-note failures without exposing content or vectors", async () => {
+  const { LocalEmbeddingProvider } = await loadEmbedding();
+  const settings = { localModel: "multilingual-e5-small" };
+  const notes = [
+    { path: "ok.md", title: "OK", content: "private content", hash: "a", mtime: 1 },
+    { path: "bad.md", title: "Bad", content: "secret note", hash: "b", mtime: 2 }
+  ];
+  const entries = [];
+  const provider = new LocalEmbeddingProvider(settings, async (texts) => { if (texts[0].includes("Bad")) throw new Error("provider failed secret=should-not-leak"); return [new Array(384).fill(0.1)]; });
+  const vectors = await provider.embed(notes, undefined, (entry) => entries.push(entry));
+  assert.equal(vectors.length, 1);
+  assert.deepEqual(entries.map((entry) => [entry.path, entry.status]), [["ok.md", "success"], ["bad.md", "failure"]]);
+  assert.match(entries[1].error, /redacted/);
+  assert.doesNotMatch(JSON.stringify(entries), /private content|secret note|should-not-leak/);
+  assert.ok(entries.every((entry) => entry.provider === "local" && entry.model.includes("multilingual-e5-small") && typeof entry.timestamp === "string" && typeof entry.durationMs === "number"));
 });
 
 test("ORT runtime mean-pools masked tokens and emits unit vectors", async () => {
@@ -55,6 +75,16 @@ test("ORT runtime mean-pools masked tokens and emits unit vectors", async () => 
   assert.equal(vector.length, 2);
   assert.ok(Math.abs(Math.hypot(...vector) - 1) < 1e-6);
   assert.ok(vector[0] > 0.99 && Math.abs(vector[1]) < 1e-6);
+});
+
+test("ORT runtime reports every inference batch", async () => {
+  const { OrtEmbeddingRuntime } = await loadEmbedding();
+  const ort = { Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };
+  const progress = [];
+  const runtime = new OrtEmbeddingRuntime(ort, { encode(texts) { return { inputIds: texts.map(() => [1]), attentionMask: texts.map(() => [1]) }; } }, 2);
+  const vectors = await runtime.embed(["a", "b", "c"], { model: new ArrayBuffer(1) }, (done, total) => progress.push([done, total]));
+  assert.equal(vectors.length, 3);
+  assert.deepEqual(progress, [[2, 3], [3, 3]]);
 });
 
 test("default factory uses bundled Unigram tokenizer and ORT runtime without an override", async () => {

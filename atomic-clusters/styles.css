@@ -5,3 +5,8 @@
 .atomic-clusters-node button { margin: 2px 4px 2px 0; }
 .atomic-clusters-progress { height: 4px; background: var(--background-modifier-border); }
 .atomic-clusters-progress > span { display: block; height: 100%; background: var(--interactive-accent); transition: width 120ms; }
+.atomic-clusters-progress-notice { min-width: 280px; }
+.atomic-clusters-progress-label { font-weight: 600; }
+.atomic-clusters-progress-detail { color: var(--text-muted); font-size: var(--font-ui-small); margin: 3px 0; overflow-wrap: anywhere; }
+.atomic-clusters-progress-bar, .atomic-clusters-model-progress { width: 100%; accent-color: var(--interactive-accent); }
+.atomic-clusters-model-status { color: var(--text-muted); font-size: var(--font-ui-small); margin-top: 4px; max-width: 280px; overflow-wrap: anywhere; }
