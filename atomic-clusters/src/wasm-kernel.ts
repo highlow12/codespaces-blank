@@ -36,11 +36,11 @@ export class WasmNumericKernel implements NumericKernel {
     return nested(Float32Array.from(this.wasm.normalize(input.data, input.rows, input.cols)), input.rows, input.cols);
   }
 
-  pca(rows: number[][], components: number): { projected: number[][]; explained: number[] } {
+  pca(rows: number[][], components: number): { projected: number[][]; explained: number[]; mean?: number[]; components?: number[][] } {
     const result = this.flat.pca(flatten(rows), components);
     return {
       projected: nested(result.projected.data, result.projected.rows, result.projected.cols),
-      explained: Array.from(result.explained)
+      explained: Array.from(result.explained), mean: result.mean, components: result.components
     };
   }
 

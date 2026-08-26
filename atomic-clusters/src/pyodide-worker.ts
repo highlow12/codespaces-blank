@@ -70,7 +70,7 @@ function configProxy(runtime: Runtime, config: ClusteringConfig): any {
   return runtime.toPy(config);
 }
 
-function pythonResultToPluginResult(raw: Record<string, any>, ids: string[]): PyodideClusterResult {
+function pythonResultToPluginResult(raw: Record<string, any>, ids: string[], fittedModel?: { mean: number[]; components: number[][]; explainedVariance: number[] }): PyodideClusterResult {
   const pca = raw.pca || {};
   const discovery = raw.discovery || {};
   const tree = raw.hierarchy?.tree || {};
@@ -97,6 +97,7 @@ function pythonResultToPluginResult(raw: Record<string, any>, ids: string[]): Py
       })),
       selectionReason: pca.selection_reason === "fixed_dimension" ? "all_gains_meet_minimum_use_maximum_dimension" : "first_below_minimum_gain_use_previous_dimension",
       sampleSize: ids.length, varianceTarget: 0.9
+      , ...(fittedModel ? { model: { modelHash: modelFingerprint(fittedModel), inputDimension: fittedModel.mean.length, outputDimension: fittedModel.components.length, normalization: "l2" as const, ...fittedModel } } : {})
     },
     hierarchy: { leaves, merges, root: merges.length ? merges[merges.length - 1].id : (leaves[0] ?? null) },
     timings: {},
@@ -114,11 +115,13 @@ async function runCluster(request: Extract<Message, { type: "CLUSTER" }>): Promi
     pcaProxy = await runtime.runPythonAsync(`
 from atomic_clustering.pca import fit_pca
 _atomic_pca = fit_pca(embeddings, **dict(config.get('pca', {})))
-_atomic_pca.features.tolist()
+{"features": _atomic_pca.features.tolist(), "mean": _atomic_pca.pca.mean_.tolist(), "components": _atomic_pca.pca.components_.tolist(), "explained": _atomic_pca.pca.explained_variance_.tolist()}
 `, { locals });
   } finally { destroy(locals); }
-  const pcaFeatures = toPlain(pcaProxy);
+  const pcaPayload = toPlain(pcaProxy) as { features: number[][]; mean: number[]; components: number[][]; explained: number[] };
   destroy(pcaProxy);
+  const pcaFeatures = pcaPayload.features;
+  const fittedModel = { mean: pcaPayload.mean.map(Number), components: pcaPayload.components.map((row) => row.map(Number)), explainedVariance: pcaPayload.explained.map(Number) };
   if (cancelled) throw new Error("Clustering cancelled");
   const discovery = await discoverPcaFeatures(pcaFeatures, options, {
     kernel: wasmKernel,
@@ -150,7 +153,15 @@ cluster_documents(embeddings, ids=ids, config=config, discovery_runner=runner)
   }
   const result = toPlain(resultProxy);
   destroy(resultProxy);
-  return { ...pythonResultToPluginResult(result, request.ids), ...(visualization ? { visualization } : {}) };
+  const selected = Number(result.pca?.selected_dimension) || fittedModel.components.length;
+  const selectedModel = { ...fittedModel, components: fittedModel.components.slice(0, selected), explainedVariance: fittedModel.explainedVariance.slice(0, selected) };
+  return { ...pythonResultToPluginResult(result, request.ids, selectedModel), ...(visualization ? { visualization } : {}) };
+}
+
+function modelFingerprint(model: { mean: number[]; components: number[][]; explainedVariance: number[] }): string {
+  const value = JSON.stringify({ inputDimension: model.mean.length, outputDimension: model.components.length, normalization: "l2", ...model });
+  let hash = 2166136261; for (let index = 0; index < value.length; index++) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
 (scope as unknown as { onmessage: (event: MessageEvent<Message>) => void }).onmessage = (event) => {

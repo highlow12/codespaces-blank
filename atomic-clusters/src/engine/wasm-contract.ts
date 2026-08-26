@@ -100,6 +100,8 @@ export interface WasmKernelOptions {
 export interface PcaResult {
   readonly projected: FlatMatrix;
   readonly explained: Float32Array;
+  readonly mean?: number[];
+  readonly components?: number[][];
 }
 
 export interface HnswIndex {
@@ -169,15 +171,21 @@ export class WasmNumericKernel implements WasmKernelContract {
     return matrix(output, a.rows, b.cols);
   }
 
-  pca(rows: FlatMatrix, components: number): PcaResult {
-    const count = boundedInteger(components, 1, Math.min(rows.rows, rows.cols), "components");
+  pca(rows: FlatMatrix, requestedComponents: number): PcaResult {
+    const count = boundedInteger(requestedComponents, 1, Math.min(rows.rows, rows.cols), "components");
     const output = this.wasm.randomized_pca
       ? this.wasm.randomized_pca(rows.data, rows.rows, rows.cols, count, this.pcaOversamples, this.pcaPowerIterations, this.pcaSeed)
       : this.wasm.pca(rows.data, rows.rows, rows.cols, count);
     if (!output || typeof output !== "object") throw new WasmContractError("pca output must be an object");
     const projected = float32(output.projected, "pca projected output");
     const explained = float32(output.explained, "pca explained output");
-    return { projected: matrix(projected, rows.rows, count), explained };
+    const randomized = output as RandomizedPcaWasmResult;
+    const basis = "basis" in output ? float32(randomized.basis, "pca basis output") : undefined;
+    const mean = "mean" in output ? float32(randomized.mean, "pca mean output") : undefined;
+    const components = basis && basis.length === count * rows.cols
+      ? Array.from({ length: count }, (_, index) => Array.from(basis.subarray(index * rows.cols, (index + 1) * rows.cols)))
+      : undefined;
+    return { projected: matrix(projected, rows.rows, count), explained, mean: mean ? Array.from(mean) : undefined, components };
   }
 
   cosineDistances(rows: FlatMatrix, tile = this.cosineTile): FlatMatrix {
