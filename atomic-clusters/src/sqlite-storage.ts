@@ -111,8 +111,8 @@ CREATE VIEW IF NOT EXISTS v_current_embeddings AS
   SELECT e.path, n.title, n.mtime, n.content_hash, e.provider, e.model,
     e.embedding_hash, e.note_content_hash, e.dimension, e.vector_json, e.created_at
   FROM embeddings e JOIN notes n USING(path)
-  WHERE e.created_at = (SELECT MAX(e2.created_at) FROM embeddings e2
-                        WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model);
+  WHERE e.rowid = (SELECT MAX(e2.rowid) FROM embeddings e2
+                   WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model);
 CREATE VIEW IF NOT EXISTS v_note_pca AS
   SELECT c.path, n.title, n.mtime, n.content_hash, c.model_hash, c.coordinates_json
   FROM pca_coordinates c JOIN notes n USING(path);
@@ -182,6 +182,10 @@ export class SqliteClusterStore {
     if (await this.adapter.exists(this.path)) bytes = await this.adapter.readBinary(this.path);
     this.db = new this.sql.Database(bytes ? new Uint8Array(bytes) : undefined);
     this.db.run(SCHEMA);
+    // Databases created by an early development build did not carry the
+    // note-content column. Keep opening them safe and let the next write
+    // populate the richer immutable embedding records.
+    try { this.db.run("ALTER TABLE embeddings ADD COLUMN note_content_hash TEXT NOT NULL DEFAULT ''"); } catch { /* already present */ }
     this.db.run("INSERT OR REPLACE INTO metadata(key,value) VALUES('schema_version',?)", [String(SQLITE_SCHEMA_VERSION)]);
     this.opened = true;
     return this;
@@ -207,9 +211,16 @@ export class SqliteClusterStore {
   /** Execute a mutating operation and persist it as one transaction. */
   async transaction<T>(operation: (db: SqlDatabase) => T | Promise<T>): Promise<T> {
     this.requireOpen();
+    const before = this.db.export();
     this.db.run("BEGIN IMMEDIATE");
     try { const result = await operation(this.db); this.db.run("COMMIT"); await this.flush(); return result; }
-    catch (error) { try { this.db.run("ROLLBACK"); } catch { /* preserve original error */ } throw error; }
+    catch (error) {
+      try { this.db.run("ROLLBACK"); } catch { /* commit or operation may already have failed */ }
+      // A failed adapter write occurs after COMMIT. Restore the in-memory
+      // handle too, so callers observe the same atomic state as a reopened DB.
+      try { this.db.close(); this.db = new this.sql.Database(before); this.db.run(SCHEMA); } catch { /* preserve original adapter error */ }
+      throw error;
+    }
   }
 
   async upsertNote(note: NoteRecord): Promise<void> {
@@ -226,7 +237,7 @@ export class SqliteClusterStore {
   async getEmbedding(path: string, provider: string, model: string, noteHash?: string): Promise<CachedEmbedding | undefined> {
     this.requireOpen();
     const statement = this.db.prepare("SELECT e.path,e.provider,e.model,e.embedding_hash,e.note_content_hash,e.vector_json,n.content_hash FROM embeddings e JOIN notes n USING(path) WHERE e.path=? AND e.provider=? AND e.model=? ORDER BY e.created_at DESC");
-    try { statement.bind([path, provider, model]); while (statement.step()) { const row = statement.getAsObject(); if (!noteHash || row.note_content_hash === noteHash || row.content_hash === noteHash) return { path: String(row.path), provider: String(row.provider), model: String(row.model), hash: String(row.note_content_hash), vector: JSON.parse(String(row.vector_json)) }; } }
+    try { statement.bind([path, provider, model]); while (statement.step()) { const row = statement.getAsObject(); if (!noteHash || row.note_content_hash === noteHash) return { path: String(row.path), provider: String(row.provider), model: String(row.model), hash: String(row.note_content_hash), vector: JSON.parse(String(row.vector_json)) }; } }
     finally { statement.free(); }
     return undefined;
   }
