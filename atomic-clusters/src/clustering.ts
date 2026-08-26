@@ -1,9 +1,9 @@
 import { UMAP } from "umap-js";
-import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyTree, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
+import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyTree, PcaModelArtifact, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
 
 export interface NumericKernel {
   normalize(rows: number[][]): number[][];
-  pca(rows: number[][], components: number): { projected: number[][]; explained: number[] };
+  pca(rows: number[][], components: number): { projected: number[][]; explained: number[]; mean?: number[]; components?: number[][] };
   cosineDistances(rows: number[][]): number[][];
   exactKnn(rows: number[][], k: number): number[][];
   /** Returns a minimum spanning tree of a mutual-reachability graph. */
@@ -164,8 +164,11 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   const probe = kernel.pca(sample, pilotComponents);
   const selectedPca = selectPcaByPreservation(sample, probe.projected, candidateComponents(pilotComponents, minComponents), sampleSize, config.pcaVarianceTarget ?? 0.9, kernel);
   const pca = kernel.pca(normalized, selectedPca.selected);
+  const fitted = pca.mean && pca.components ? { mean: pca.mean, components: pca.components } : jsPca(normalized, selectedPca.selected);
+  const modelHash = modelFingerprint(normalized[0].length, selectedPca.selected, fitted.mean, fitted.components, pca.explained);
   selectedPca.totalVariance = centeredVarianceTrace(normalized);
   selectedPca.explainedVariance = explainedFraction(pca.explained, selectedPca.selected, selectedPca.totalVariance);
+  selectedPca.model = { modelHash, inputDimension: normalized[0].length, outputDimension: selectedPca.selected, normalization: "l2", mean: fitted.mean, components: fitted.components, explainedVariance: pca.explained.slice(0, selectedPca.selected) };
   checkCancelled(options);
   progress("umap", 0.2);
   const discovery = await discoverPcaFeatures(pca.projected, config, options);
@@ -379,11 +382,17 @@ function deterministicSample(rows: number[][], size: number, seed: number): numb
 function seededRandom(seed: number): () => number { let state = seed >>> 0; return () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; }; }
 function checkCancelled(options: ClusterOptions): void { if (options.signal?.cancelled) throw new Error("Clustering cancelled"); }
 
-function jsPca(rows: number[][], components: number): { projected: number[][]; explained: number[] } {
+function jsPca(rows: number[][], components: number): { projected: number[][]; explained: number[]; mean: number[]; components: number[][] } {
   const n = rows.length; const dimensions = rows[0].length; const means = new Array(dimensions).fill(0); rows.forEach((row) => row.forEach((value, i) => means[i] += value / n));
   const centered = rows.map((row) => row.map((value, i) => value - means[i])); const covariance = Array.from({ length: dimensions }, () => new Array(dimensions).fill(0));
   for (const row of centered) for (let i = 0; i < dimensions; i++) for (let j = i; j < dimensions; j++) covariance[i][j] += row[i] * row[j] / Math.max(1, n - 1);
   for (let i = 0; i < dimensions; i++) for (let j = i + 1; j < dimensions; j++) covariance[j][i] = covariance[i][j];
   const vectors: number[][] = []; const values: number[] = []; for (let component = 0; component < Math.min(components, dimensions); component++) { let vector: number[] = Array.from({ length: dimensions }, (_, i) => i === component ? 1 : 0); for (let iteration = 0; iteration < 30; iteration++) { const next = covariance.map((row) => dot(row, vector)); const norm = Math.sqrt(dot(next, next)) || 1; vector = next.map((value) => value / norm); } const eigenvalue = Math.max(0, dot(vector, covariance.map((row) => dot(row, vector)))); values.push(eigenvalue); vectors.push(vector); for (let i = 0; i < dimensions; i++) for (let j = 0; j < dimensions; j++) covariance[i][j] -= eigenvalue * vector[i] * vector[j]; }
-  return { projected: centered.map((row) => vectors.map((vector) => dot(row, vector))), explained: values };
+  return { projected: centered.map((row) => vectors.map((vector) => dot(row, vector))), explained: values, mean: means, components: vectors };
+}
+
+function modelFingerprint(inputDimension: number, outputDimension: number, mean: number[], components: number[][], explainedVariance: number[]): string {
+  const value = JSON.stringify({ inputDimension, outputDimension, normalization: "l2", mean, components, explainedVariance });
+  let hash = 2166136261; for (let index = 0; index < value.length; index++) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }

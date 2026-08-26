@@ -110,6 +110,18 @@ export interface PcaSelection {
   selectionReason?: "all_gains_meet_minimum_use_maximum_dimension" | "first_below_minimum_gain_use_previous_dimension" | "global_preservation_knee_after_local_plateau" | "small_dataset";
   sampleSize: number;
   varianceTarget: number;
+  /** Fitted model used for incremental projection and durable persistence. */
+  model?: PcaModelArtifact;
+}
+
+export interface PcaModelArtifact {
+  modelHash: string;
+  inputDimension: number;
+  outputDimension: number;
+  normalization: "l2" | "none";
+  mean: number[];
+  components: number[][];
+  explainedVariance: number[];
 }
 
 export type VisualizationCoordinate = [number, number];

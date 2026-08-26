@@ -165,6 +165,17 @@ export async function pcaModelHash(model: Omit<PcaModel, "modelHash">): Promise<
     explainedVariance: model.explainedVariance, provider: model.provider || "", model: model.model || "" }));
 }
 
+export function validateClusterResultAlignment(result: ClusterResult): void {
+  const n = result.ids.length;
+  if (new Set(result.ids).size !== n) throw new Error("Cluster result ids must be unique");
+  for (const [name, values] of [["leafLabels", result.leafLabels], ["probabilities", result.probabilities], ["outlierProxy", result.outlierProxy]] as const) if (values.length !== n) throw new Error(`Cluster result ${name} must align with ids`);
+  const leaves = result.leafOrder || result.hierarchy.leaves;
+  if (new Set(leaves).size !== leaves.length || leaves.some((leaf) => !Number.isSafeInteger(leaf) || leaf < 0)) throw new Error("Cluster result leaf order is invalid");
+  if (result.softMemberships && (result.softMemberships.length !== n || result.softMemberships.some((row) => row.length !== leaves.length))) throw new Error("Cluster result memberships must align with ids and leaf order");
+  if (result.visualization && (result.visualization.coordinates.length !== n || result.visualization.labels.length !== n)) throw new Error("Cluster visualization must align with ids");
+  if (result.visualization?.coordinates.some((point) => point.length !== 2 || point.some((value) => !Number.isFinite(value)))) throw new Error("Cluster visualization coordinates must be finite 2D points");
+}
+
 export interface SqliteStorageOptions { path?: string; now?: () => string; }
 
 export class SqliteClusterStore {
@@ -241,6 +252,14 @@ export class SqliteClusterStore {
     finally { statement.free(); }
     return undefined;
   }
+  async loadEmbeddings(provider?: string, model?: string): Promise<Map<string, CachedEmbedding>> {
+    this.requireOpen();
+    const predicates = [provider ? `provider=${sqlQuote(provider)}` : "1=1", model ? `model=${sqlQuote(model)}` : "1=1"];
+    const rows = this.db.exec(`SELECT e.path,e.provider,e.model,e.note_content_hash,e.vector_json FROM embeddings e WHERE ${predicates.join(" AND ")} AND e.rowid=(SELECT MAX(e2.rowid) FROM embeddings e2 WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model)`);
+    const map = new Map<string, CachedEmbedding>();
+    for (const row of rows[0]?.values || []) { const [path, itemProvider, itemModel, hash, vector] = row; const entry = { path: String(path), provider: String(itemProvider), model: String(itemModel), hash: String(hash), vector: JSON.parse(String(vector)) as number[] }; map.set(`${entry.provider}:${entry.model}:${entry.path}`, entry); }
+    return map;
+  }
   async savePcaModel(model: PcaModel): Promise<void> {
     await this.transaction((db) => db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)", [model.modelHash, model.provider || null, model.model || null, model.inputDimension, model.outputDimension, model.normalization, JSON.stringify(model.mean), JSON.stringify(model.components), JSON.stringify(model.explainedVariance), this.now()]));
   }
@@ -256,6 +275,7 @@ export class SqliteClusterStore {
     return coordinates;
   }
   async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>> } = {}): Promise<string> {
+    validateClusterResultAlignment(result);
     const resultId = options.resultId || await contentHash(JSON.stringify(result));
     await this.transaction((db) => {
       db.run("INSERT OR REPLACE INTO results(result_id,schema_version,created_at,result_json) VALUES(?,?,?,?)", [resultId, result.schemaVersion, this.now(), JSON.stringify(result)]);
