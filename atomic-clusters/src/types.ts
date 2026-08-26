@@ -112,6 +112,27 @@ export interface PcaSelection {
   varianceTarget: number;
 }
 
+export type VisualizationCoordinate = [number, number];
+
+export interface VisualizationConfiguration {
+  runtime: "umap-js" | string;
+  seed: number;
+  nComponents: 2;
+  nNeighbors: number;
+  minDist: number;
+  spread: number;
+  targetMetric?: "categorical";
+  targetWeight?: number;
+}
+
+/** Optional, row-aligned 2D projection used by the cluster explorer. */
+export interface ClusterVisualization {
+  coordinates: VisualizationCoordinate[];
+  labels: number[];
+  configuration: VisualizationConfiguration;
+  timings?: Record<string, number>;
+}
+
 export interface HierarchyMerge {
   id: number;
   left: number;
@@ -149,6 +170,7 @@ export interface ClusterResult {
   pca: PcaSelection;
   hierarchy: HierarchyTree;
   timings: Record<string, number>;
+  visualization?: ClusterVisualization;
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;

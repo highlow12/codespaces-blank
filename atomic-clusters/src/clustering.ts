@@ -1,5 +1,5 @@
 import { UMAP } from "umap-js";
-import { ClusterResult, ClusteringConfig, HierarchyMerge, HierarchyTree, PcaPreservationCandidate, PcaSelection } from "./types";
+import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyTree, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
 
 export interface NumericKernel {
   normalize(rows: number[][]): number[][];
@@ -97,6 +97,51 @@ export interface DiscoveryResult {
   outlierProxy: number[];
 }
 
+export interface VisualizationOptions { seed?: number; onProgress?: ClusterProgress; signal?: { cancelled: boolean }; }
+
+function visualizationRandom(seed: number): () => number {
+  let state = (seed >>> 0) || 1;
+  return () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; };
+}
+
+/** Run the separate 2D explorer UMAP over selected PCA features. */
+export async function projectVisualization(pcaFeatures: number[][], labels: number[], options: VisualizationOptions = {}): Promise<ClusterVisualization | undefined> {
+  if (pcaFeatures.length < 3) return undefined;
+  if (pcaFeatures.some((row) => row.length !== pcaFeatures[0].length)) throw new Error("Visualization features must be rectangular.");
+  if (labels.length !== pcaFeatures.length) throw new Error("Visualization labels must align with features.");
+  if (pcaFeatures.some((row) => row.some((value) => !Number.isFinite(value)))) throw new Error("Visualization features must be finite.");
+  checkCancelled(options);
+  const progress = options.onProgress || (() => undefined);
+  const seed = options.seed ?? 42;
+  const nNeighbors = Math.min(24, pcaFeatures.length - 1);
+  const minDist = 1.0;
+  const spread = 1.8;
+  const varyingLabels = new Set(labels.filter((label) => Number.isSafeInteger(label))).size > 1;
+  const umap = new UMAP({ nComponents: 2, nNeighbors, minDist, spread, random: visualizationRandom(seed) });
+  if (varyingLabels) umap.setSupervisedProjection(labels, { targetWeight: 0.01, targetNNeighbors: nNeighbors });
+  progress("visualization", 0);
+  const started = Date.now();
+  const reduced = await umap.fitAsync(pcaFeatures, (epoch) => {
+    progress("visualization", Math.min(1, epoch / Math.max(1, pcaFeatures.length * 5)));
+    checkCancelled(options);
+  });
+  checkCancelled(options);
+  const coordinates: VisualizationCoordinate[] = reduced.map((row, index) => {
+    const coordinate: VisualizationCoordinate = [Number(row[0]), Number(row[1])];
+    if (!Number.isFinite(coordinate[0]) || !Number.isFinite(coordinate[1])) throw new Error(`Visualization coordinate ${index} is not finite.`);
+    return coordinate;
+  });
+  progress("visualization", 1);
+  return {
+    coordinates, labels: labels.slice(),
+    configuration: {
+      runtime: "umap-js", seed, nComponents: 2, nNeighbors, minDist, spread,
+      ...(varyingLabels ? { targetMetric: "categorical" as const, targetWeight: 0.01 } : {})
+    },
+    timings: { totalMs: Date.now() - started }
+  };
+}
+
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
   if (input.length < 3) {
@@ -129,11 +174,16 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
    * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
   progress("hdbscan", 0.78);
   const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel);
-  progress("hierarchy", 0.9);
+  progress("hierarchy", 0.86);
+  const visualization = await projectVisualization(pca.projected, hdbscan.labels, {
+    seed: config.seed ?? 42,
+    signal: options.signal,
+    onProgress: (phase, value) => progress(phase, 0.86 + value * 0.1)
+  });
   progress("complete", 1);
   return {
     schemaVersion: 3, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy, pca: selectedPca, hierarchy,
+    outlierProxy: hdbscan.outlierProxy, pca: selectedPca, hierarchy, ...(visualization ? { visualization } : {}),
     timings: { totalMs: Date.now() - started }
   };
 }

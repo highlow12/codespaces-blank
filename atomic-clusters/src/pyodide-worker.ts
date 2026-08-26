@@ -1,5 +1,5 @@
 import "atomic-clusters-wasm-bootstrap";
-import { discoverPcaFeatures, NumericKernel } from "./clustering";
+import { discoverPcaFeatures, NumericKernel, projectVisualization } from "./clustering";
 import { PYODIDE_CORE_SOURCE } from "./pyodide-core-source";
 import { ClusteringConfig, PyodideClusterResult } from "./types";
 import { loadWasmKernel } from "./wasm-loader";
@@ -123,6 +123,11 @@ _atomic_pca.features.tolist()
     signal: { get cancelled() { return cancelled; } },
     onProgress: (phase, progress) => post({ type: "PROGRESS", jobId: request.jobId, phase, progress })
   });
+  const visualization = await projectVisualization(pcaFeatures, discovery.labels, {
+    seed: options.seed ?? 42,
+    signal: { get cancelled() { return cancelled; } },
+    onProgress: (phase, progress) => post({ type: "PROGRESS", jobId: request.jobId, phase, progress: 0.86 + progress * 0.1 })
+  });
   const clusterCount = Math.max(0, ...discovery.labels) + 1;
   const memberships = discovery.labels.map((label, row) => Array.from({ length: clusterCount }, (_, column) => column === label ? discovery.probabilities[row] : 0));
   const discoveryOutput = runtime.toPy({
@@ -143,7 +148,7 @@ cluster_documents(embeddings, ids=ids, config=config, discovery_runner=runner)
   }
   const result = toPlain(resultProxy);
   destroy(resultProxy);
-  return pythonResultToPluginResult(result, request.ids);
+  return { ...pythonResultToPluginResult(result, request.ids), ...(visualization ? { visualization } : {}) };
 }
 
 (scope as unknown as { onmessage: (event: MessageEvent<Message>) => void }).onmessage = (event) => {
