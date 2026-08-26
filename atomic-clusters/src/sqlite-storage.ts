@@ -198,7 +198,10 @@ export class SqliteClusterStore {
     const durableBytes = bytes.slice().buffer as ArrayBuffer;
     await this.adapter.writeBinary(`${this.path}.tmp`, durableBytes);
     if (this.adapter.rename) await this.adapter.rename(`${this.path}.tmp`, this.path);
-    else await this.adapter.writeBinary(this.path, durableBytes);
+    else {
+      await this.adapter.writeBinary(this.path, durableBytes);
+      await this.adapter.remove?.(`${this.path}.tmp`);
+    }
   }
 
   /** Execute a mutating operation and persist it as one transaction. */
