@@ -95,6 +95,7 @@ export interface DiscoveryResult {
   labels: number[];
   probabilities: number[];
   outlierProxy: number[];
+  memberships?: number[][];
 }
 
 export interface VisualizationOptions { seed?: number; onProgress?: ClusterProgress; signal?: { cancelled: boolean }; }
@@ -145,7 +146,7 @@ export async function projectVisualization(pcaFeatures: number[][], labels: numb
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
   if (input.length < 3) {
-    return { schemaVersion: 3, ids, leafLabels: input.map(() => -1), probabilities: input.map(() => 0), outlierProxy: input.map(() => 1), pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 }, hierarchy: { leaves: [], merges: [], root: null }, timings: { totalMs: 0 } };
+    return { schemaVersion: 5, ids, leafLabels: input.map(() => -1), probabilities: input.map(() => 0), outlierProxy: input.map(() => 1), softMemberships: input.map(() => []), leafOrder: [], pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 }, hierarchy: { leaves: [], merges: [], root: null }, timings: { totalMs: 0 } };
   }
   const kernel = options.kernel || jsKernel;
   const progress = options.onProgress || (() => undefined);
@@ -181,9 +182,12 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
     onProgress: (phase, value) => progress(phase, 0.86 + value * 0.1)
   });
   progress("complete", 1);
+  const leafOrder = hierarchy.leaves.slice();
+  const clusterCount = leafOrder.length;
+  const softMemberships = hdbscan.memberships || hdbscan.labels.map((label, index) => leafOrder.map((leaf) => label === leaf ? hdbscan.probabilities[index] : 0));
   return {
-    schemaVersion: 3, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy, pca: selectedPca, hierarchy, ...(visualization ? { visualization } : {}),
+    schemaVersion: 5, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
+    outlierProxy: hdbscan.outlierProxy, softMemberships: softMemberships.map((row) => row.slice(0, clusterCount)), leafOrder, pca: selectedPca, hierarchy, ...(visualization ? { visualization } : {}),
     timings: { totalMs: Date.now() - started }
   };
 }
@@ -215,7 +219,7 @@ export async function discoverPcaFeatures(pcaFeatures: number[][], config: Clust
   // Python PCA -> UMAP -> HDBSCAN route uses min_samples=3.
   const minSamples = config.minSamples ?? 3;
   const hdbscan = (options.hdbscan || new DeterministicHdbscanProvider()).fit(reduced, minClusterSize, minSamples, kernel);
-  return { umapFeatures: reduced, labels: hdbscan.labels, probabilities: hdbscan.probabilities, outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value) };
+  return { umapFeatures: reduced, labels: hdbscan.labels, probabilities: hdbscan.probabilities, outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value), memberships: hdbscan.memberships };
 }
 
 export function candidateComponents(max: number, min = 32, step = 32): number[] {

@@ -117,5 +117,11 @@ async function run() {
   await cp(resolve(ortAssets, "ort-wasm-simd-threaded.wasm"), "dist/ort-wasm-simd-threaded.wasm");
   await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.mjs"), "dist/ort-wasm-simd-threaded.jsep.mjs");
   await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.wasm"), "dist/ort-wasm-simd-threaded.jsep.wasm");
+  // sql.js loads its SQLite engine separately from the JavaScript bundle.
+  // Keep the pinned wasm asset beside the plugin so vault adapters remain
+  // usable offline after installation.
+  const sqliteWasm = resolve("node_modules/sql.js/dist/sql-wasm.wasm");
+  if (!existsSync(sqliteWasm)) throw new Error("Build requires sql.js/dist/sql-wasm.wasm.");
+  await cp(sqliteWasm, "dist/sql-wasm.wasm");
 }
 run().catch((error) => { console.error(error); process.exitCode = 1; });

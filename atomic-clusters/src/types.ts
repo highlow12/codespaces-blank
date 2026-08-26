@@ -162,7 +162,7 @@ export interface ClusterTitleGeneration {
 }
 
 export interface ClusterResult {
-  schemaVersion: 1 | 2 | 3;
+  schemaVersion: 1 | 2 | 3 | 4 | 5;
   ids: string[];
   leafLabels: number[];
   probabilities: number[];
@@ -171,6 +171,10 @@ export interface ClusterResult {
   hierarchy: HierarchyTree;
   timings: Record<string, number>;
   visualization?: ClusterVisualization;
+  /** Complete note × leaf soft-membership matrix, aligned with `ids`. */
+  softMemberships?: number[][];
+  /** Stable display ordering of leaf labels. */
+  leafOrder?: number[];
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;

@@ -139,7 +139,7 @@ export default class AtomicClustersPlugin extends Plugin {
       this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
       const resultStore = new ClusterResultStore(this.app.vault);
       // Persist the structural result before computing optional keyword titles.
-      this.latestResult = { ...this.latestResult, schemaVersion: 3, titles: undefined, titleGeneration: undefined };
+      this.latestResult = { ...this.latestResult, schemaVersion: 5, titles: undefined, titleGeneration: undefined };
       await resultStore.save(this.latestResult); await this.publishResult(this.latestResult);
       if (this.settings.clusterTitlesEnabled !== false) {
         try {
@@ -182,7 +182,7 @@ export default class AtomicClustersPlugin extends Plugin {
       if (missing.length) throw new Error(`${missing.length} note${missing.length === 1 ? " is" : "s are"} missing from the saved cluster result; build clusters again before regenerating titles.`);
       const orderedNotes = result.ids.map((path) => byPath.get(path)!);
       progress.update({ phase: "result load", progress: 0.1, detail: `${orderedNotes.length} current notes · ${result.hierarchy.leaves.length + result.hierarchy.merges.length} hierarchy nodes` });
-      this.latestResult = { ...result, schemaVersion: 3, titles: undefined, titleGeneration: undefined };
+      this.latestResult = { ...result, schemaVersion: 5, titles: undefined, titleGeneration: undefined };
       await this.publishResult(this.latestResult);
       this.latestResult = await this.generateTitlesForResult(this.latestResult, orderedNotes, runSignal, progress, true);
       progress.complete(`Regenerated ${Object.keys(this.latestResult.titles || {}).length} keyword titles`);

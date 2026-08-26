@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS notes (
 );
 CREATE TABLE IF NOT EXISTS embeddings (
   path TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
-  embedding_hash TEXT NOT NULL, dimension INTEGER NOT NULL, vector_json TEXT NOT NULL,
+  embedding_hash TEXT NOT NULL, note_content_hash TEXT NOT NULL, dimension INTEGER NOT NULL, vector_json TEXT NOT NULL,
   created_at TEXT NOT NULL, PRIMARY KEY(path, provider, model, embedding_hash),
   FOREIGN KEY(path) REFERENCES notes(path) ON DELETE CASCADE
 );
@@ -81,6 +81,16 @@ CREATE TABLE IF NOT EXISTS hierarchy_leaves (
   result_id TEXT NOT NULL, ordinal INTEGER NOT NULL, leaf_id INTEGER NOT NULL,
   PRIMARY KEY(result_id, ordinal), FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS leaf_order (
+  result_id TEXT NOT NULL, ordinal INTEGER NOT NULL, leaf_id INTEGER NOT NULL,
+  PRIMARY KEY(result_id, ordinal), FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS visualization_points (
+  result_id TEXT NOT NULL, ordinal INTEGER NOT NULL, path TEXT NOT NULL,
+  x REAL NOT NULL, y REAL NOT NULL, leaf_label INTEGER NOT NULL,
+  PRIMARY KEY(result_id, ordinal), FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE,
+  FOREIGN KEY(path) REFERENCES notes(path) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS cluster_titles (
   result_id TEXT NOT NULL, node_id INTEGER NOT NULL, title TEXT NOT NULL,
   PRIMARY KEY(result_id, node_id), FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE
@@ -99,7 +109,7 @@ CREATE TABLE IF NOT EXISTS migrations (
 );
 CREATE VIEW IF NOT EXISTS v_current_embeddings AS
   SELECT e.path, n.title, n.mtime, n.content_hash, e.provider, e.model,
-    e.embedding_hash, e.dimension, e.vector_json, e.created_at
+    e.embedding_hash, e.note_content_hash, e.dimension, e.vector_json, e.created_at
   FROM embeddings e JOIN notes n USING(path)
   WHERE e.created_at = (SELECT MAX(e2.created_at) FROM embeddings e2
                         WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model);
@@ -206,14 +216,14 @@ export class SqliteClusterStore {
     await this.transaction((db) => { for (const note of notes) db.run("INSERT INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content", [note.path, note.title, note.mtime, note.hash, note.content]); });
   }
   async putEmbedding(entry: CachedEmbedding): Promise<string> {
-    const hash = entry.hash || await embeddingHash(entry.vector);
-    await this.transaction((db) => db.run("INSERT OR IGNORE INTO embeddings(path,provider,model,embedding_hash,dimension,vector_json,created_at) VALUES(?,?,?,?,?,?,?)", [entry.path, entry.provider, entry.model, hash, entry.vector.length, JSON.stringify(entry.vector), this.now()]));
+    const hash = await embeddingHash(entry.vector);
+    await this.transaction((db) => db.run("INSERT OR IGNORE INTO embeddings(path,provider,model,embedding_hash,note_content_hash,dimension,vector_json,created_at) VALUES(?,?,?,?,?,?,?,?)", [entry.path, entry.provider, entry.model, hash, entry.hash, entry.vector.length, JSON.stringify(entry.vector), this.now()]));
     return hash;
   }
   async getEmbedding(path: string, provider: string, model: string, noteHash?: string): Promise<CachedEmbedding | undefined> {
     this.requireOpen();
-    const statement = this.db.prepare("SELECT e.path,e.provider,e.model,e.embedding_hash,e.vector_json,n.content_hash FROM embeddings e JOIN notes n USING(path) WHERE e.path=? AND e.provider=? AND e.model=? ORDER BY e.created_at DESC");
-    try { statement.bind([path, provider, model]); while (statement.step()) { const row = statement.getAsObject(); if (!noteHash || row.content_hash === noteHash) return { path: String(row.path), provider: String(row.provider), model: String(row.model), hash: String(row.embedding_hash), vector: JSON.parse(String(row.vector_json)) }; } }
+    const statement = this.db.prepare("SELECT e.path,e.provider,e.model,e.embedding_hash,e.note_content_hash,e.vector_json,n.content_hash FROM embeddings e JOIN notes n USING(path) WHERE e.path=? AND e.provider=? AND e.model=? ORDER BY e.created_at DESC");
+    try { statement.bind([path, provider, model]); while (statement.step()) { const row = statement.getAsObject(); if (!noteHash || row.note_content_hash === noteHash || row.content_hash === noteHash) return { path: String(row.path), provider: String(row.provider), model: String(row.model), hash: String(row.note_content_hash), vector: JSON.parse(String(row.vector_json)) }; } }
     finally { statement.free(); }
     return undefined;
   }
@@ -235,11 +245,14 @@ export class SqliteClusterStore {
     const resultId = options.resultId || await contentHash(JSON.stringify(result));
     await this.transaction((db) => {
       db.run("INSERT OR REPLACE INTO results(result_id,schema_version,created_at,result_json) VALUES(?,?,?,?)", [resultId, result.schemaVersion, this.now(), JSON.stringify(result)]);
-      db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]);
+      db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]);
       result.ids.forEach((path, i) => db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score) VALUES(?,?,?,?,?)", [resultId, path, result.leafLabels[i], result.probabilities[i], result.outlierProxy[i]]));
       result.hierarchy.leaves.forEach((leaf, ordinal) => db.run("INSERT INTO hierarchy_leaves(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
+      (result.leafOrder || result.hierarchy.leaves).forEach((leaf, ordinal) => db.run("INSERT INTO leaf_order(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       result.hierarchy.merges.forEach((merge) => db.run("INSERT INTO hierarchy_merges(result_id,id,left_id,right_id,distance,mass) VALUES(?,?,?,?,?,?)", [resultId, merge.id, merge.left, merge.right, merge.distance, merge.mass]));
+      result.visualization?.coordinates.forEach((point, ordinal) => db.run("INSERT INTO visualization_points(result_id,ordinal,path,x,y,leaf_label) VALUES(?,?,?,?,?,?)", [resultId, ordinal, result.ids[ordinal], point[0], point[1], result.visualization!.labels[ordinal] ?? result.leafLabels[ordinal]]));
       for (const [node, title] of Object.entries(result.titles || {})) db.run("INSERT INTO cluster_titles(result_id,node_id,title) VALUES(?,?,?)", [resultId, Number(node), title]);
+      if (result.softMemberships) result.softMemberships.forEach((row, ordinal) => row.forEach((membership, leafIndex) => db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, result.ids[ordinal], (result.leafOrder || result.hierarchy.leaves)[leafIndex], membership])));
       for (const [path, memberships] of Object.entries(options.softMemberships || {})) for (const [leaf, membership] of Object.entries(memberships)) db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, path, Number(leaf), membership]);
     });
     return resultId;
@@ -259,12 +272,28 @@ export class SqliteClusterStore {
     this.requireOpen(); const rows = this.db.exec(`SELECT coordinates_json FROM pca_coordinates WHERE path=${sqlQuote(path)} AND model_hash=${sqlQuote(modelHash)}`);
     return rows[0]?.values[0]?.[0] ? JSON.parse(String(rows[0].values[0][0])) : undefined;
   }
+  getVisualization(resultId: string): Array<{ path: string; x: number; y: number; leafLabel: number }> {
+    return this.query("SELECT path,x,y,leaf_label AS leafLabel FROM visualization_points WHERE result_id=? ORDER BY ordinal", [resultId]).map((row) => ({ path: String(row.path), x: Number(row.x), y: Number(row.y), leafLabel: Number(row.leafLabel) }));
+  }
+  getSoftMemberships(resultId: string): Array<{ path: string; leafId: number; membership: number }> {
+    return this.query("SELECT path,leaf_id AS leafId,membership FROM soft_memberships WHERE result_id=? ORDER BY path,leaf_id", [resultId]).map((row) => ({ path: String(row.path), leafId: Number(row.leafId), membership: Number(row.membership) }));
+  }
   query(sql: string, params: unknown[] = []): Array<Record<string, unknown>> {
     this.requireOpen(); const statement = this.db.prepare(sql); const result: Array<Record<string, unknown>> = [];
     try { statement.bind(params); while (statement.step()) result.push(statement.getAsObject()); } finally { statement.free(); } return result;
   }
   async saveEmbeddingLog(log: EmbeddingRunLog): Promise<void> { await this.transaction((db) => db.run("INSERT INTO embedding_logs(started_at,completed_at,provider,model,status,log_json) VALUES(?,?,?,?,?,?)", [log.startedAt, log.completedAt, log.provider, log.model, log.status || null, JSON.stringify(log)])); }
   async loadLatestEmbeddingLog(): Promise<EmbeddingRunLog | null> { this.requireOpen(); const rows = this.db.exec("SELECT log_json FROM embedding_logs ORDER BY id DESC LIMIT 1"); return rows[0]?.values[0]?.[0] ? JSON.parse(String(rows[0].values[0][0])) : null; }
+}
+
+/** Convenience factory for the async `initSqlJs({ locateFile })` API. */
+export async function createSqliteStore(
+  adapter: BinaryAdapter,
+  initializer: SqlJsStatic | Promise<SqlJsStatic> | (() => Promise<SqlJsStatic>),
+  options: SqliteStorageOptions = {}
+): Promise<SqliteClusterStore> {
+  const sql = typeof initializer === "function" ? await initializer() : await initializer;
+  return new SqliteClusterStore(adapter, sql, options).open();
 }
 
 function sqlQuote(value: string): string { return `'${value.split("'").join("''")}'`; }
@@ -283,7 +312,7 @@ export async function migrateLegacyJson(store: SqliteClusterStore, sources: Lega
         // Legacy cache entries predate note metadata. A zero-metadata note is
         // upgraded in place when the vault is scanned next.
         db.run("INSERT OR IGNORE INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?)", [entry.path, entry.path.split("/").pop() || entry.path, 0, entry.hash || "legacy", null]);
-        db.run("INSERT OR IGNORE INTO embeddings(path,provider,model,embedding_hash,dimension,vector_json,created_at) VALUES(?,?,?,?,?,?,?)", [entry.path, entry.provider, entry.model, entry.hash, entry.vector.length, JSON.stringify(entry.vector), new Date().toISOString()]);
+        db.run("INSERT OR IGNORE INTO embeddings(path,provider,model,embedding_hash,note_content_hash,dimension,vector_json,created_at) VALUES(?,?,?,?,?,?,?,?)", [entry.path, entry.provider, entry.model, entry.hash, entry.hash, entry.vector.length, JSON.stringify(entry.vector), new Date().toISOString()]);
       }
     });
     importOne("cluster-result.json", sources.result, () => {

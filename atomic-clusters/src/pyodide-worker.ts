@@ -80,11 +80,13 @@ function pythonResultToPluginResult(raw: Record<string, any>, ids: string[]): Py
   }));
   const leaves = (tree.leaves || []).map((leaf: Record<string, any>) => Number(leaf.leaf));
   return {
-    schemaVersion: 3,
+    schemaVersion: 5,
     ids: Array.isArray(raw.ids) ? raw.ids.map(String) : ids,
     leafLabels: (discovery.leaf_labels || []).map(Number),
     probabilities: (discovery.probabilities || []).map(Number),
     outlierProxy: (discovery.outlier_scores || []).map(Number),
+    softMemberships: Array.isArray(discovery.memberships) ? discovery.memberships.map((row: unknown) => Array.isArray(row) ? row.map(Number) : []) : undefined,
+    leafOrder: leaves,
     pca: {
       selected: Number(pca.selected_dimension), explainedVariance: Number(pca.candidates?.[pca.candidates.length - 1]?.cumulative_explained_variance || 0),
       totalVariance: 0, candidates: (pca.candidates || []).map((candidate: Record<string, any>) => Number(candidate.dimension)),
