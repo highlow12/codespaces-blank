@@ -7,6 +7,7 @@
   "main": "main.js",
   "dependencies": {
     "onnxruntime-web": "1.22.0-dev.20250409-89f8206ba4",
+    "sql.js": "^1.13.0",
     "umap-js": "1.4.0"
   },
   "scripts": {

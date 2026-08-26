@@ -1,5 +1,8 @@
 import { normalizePath, Plugin, Vault } from "obsidian";
 import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord } from "./types";
+// The SQLite store is exported from this legacy entry point so callers can
+// adopt the durable store without changing their storage import path.
+export { SqliteClusterStore, migrateLegacyJson, migrateLegacyAdapter, projectPca, embeddingHash, pcaModelHash, SQLITE_PATH, SQLITE_SCHEMA_VERSION } from "./sqlite-storage";
 
 interface CacheDocument { version: 1; embeddings: CachedEmbedding[]; }
 
