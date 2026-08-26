@@ -276,6 +276,7 @@ export class SqliteClusterStore {
   }
   async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>> } = {}): Promise<string> {
     validateClusterResultAlignment(result);
+    for (const [path, point] of Object.entries(options.coordinates || {})) if (!result.ids.includes(path) || point.length !== 2 || point.some((value) => !Number.isFinite(value))) throw new Error(`Visualization coordinate for ${path} is invalid or unaligned`);
     const resultId = options.resultId || await contentHash(JSON.stringify(result));
     await this.transaction((db) => {
       db.run("INSERT OR REPLACE INTO results(result_id,schema_version,created_at,result_json) VALUES(?,?,?,?)", [resultId, result.schemaVersion, this.now(), JSON.stringify(result)]);
@@ -284,7 +285,8 @@ export class SqliteClusterStore {
       result.hierarchy.leaves.forEach((leaf, ordinal) => db.run("INSERT INTO hierarchy_leaves(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       (result.leafOrder || result.hierarchy.leaves).forEach((leaf, ordinal) => db.run("INSERT INTO leaf_order(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       result.hierarchy.merges.forEach((merge) => db.run("INSERT INTO hierarchy_merges(result_id,id,left_id,right_id,distance,mass) VALUES(?,?,?,?,?,?)", [resultId, merge.id, merge.left, merge.right, merge.distance, merge.mass]));
-      result.visualization?.coordinates.forEach((point, ordinal) => db.run("INSERT INTO visualization_points(result_id,ordinal,path,x,y,leaf_label) VALUES(?,?,?,?,?,?)", [resultId, ordinal, result.ids[ordinal], point[0], point[1], result.visualization!.labels[ordinal] ?? result.leafLabels[ordinal]]));
+      const suppliedCoordinates = result.visualization?.coordinates || result.ids.map((path) => options.coordinates?.[path]);
+      suppliedCoordinates.forEach((point, ordinal) => { if (!point) return; db.run("INSERT INTO visualization_points(result_id,ordinal,path,x,y,leaf_label) VALUES(?,?,?,?,?,?)", [resultId, ordinal, result.ids[ordinal], point[0], point[1], result.visualization?.labels[ordinal] ?? result.leafLabels[ordinal]]); });
       for (const [node, title] of Object.entries(result.titles || {})) db.run("INSERT INTO cluster_titles(result_id,node_id,title) VALUES(?,?,?)", [resultId, Number(node), title]);
       if (result.softMemberships) result.softMemberships.forEach((row, ordinal) => row.forEach((membership, leafIndex) => db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, result.ids[ordinal], (result.leafOrder || result.hierarchy.leaves)[leafIndex], membership])));
       for (const [path, memberships] of Object.entries(options.softMemberships || {})) for (const [leaf, membership] of Object.entries(memberships)) db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, path, Number(leaf), membership]);
