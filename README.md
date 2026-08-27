@@ -1,53 +1,132 @@
-# DBpedia 임베딩 클러스터링
+# 의미 임베딩 계층 클러스터링
 
-DBpedia 문서 임베딩을 대상으로 **Spherical Fuzzy C-Means(SFCM)** 기반 클러스터링과 증분 업데이트를 실험·운영하는 프로젝트입니다. 현재 기본 경로는 본문 임베딩을 PCA로 축소한 뒤 SFCM으로 군집화하는 방식입니다.
+문서와 원자적 노트를 수동 폴더 분류 없이 의미 기반으로 정리하기 위한 연구 프로젝트입니다. 하나의 문서가 여러 주제에 걸칠 수 있다는 전제에서 소프트 소속도, 계층 구조, 증분 업데이트를 함께 다룹니다.
+
+> **현재 기본 경로:** 본문 임베딩 → 정규화 PCA → 계층형 Spherical Fuzzy C-Means(SFCM)
+>
+> **최신 연구 후보:** UMAP 공간에서 HDBSCAN leaf를 찾고, PCA 의미 공간에서 bottom-up으로 병합하는 계층화 방식입니다. 초기 결과는 유망하지만 아직 기본 알고리즘을 대체하지 않습니다.
+
+## 프로젝트 목표
+
+- 원자적 노트를 별도의 수동 청킹 없이 검색·클러스터링 단위로 사용합니다.
+- 서로 의미가 겹치는 노트를 하나의 하드 라벨 대신 여러 군집의 소프트 소속도로 표현합니다.
+- 군집화 공간과 2차원 시각화 공간을 분리해, 보기 좋은 투영이 군집 구조를 결정하지 않게 합니다.
+- 새 문서가 들어올 때 전체 데이터를 항상 다시 계산하지 않고 상태를 안전하게 갱신합니다.
+- 태그와 노트의 흐름은 본문 임베딩에 직접 더하지 않고 metadata, 링크, prior, reranking 같은 별도 채널로 보존합니다.
 
 ## 현재 상태
 
 | 영역 | 상태 | 요약 |
 | --- | --- | --- |
-| 증분 계층형 클러스터링 | 완료 · 통합됨 | ID 기반 추가/교체, 선택적 membership 갱신, 드리프트 기반 재클러스터링을 지원합니다. |
-| 상태 저장 및 재실행 안전성 | 완료 | batch ID 멱등성, checksum envelope, atomic save, 동시 update 직렬화, 이전 상태 호환성을 갖춥니다. |
-| 성능 기준선 | 측정 완료 | 2026-08-08 기준 3,000건 Gemini 임베딩에서 fast 모드 fit 77.7초, 일반 update 5.43초를 기록했습니다. 최근 fuzzifier 비교는 아래 검증 결과를 참조합니다. |
-| 태그 융합 | 운영 검증 전 | fixed `K=10` 합성 sweep으로 이득·손해 조건은 확인했지만, 실제 운영 태그와 K 미지의 계층 경로 검증이 남았습니다. 기본 경로에는 넣지 않았습니다. |
+| 계층형 SFCM | 기본 경로 | PCA 차원, fuzzifier, 노드별 K를 데이터에 맞춰 선택하고 계층별 소프트 소속도를 생성합니다. |
+| 증분 업데이트 | 구현 완료 | ID 기반 추가·교체, 선택적 membership 갱신, 드리프트 재클러스터링, 멱등 batch 처리, checksum·atomic save를 지원합니다. |
+| HDBSCAN bottom-up | 연구 구현 완료 | 24개 leaf 발견과 PCA 공간 병합을 구현했습니다. 자동 cut, seed 안정성, 별도 평가 데이터, 증분 정책 검증이 남았습니다. |
+| HDBSCAN noise 소프트 할당 | 비교 실험 | 근사 medoid와 최근접 문서 거리 기반의 사후 소속도를 비교합니다. 기본 클러스터링 경로는 아닙니다. |
+| 원자적 노트 임베딩 비교 | 데이터 준비 | Gemini의 classification, retrieval_document, task type 미지정 임베딩 파일이 추가되어 있습니다. |
+| 태그 융합 | 기본 경로에서 제외 | 합성 실험에서 태그 가중치를 줄일수록 좋아지는 조건이 확인되어 early fusion을 채택하지 않았습니다. |
 
-### 현재 결론
+## 알고리즘 구성
 
-- 기본 설계는 `content → PCA → SFCM`입니다.
-- 500건 이상 노드의 최초 K는 기본적으로 20% 독립 표본의 3/5 다수결로 고른 뒤, 선택된 K만 전체 데이터에서 적합합니다. 합의가 없거나 전체 적합이 유효하지 않으면 기존 전체 K 탐색으로 자동 복귀합니다.
-- `--fuzzifier`를 생략하면 안정성 probe로 `m`을 선택합니다. 기본 후보는 `1.2, 1.4, 1.6, 1.8, 2.0`이며, `--fast`에서는 안정적인 부모 노드의 값을 자식이 재사용할 수 있습니다.
-- 태그는 곧바로 임베딩에 합치지 않고, 검증 전까지 metadata·prior·reranking 후보 채널로 분리합니다.
-- 증분 업데이트는 전체 문서를 매번 다시 계산하지 않습니다. 중심 이동의 영향이 충분한 문서와 새로 추가·수정된 문서만 membership을 갱신하고, 자연 noise 또는 XB 품질 저하가 감지될 때 전체 재클러스터링을 수행합니다.
+### 기본 운영 경로
 
-## 선택의 타임라인
+~~~text
+JSON 임베딩
+  → 행별 L2 정규화
+  → 클러스터링용 PCA 차원 자동 선택
+  → 안정성 probe로 fuzzifier 선택
+  → 재귀 Spherical FCM
+  → multi-metric 또는 표본 합의 기반 K 선택
+  → core / boundary / noise 판정
+  → 계층별 지역 소속도와 경로 소속도
+  → 별도의 시각화 PCA + 약지도 UMAP-2
+  → 모델·중심·좌표·증분 통계를 상태 파일로 저장
+~~~
 
-프로젝트에서 지금까지 선택한 방향과 그 판단 근거입니다.
+기준 진입점은 **incremental_clustering.py**의 fit/update입니다. 구현과 기본값의 상세 명세는 [현재 알고리즘 문서](.mds/CURRENT_ALGORITHM.md)를 참조하세요.
 
-| 시점 | 선택 | 이유와 현재 반영 상태 |
-| --- | --- | --- |
-| 2026-08-02 | 하드·평면 군집 대신 **계층형 구면 FCM** 채택 | 문서는 여러 주제에 걸칠 수 있고 주제에는 상·하위 구조가 있으므로, 하나의 하드 라벨보다 소프트 소속도와 재귀 분할을 보존하기로 했습니다. 입력과 중심을 단위 구면에 두어 의미적 방향을 기준으로 계산합니다. |
-| 2026-08-02 | 군집화와 2차원 시각화를 분리 | UMAP에서 잘 갈라져 보인다고 해서 의미 군집이 좋은 것은 아니므로, 군집은 고차원 PCA 공간에서 수행하고 UMAP은 결과를 보여 주는 역할로 한정했습니다. |
-| 2026-08-03 | 지역 소속도를 조건부 경로 소속도로 저장 | 서로 다른 부모 노드의 소속도를 직접 비교하지 않고, 부모까지의 확률을 곱한 경로 확률로 비교 가능하게 만들었습니다. 현재 이 상세 출력은 필요한 경우에만 opt-in합니다. |
-| 2026-08-03 | 시각화에 소프트 소속도를 약하게만 반영 | 군집 라벨이 원래 임베딩 구조를 덮어쓰지 않도록 UMAP의 약지도 목표 가중치를 `0.01`로 낮게 유지했습니다. |
-| 2026-08-03~04 | PCA 차원을 작업별로 분리한 뒤 자동 선택으로 전환 | 과거 고정 PCA-256(군집)·PCA-64(시각화) 비교를 바탕으로, 현재는 데이터별 k-NN 보존율이 포화되기 전의 차원을 각각 자동 선택합니다. |
-| 2026-08-04 | 고정 K 대신 노드별 `multi_metric` K 선택 | 계층의 모든 노드를 같은 수로 나누지 않고, XB·실루엣·재시작 안정성·분할 계수를 함께 평가해 데이터가 지지하는 경우에만 분할합니다. |
-| 2026-08-04 | 경계·이상치 문서를 별도 판정하고, 품질 악화 때만 재클러스터링 | 낮은 소속도·중심 거리·XB 악화를 함께 사용해 무조건적인 재학습과 과도한 분할을 피하도록 했습니다. |
-| 2026-08-05 | 실험과 빠른 반복을 위해 `--fast` 경로와 재현 가능한 표본 추출 추가 | K 탐색용 표본, 적응적 fuzzifier, 제한된 refinement를 사용하되, 일반 선택기는 유지해 정확도와 탐색 속도를 구분했습니다. |
-| 2026-08-05 | 실제 검증 데이터로 18개 태그 라벨 파일 대신 3,000건 Gemini 임베딩 사용 | 작은 태그 전용 파일은 클러스터링 품질·증분 처리 성능을 검증할 데이터가 아니므로, 표본 검증도 Gemini 데이터에서 수행하기로 했습니다. |
-| 2026-08-05 | 정답 class에서 만든 태그 결합 결과를 운영 근거로 쓰지 않음 | 초기 태그 실험은 태그 신호의 상한을 확인했지만, 실제 운영 태그가 아니었습니다. 따라서 태그를 기본 경로에 편입하지 않고 별도 검증 대상으로 남겼습니다. |
-| 2026-08-05 | 증분 상태를 문서별 outer product 대신 compact weight로 저장 | 상태 크기와 일반 update 비용을 낮추기 위해서입니다. 변경된 ID의 contribution만 빼고 더하는 delta update를 기본으로 채택했습니다. |
-| 2026-08-06 | 전체 membership refresh 대신 중심 영향 기반의 선택 refresh | 중심이 충분히 움직였고 fuzzy weight가 큰 문서, 그리고 신규·수정 문서만 다시 계산하도록 선택했습니다. 전체 갱신은 실제 재클러스터링 때만 수행합니다. |
-| 2026-08-06 | 즉시 noise 반응 대신 누적·EWMA·hysteresis·cooldown 기반 드리프트 판정 | 작은 배치의 우연한 noise로 재클러스터링이 반복되는 것을 막기 위해서입니다. |
-| 2026-08-07 | flat/계층형 경로의 batch 처리 규칙을 공통 코어로 통합 | append/replace, batch ID 멱등성, replay 기록, atomic save를 동일한 방식으로 보장하기 위해서입니다. |
-| 2026-08-08~09 | 수학적으로 동등한 계산 재사용과 혼합 정밀도 저장을 우선 | FCM 거리·membership 계산과 PCA 탐색의 중복을 줄이고, 임베딩·상태는 기본 `float32`, 중심·품질 통계는 `float64`로 유지해 결과를 보존하면서 CPU·RSS를 낮췄습니다. |
-| 2026-08-09 | Python worker 병렬화는 보류 | 2 CPU 환경의 측정에서 순차 실행보다 느렸습니다. 따라서 복잡한 병렬화보다 입력 cache·lazy import·수치 계산 재사용을 우선합니다. |
-| 2026-08-13 | 큰 노드의 기본 최초 K 선택을 표본 합의 방식으로 전환 | 20% 표본의 단일 선택은 불안정했지만 5개 독립 표본 중 3표 다수결은 3,000건 검증 조건 9/9에서 전체 선택 K와 일치했습니다. 선택 K는 전체 데이터에서 다시 적합하며, 합의 실패 시 exact 탐색으로 복귀합니다. |
-| 2026-08-14~15 | 안정성 기반 fuzzifier 선택을 기본화하고 geometry·운영 경로를 재검증 | 기본 경로는 `m=2.0` 고정이 아니라 안정적인 후보를 선택합니다. 3,000건 Gemini, seed 42~44 비교에서 자동 경로는 모두 `m=1.2`를 선택했고, fast 자동 경로는 일반 자동 경로보다 평균 약 2.03배 빨랐습니다. 이 결과는 해당 데이터셋의 비교 근거이며 모든 데이터에 대한 보증은 아닙니다. |
-| 현재 | 태그의 early fusion을 기본 경로에서 제외하고 `content → PCA → SFCM` 유지 | 태그 신호 자체는 확인하되, 현재 품질에서는 본문 공간의 기하를 해칠 가능성이 있습니다. 합성 데이터의 control·ablation 실험으로 이득 조건이 확인될 때만 결합 방식을 채택합니다. |
+### HDBSCAN bottom-up 연구 경로
 
-## 최근 검증 및 기준선
+~~~text
+원본 임베딩
+  → L2 정규화
+  → PCA-96
+  → PCA 결과 L2 정규화
+  → UMAP-20
+  → HDBSCAN으로 flat leaf 발견
+  → PCA 공간에서 membership 가중 leaf 중심 계산
+  → 중심 cosine 거리의 질량 가중 average linkage
+  → 원하는 K에서 트리 절단
+~~~
 
-Gemini 임베딩 데이터셋(3,000건, 3,072차원), seed `42`, `--fast`, 시각화 포함 조건에서 측정한 값입니다. update 크기는 입력의 4%입니다.
+HDBSCAN은 leaf 발견에만 사용하고 상위 계층은 PCA 의미 공간에서 만듭니다. 구현은 **hdbscan_bottom_up.py**, 연구 과정과 한계는 [HDBSCAN bottom-up 연구 문서](.mds/HDBSCAN_BOTTOM_UP_RESEARCH.md)에 있습니다.
+
+## 데이터
+
+| 파일 | 용도 |
+| --- | --- |
+| **dbpedia_gemini_embeddings.json.gz** | 현재 주 검증 데이터. DBpedia 문서 3,000건, Gemini 임베딩 3,072차원입니다. |
+| **dbpedia_label_embeddings.json** | 태그 라벨 18개의 임베딩입니다. 클러스터링 품질·성능 검증에 사용하지 않습니다. |
+| **notes_gemini_classification_embeddings.json** | 원자적 노트의 classification task type 임베딩입니다. |
+| **notes_gemini_retrieval_document_embeddings.json** | 같은 노트의 retrieval_document task type 임베딩입니다. |
+| **notes_gemini_task_type_unspecified_embeddings.json** | 같은 노트의 task type 미지정 임베딩입니다. |
+
+DBpedia는 재현 가능한 기준선으로 유지합니다. 다음 일반화 평가는 더 어렵고 주제 중첩이 많은 위키형 문서 데이터로 확장할 예정입니다.
+
+## 설치
+
+Python 가상환경을 만들고 의존성을 설치합니다.
+
+~~~bash
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+~~~
+
+## 실행
+
+### 빠른 기본 적합
+
+Gemini DBpedia 데이터 100건 표본으로 클러스터링 경로를 빠르게 확인합니다.
+
+~~~bash
+./.venv/bin/python incremental_clustering.py fit   --input-json dbpedia_gemini_embeddings.json.gz   --dataset-sample-size 100   --dataset-sample-seed 42   --fast   --state-output /tmp/incremental-fast.state.pkl   --skip-visualization
+~~~
+
+시각화와 증분 업데이트에 사용할 최종 상태를 만들 때는 **--skip-visualization**을 제거하고 출력 경로를 지정합니다.
+
+~~~bash
+./.venv/bin/python incremental_clustering.py fit   --input-json dbpedia_gemini_embeddings.json.gz   --state-output results/model.state.pkl   --assignments-output results/model_assignments.csv   --coordinates-output results/model_coordinates.csv   --tree-output results/model_tree.json   --plot-output results/model_scatter.png
+~~~
+
+### 증분 업데이트
+
+~~~bash
+./.venv/bin/python incremental_clustering.py update   --state results/model.state.pkl   --input-json new_embeddings.json   --state-output results/model_updated.state.pkl   --assignments-output results/model_updated_assignments.csv   --coordinates-output results/model_updated_coordinates.csv
+~~~
+
+기존 ID는 교체되고 새 ID는 추가됩니다. 저장된 PCA, 계층 중심, UMAP 좌표계를 재사용하며 드리프트 조건을 넘을 때만 전체 재클러스터링합니다.
+
+### HDBSCAN bottom-up 재현
+
+~~~bash
+./.venv/bin/python hdbscan_bottom_up.py   --input-json dbpedia_gemini_embeddings.json.gz   --output-dir benchmarks/hdbscan-bottom-up-2026-08-15
+~~~
+
+이 스크립트는 현재 평가용 metadata인 class와 3단계 class_hierarchy를 요구합니다. 결과는 report.json과 assignments.csv.gz에 저장됩니다.
+
+### 기타 실험 진입점
+
+| 파일 | 용도 |
+| --- | --- |
+| **full_pipeline.py** | flat Auto-PCA SFCM과 시각화 전체 파이프라인 |
+| **hdbscan_soft_pipeline.py** | HDBSCAN noise의 medoid·최근접점 사후 소속도 비교 |
+| **benchmark_incremental_updates.py** | fit, update, 선택 refresh, 상태 크기, peak RSS 측정 |
+| **benchmark_production_m_fuzzifier.py** | 고정·자동 fuzzifier 경로 비교 |
+
+## 검증 결과
+
+### 계층형 SFCM 증분 기준선 — 2026-08-08
+
+Gemini 3,000건, seed 42, **--fast**, 시각화 포함, update 크기 4% 조건입니다.
 
 | 입력 문서 수 | fit | 일반 update | 선택 refresh | refresh / skip | 상태 파일 | peak RSS |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -56,114 +135,56 @@ Gemini 임베딩 데이터셋(3,000건, 3,072차원), seed `42`, `--fast`, 시�
 | 1,000 | 39.2초 | 4.94초 | 0.37초 | 40 / 940 | 38.5 MB | 0.97 GB |
 | 3,000 | 77.7초 | 5.43초 | 1.51초 | 120 / 2,820 | 88.4 MB | 1.36 GB |
 
-증분 리팩터 통합 뒤 루트 테스트 57개와 gzip 입력 100건 fast-fit smoke test를 통과했습니다.
+### HDBSCAN bottom-up 탐색 결과 — 2026-08-15
 
-### 최신 fuzzifier 검증 (2026-08-15)
+Gemini 3,000건, seed 42, PCA-96, UMAP-20, min_cluster_size 40, min_samples 2 조건입니다. HDBSCAN이 24개 leaf를 찾았고 100건, 3.33%를 noise로 판정했습니다. 전체 실행 시간은 36.84초였습니다.
 
-Gemini 3,000건에서 seed `42, 43, 44`, 시각화 제외 조건으로 고정 `m=2.0`,
-고정 `m=1.2`, 일반 자동 `m`, fast 자동 `m`을 비교했습니다. 일반 자동 경로는
-세 seed 모두 `m=1.2`를 골랐고, fast 자동 경로는 평균 실행 시간 `66.9초`,
-일반 자동 경로는 `135.5초`였습니다. 외부 top/leaf NMI·ARI의 비가중 평균은
-각각 `0.3848`, `0.3772`였습니다. 자세한 조건과 seed별 결과는
-[`production-m-fuzzifier` 보고서](benchmarks/production-m-fuzzifier-2026-08-15/report.json)에
-있습니다.
+| 평가 레벨 | 사용한 cut K | NMI | ARI | noise |
+| --- | ---: | ---: | ---: | ---: |
+| top | 6 | 0.7162 | 0.6493 | 3.33% |
+| middle | 17 | 0.7945 | 0.6421 | 3.33% |
+| leaf | 18 | 0.8222 | 0.7122 | 3.33% |
+| 병합 전 leaf | 24 | 0.8351 | 0.7477 | 3.33% |
 
-## 빠른 실행
+상세 결과는 [benchmark report](benchmarks/hdbscan-bottom-up-2026-08-15/report.json)에 있습니다.
 
-의존성을 설치합니다.
+이 수치는 일반화 성능이나 최종 승자 판정이 아닙니다.
 
-```bash
-./.venv/bin/python -m pip install -r requirements.txt
-```
+- 같은 3,000건으로 UMAP·HDBSCAN 설정을 탐색하고 평가했습니다.
+- 6, 17, 18이라는 정답 군집 수를 알고 트리를 잘랐습니다.
+- HDBSCAN 경로에는 아직 자동 계층 레벨 선택과 완성된 증분 업데이트가 없습니다.
+- 기존 SFCM 비교와 출력 구조·비용 범위가 완전히 같지 않습니다.
 
-Gemini 데이터에서 빠르게 초기 상태를 적합합니다. `dbpedia_label_embeddings.json`은 태그 라벨 18개만 가진 파일이므로 클러스터링 검증에 사용하지 않습니다.
+### 자동 fuzzifier 검증 — 2026-08-15
 
-```bash
-./.venv/bin/python incremental_clustering.py fit \
-  --input-json dbpedia_gemini_embeddings.json.gz \
-  --dataset-sample-size 100 \
-  --dataset-sample-seed 42 \
-  --fast \
-  --state-output /tmp/incremental-fast.state.pkl \
-  --skip-visualization
-```
+Gemini 3,000건의 seed 42, 43, 44에서 일반 자동 경로와 fast 자동 경로는 모두 m=1.2를 선택했습니다. fast 자동 경로의 평균 실행 시간은 66.9초, 일반 자동 경로는 135.5초였습니다. 이는 해당 데이터셋의 비교 결과이며 다른 데이터에 대한 보증이 아닙니다. 자세한 값은 [production fuzzifier report](benchmarks/production-m-fuzzifier-2026-08-15/report.json)에 있습니다.
 
-시각화와 함께 flat Auto-PCA SFCM 전체 파이프라인을 실행하려면 다음을 사용합니다.
+## 핵심 설계 결정
 
-```bash
-./.venv/bin/python full_pipeline.py \
-  --input-json dbpedia_gemini_embeddings.json.gz \
-  --output-dir results/full_pipeline \
-  --fast
-```
+- 기본 경로는 **content → PCA → SFCM**이며 태그를 임베딩에 직접 합치지 않습니다.
+- 원본 임베딩은 보존하고 PCA는 군집화와 시각화를 위한 파생 표현으로 취급합니다.
+- UMAP은 군집을 만드는 기준이 아니라 결과 탐색과 시각화를 위한 별도 모델입니다.
+- 서로 다른 부모의 지역 membership을 직접 비교하지 않고 부모까지의 확률을 곱한 경로 membership을 사용합니다.
+- 노트의 순서·흐름은 클러스터 좌표에 강제로 넣기보다 원문 ID, metadata, 외부 링크로 보존합니다.
+- HDBSCAN bottom-up은 현재 가장 유망한 대안이지만 검증 항목을 통과하기 전까지 독립 연구 트랙으로 유지합니다.
 
-원래 HDBSCAN noise 문서에 대해 대표점(근사 메도이드) 거리와 클러스터 내 최근접
-5개 문서 거리의 소프트 소속도를 비교하려면 다음을 사용합니다.
+의사결정의 전체 타임라인은 [프로젝트 결정 기록](.mds/PROJECT_DECISION_HISTORY.md)에 있습니다.
 
-```bash
-./.venv/bin/python hdbscan_soft_pipeline.py \
-  --input-json dbpedia_gemini_embeddings.json.gz \
-  --dataset-sample-size 100 \
-  --dataset-sample-seed 42 \
-  --pca-components 8 \
-  --min-cluster-size 5 \
-  --min-samples 3 \
-  --output-dir results/hdbscan_soft
-```
+## 다음 연구 순서
 
-`assignments.csv`에는 원래 HDBSCAN 라벨과 대표점 기준 최종 `cluster`, 두 방식의
-추천 라벨·최대 소속도·각 membership 열이 기록됩니다. 대표점 방식만 최종 라벨에
-반영하며, 기본 임계값 `0.60` 미만은 noise(`-1`)로 유지합니다. 이 값들은 HDBSCAN이
-제공하는 자체 확률이 아니라, PCA·L2 정규화 공간의 코사인 거리로 계산한 사후 비교
-지표입니다.
+1. HDBSCAN seed 42, 43, 44, 45, 46의 partition 안정성, noise Jaccard, leaf 중심 안정성을 측정합니다.
+2. 정답 군집 수 없이 merge gap, silhouette, bootstrap 안정성, 복잡도 페널티로 계층 cut을 선택합니다.
+3. 개발·평가 데이터를 분리하고 더 어려운 위키형 데이터에서 DBpedia 결과가 일반화되는지 확인합니다.
+4. HDBSCAN leaf membership을 부모로 합산한 공통 soft hierarchy 출력과 증분 drift 정책을 설계합니다.
+5. 원자적 노트에서 Gemini embedding task type 세 가지가 검색·소프트 클러스터링에 미치는 영향을 비교합니다.
+6. 태그는 early fusion보다 metadata prior와 reranking을 우선 비교합니다.
 
-### HDBSCAN 소프트 소속도 비교 실행 기록 (2026-08-15)
-
-위 명령의 Gemini 데이터셋 100건 표본(`seed=42`, PCA 8차원, `min_cluster_size=5`,
-`min_samples=3`)을 한 번 실행한 결과는 다음과 같습니다.
-
-| 항목 | 결과 |
-| --- | ---: |
-| HDBSCAN hard cluster 수 | 9 |
-| 원래 noise 문서 수 | 12 |
-| 대표점 방식 재배정 수 (`>= 0.60`) | 0 |
-| 최근접점 방식 재배정 수 (`>= 0.60`) | 0 |
-| noise 추천 라벨 일치율 | 50.0% |
-| 평균 confidence 차이 (대표점 − 최근접점) | 0.0555 |
-| 평균 절대 confidence 차이 | 0.0611 |
-
-이 작은 표본과 기본 임계값에서는 두 방법 모두 원래 noise를 보수적으로 유지했습니다.
-이는 품질 일반화 결과가 아니라 파이프라인이 실제 데이터에서 동작하는지 확인한
-스모크 실행 기록입니다. 세부 문서별 결과와 클러스터별 메도이드는
-[`assignments.csv`](results/hdbscan_soft/assignments.csv)와
-[`summary.json`](results/hdbscan_soft/summary.json)에 저장되어 있습니다.
-
-증분 처리 비용을 측정하려면 다음을 사용합니다.
-
-```bash
-./.venv/bin/python benchmark_incremental_updates.py \
-  --input-json dbpedia_gemini_embeddings.json.gz \
-  --dataset-sample-size 100 \
-  --update-size 10 \
-  --fast \
-  --output-json /tmp/incremental-benchmark.json
-```
-
-## 다음 연구 작업
-
-태그 융합은 아직 제품 경로에 반영하지 않았습니다. fixed `K=10` 합성 sweep에서는
-태그 corruption·content noise·weight에 따라 early fusion의 이득과 손해가 전환됨을
-확인했습니다. 다음 단계는 해당 결론을 운영 조건에 맞게 좁히는 일입니다.
-
-1. K를 모르는 계층 경로에서 content-only·observed/oracle/shuffled tag와 fusion ablation을 다시 평가합니다.
-2. 정답 `class`에서 만든 태그 대신 실제 수집 태그의 누락·오분류·구조적 오류를 모델링합니다.
-3. early fusion과 metadata prior·reranking을 같은 soft membership 및 경계 문서 지표로 비교합니다.
-
-세부 가설과 완료 범위는 [합성 데이터 기반 태그 융합 실험 계획서](SYNTHETIC_TAG_FUSION_EXPERIMENT_PLAN.md),
-완료된 sweep의 수치는 [결과 문서](benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md)에 정리되어 있습니다.
+태그 실험의 세부 범위는 [합성 태그 융합 계획](SYNTHETIC_TAG_FUSION_EXPERIMENT_PLAN.md)과 [완료된 결과](benchmarks/synthetic-tag-fusion-2026-08-09/RESULTS.md)에 있습니다.
 
 ## 테스트
 
-```bash
+~~~bash
 ./.venv/bin/python -m unittest discover -s . -p 'test_*.py'
-```
+~~~
+
+2026-08-15의 마지막 기록에서는 전체 테스트 113개가 통과했습니다.
