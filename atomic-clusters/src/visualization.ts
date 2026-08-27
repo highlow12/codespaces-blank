@@ -16,6 +16,10 @@ export interface VisualizationCamera { scale: number; offsetX: number; offsetY: 
 export interface VisualizationCameraLayerTransform { scale: number; translateX: number; translateY: number; }
 export interface VisualizationSplat { x: number; y: number; sigma: number; color: [number, number, number]; amplitude: number; }
 export interface VisualizationDensityField { width: number; height: number; density: Float32Array; red: Float32Array; green: Float32Array; blue: Float32Array; }
+export interface VisualizationHslColor { hue: number; saturation: number; lightness: number; }
+export interface VisualizationColorScheme { nodeColors: Map<string, string>; leafColors: Map<number, string>; nodeHsl: Map<string, VisualizationHslColor>; }
+export interface VisualizationLabelContrast { foreground: "#000000" | "#ffffff"; background: "#000000" | "#ffffff"; }
+export interface VisualizationLabelPlacement { id: string; text: string; x: number; y: number; width: number; height: number; contrast: VisualizationLabelContrast; }
 
 /** Build a generalized children[] tree. Binary left/right knowledge ends here. */
 export function buildVisualizationTree(hierarchy: HierarchyTree | NaryVisualizationHierarchy, labels: readonly number[]): VisualizationNode {
@@ -25,45 +29,64 @@ export function buildVisualizationTree(hierarchy: HierarchyTree | NaryVisualizat
   const merges = new Map<number, HierarchyMerge>(mergeList.map((merge) => [merge.id, merge])); const visiting = new Set<number>(); const built = new Set<number>();
   const make = (sourceId: number, depth: number): VisualizationNode => {
     if (!Number.isSafeInteger(sourceId)) throw new Error("Hierarchy contains a malformed node id"); if (visiting.has(sourceId)) throw new Error("Hierarchy contains a cycle"); if (built.has(sourceId)) throw new Error("Hierarchy contains duplicate node references"); built.add(sourceId); visiting.add(sourceId);
-    const merge = merges.get(sourceId); const futureChildren = hierarchy.children?.[String(sourceId)]; if (futureChildren !== undefined && !Array.isArray(futureChildren)) throw new Error("Hierarchy children must be arrays"); const children = (futureChildren || (merge ? [merge.left, merge.right] : [])).map((child) => make(child, depth + 1)); visiting.delete(sourceId);
+    const merge = merges.get(sourceId); const futureChildren = "children" in hierarchy ? hierarchy.children?.[String(sourceId)] : undefined; if (futureChildren !== undefined && !Array.isArray(futureChildren)) throw new Error("Hierarchy children must be arrays"); const children = (futureChildren || (merge ? [merge.left, merge.right] : [])).map((child: number) => make(child, depth + 1)); visiting.delete(sourceId);
     const leafLabels = children.length ? children.flatMap((child) => child.leafLabels) : [sourceId]; const uniqueLeaves = [...new Set(leafLabels)]; const pointIndices = labels.map((label, index) => label === sourceId || uniqueLeaves.includes(label) ? index : -1).filter((index) => index >= 0); return { id: `node:${sourceId}`, sourceId, children, leafLabels: uniqueLeaves, pointIndices, depth };
   };
   const roots = hierarchy.root === null ? hierarchy.leaves.map((leaf) => make(leaf, 1)) : [make(hierarchy.root, 1)]; return { id: "root", sourceId: null, children: roots, leafLabels: [...new Set(roots.flatMap((node) => node.leafLabels))], pointIndices: labels.map((_label, index) => index), depth: 0 };
 }
 
 export function childMembershipMass(node: VisualizationNode, row: readonly number[], leafOrdering: readonly number[]): number { const leaves = new Set(node.leafLabels); let mass = 0; for (let column = 0; column < Math.min(leafOrdering.length, row.length); column++) if (leaves.has(leafOrdering[column])) mass += Math.max(0, Number(row[column]) || 0); return mass; }
-/** Notes below 0.5 conditional membership are shown as residual dots. */
+/** Identify notes below 0.5 conditional membership as residual. */
 export function residualPointIndices(node: VisualizationNode, _labels: readonly number[], memberships: readonly number[][], leafOrdering: readonly number[]): number[] { if (!node.children.length) return node.pointIndices.slice(); return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total < 0.5; }); }
 
-/** Return the deterministic visible frontier. expandedIds contains clouds replaced by their children. */
+/**
+ * Return the visible stage for one focused node.
+ *
+ * The synthetic root is a bookkeeping node, not a cluster that should be
+ * rendered.  With no focus (or with the synthetic root focused), the first
+ * real hierarchy root is therefore opened one level and its immediate
+ * children are shown.  Every subsequent call shows only the focused node's
+ * immediate children.  A leaf is the sole exception: selecting it exposes
+ * its note points, which keeps notes hidden at every cluster stage.
+ *
+ * `expandedIds` is retained in the public signature for saved callers, but it
+ * now represents the focused node (the last valid id), rather than a set of
+ * independently expanded branches.
+ */
 export function visualizationFrontier(root: VisualizationNode, expandedIds: Iterable<string> = [], memberships?: readonly number[][], leafOrdering?: readonly number[]): VisualizationFrontierEntry[] {
-  const expanded = new Set(expandedIds); const maxDepth = visualizationTreeDepth(root); const entries: VisualizationFrontierEntry[] = []; const emittedResidual = new Set<number>();
-  const emit = (node: VisualizationNode, inheritedResidual: ReadonlySet<number>): void => {
-    const residualIndices = [...inheritedResidual].filter((index) => !emittedResidual.has(index)); residualIndices.forEach((index) => emittedResidual.add(index));
-    const residualSet = inheritedResidual; const actualPoints = !node.children.length && expanded.has(node.id);
-    entries.push({ node, depth: node.depth, remainingDepth: Math.max(0, maxDepth - node.depth), pointIndices: node.pointIndices.filter((index) => !residualSet.has(index)), residualIndices, actualPoints });
+  const ids = [...expandedIds];
+  const find = (node: VisualizationNode, id: string): VisualizationNode | null => {
+    if (node.id === id) return node;
+    for (const child of node.children) { const found = find(child, id); if (found) return found; }
+    return null;
   };
-  const childrenWithResidual = (parent: VisualizationNode, children: readonly VisualizationNode[], inheritedResidual: ReadonlySet<number>): void => {
-    const parentResidual = memberships && leafOrdering ? residualPointIndices(parent, [], memberships, leafOrdering) : [];
-    const nextResidual = new Set(inheritedResidual); parentResidual.forEach((index) => nextResidual.add(index));
-    for (const child of children) visit(child, nextResidual);
-  };
-  const visit = (node: VisualizationNode, inheritedResidual: ReadonlySet<number>): void => {
-    if (node.id === "root" && expanded.has(node.id)) {
-      // Skip a redundant synthetic root while computing residuals against all notes.
-      const actual = node.children.length === 1 ? node.children[0] : null;
-      if (actual && actual.children.length && !expanded.has(actual.id)) {
-        // Preserve any synthetic-root residuals, but classify the first real split
-        // against the actual hierarchy root rather than its one-child wrapper.
-        const nextResidual = new Set(inheritedResidual); if (memberships && leafOrdering) residualPointIndices(node, [], memberships, leafOrdering).forEach((index) => nextResidual.add(index));
-        childrenWithResidual(actual, actual.children, nextResidual); return;
-      }
-      if (actual) { const nextResidual = new Set(inheritedResidual); if (memberships && leafOrdering) residualPointIndices(node, [], memberships, leafOrdering).forEach((index) => nextResidual.add(index)); visit(actual, nextResidual); return; }
-    }
-    if (expanded.has(node.id) && node.children.length) { childrenWithResidual(node, node.children, inheritedResidual); return; }
-    emit(node, inheritedResidual);
-  };
-  if (!expanded.size) entries.push({ node: root, depth: root.depth, remainingDepth: maxDepth, pointIndices: root.pointIndices.slice(), residualIndices: [], actualPoints: false }); else visit(root, new Set()); return entries;
+  const requested = ids.length ? ids[ids.length - 1] : "root";
+  const focused = requested === "root" ? null : find(root, requested);
+  const hierarchyRoot = root.children.length === 1 && root.children[0].children.length ? root.children[0] : root;
+  const parent = focused || hierarchyRoot;
+  const maxDepth = visualizationTreeDepth(root);
+  if (!parent.children.length) {
+    const residual = memberships && leafOrdering
+      ? new Set(visualizationPath(root, parent.id).filter((node) => node.children.length).flatMap((node) => residualPointIndices(node, [], memberships, leafOrdering)))
+      : new Set<number>();
+    return [{ node: parent, depth: parent.depth, remainingDepth: Math.max(0, maxDepth - parent.depth), pointIndices: parent.pointIndices.filter((point) => !residual.has(point)), residualIndices: [...residual], actualPoints: true }];
+  }
+  // Residual/noise is emitted once at the current boundary. Normal cluster
+  // members remain in their cloud and are not exposed as note dots until a
+  // leaf is selected. Include every internal ancestor so synthetic-root noise
+  // and residuals classified at a previous split survive zooming.
+  const residual = memberships && leafOrdering
+    ? new Set(visualizationPath(root, parent.id).filter((node) => node.children.length).flatMap((node) => residualPointIndices(node, [], memberships, leafOrdering)))
+    : new Set<number>();
+  const residualIndices = [...residual];
+  return parent.children.map((node) => ({
+    node,
+    depth: node.depth,
+    remainingDepth: Math.max(0, maxDepth - node.depth),
+    pointIndices: node.pointIndices.filter((point) => !residual.has(point)),
+    residualIndices: node === parent.children[0] ? residualIndices : [],
+    actualPoints: false,
+  }));
 }
 export function collapseVisualizationBranch(expandedIds: Iterable<string>, targetId: string): string[] { return [...expandedIds].filter((id) => id !== targetId && !id.startsWith(`${targetId}/`)); }
 export function visualizationTreeDepth(root: VisualizationNode): number { return root.children.reduce((depth, child) => Math.max(depth, visualizationTreeDepth(child)), root.depth); }
@@ -98,9 +121,55 @@ export function visualizationScaledStageSigma(baseSigma: number, remainingDepth:
 
 function rgb(value: string): [number, number, number] { return [parseInt(value.slice(1, 3), 16), parseInt(value.slice(3, 5), 16), parseInt(value.slice(5, 7), 16)]; }
 function hex(values: [number, number, number]): string { return `#${values.map((value) => Math.round(Math.max(0, Math.min(255, value))).toString(16).padStart(2, "0")).join("")}`; }
+type HslColor = VisualizationHslColor;
+
+function normalizeHue(value: number): number { return ((value % 360) + 360) % 360; }
+function clampColorChannel(value: number, minimum: number, maximum: number): number { return Math.max(minimum, Math.min(maximum, value)); }
+function hashString(value: string): number { let hash = 2166136261; for (let index = 0; index < value.length; index++) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); } return hash >>> 0; }
+function visualizationTreeSignature(node: VisualizationNode): string { return `${node.id}[${node.children.map(visualizationTreeSignature).join(",")}]`; }
+function hslToRgb(color: HslColor): [number, number, number] {
+  const h = normalizeHue(color.hue) / 360; const s = clampColorChannel(color.saturation, 0, 100) / 100; const l = clampColorChannel(color.lightness, 0, 100) / 100;
+  const chroma = (1 - Math.abs(2 * l - 1)) * s; const section = h * 6; const x = chroma * (1 - Math.abs(section % 2 - 1)); const match = l - chroma / 2; let red = 0; let green = 0; let blue = 0;
+  if (section < 1) [red, green, blue] = [chroma, x, 0]; else if (section < 2) [red, green, blue] = [x, chroma, 0]; else if (section < 3) [red, green, blue] = [0, chroma, x]; else if (section < 4) [red, green, blue] = [0, x, chroma]; else if (section < 5) [red, green, blue] = [x, 0, chroma]; else [red, green, blue] = [chroma, 0, x];
+  return [Math.round((red + match) * 255), Math.round((green + match) * 255), Math.round((blue + match) * 255)];
+}
+function hslHex(color: HslColor): string { return hex(hslToRgb(color)); }
+
+/**
+ * Build one deterministic palette for a hierarchy. Top-level sibling clusters
+ * occupy equally spaced points on the hue wheel. Descendants stay close to
+ * their parent's hue while depth and sibling order provide small, bounded
+ * hue/lightness changes. The rotation is a hash of the complete tree, so it
+ * behaves like a random rotation without changing on every render.
+ */
+export function visualizationColorScheme(root: VisualizationNode): VisualizationColorScheme {
+  const nodeColors = new Map<string, string>(); const leafColors = new Map<number, string>(); const nodeHsl = new Map<string, VisualizationHslColor>();
+  const signature = visualizationTreeSignature(root); const rotation = hashString(`atomic-clusters-palette:${signature}`) / 0x100000000 * 360;
+  const top = root.children.length === 1 && root.children[0].children.length ? root.children[0].children : root.children;
+  const base: HslColor = { hue: rotation, saturation: 70, lightness: 52 };
+  const assign = (node: VisualizationNode, color: HslColor): void => {
+    const bounded: HslColor = { hue: normalizeHue(color.hue), saturation: clampColorChannel(color.saturation, 55, 82), lightness: clampColorChannel(color.lightness, 30, 76) };
+    nodeColors.set(node.id, hslHex(bounded)); nodeHsl.set(node.id, { ...bounded }); if (!node.children.length && node.sourceId !== null) leafColors.set(node.sourceId, hslHex(bounded));
+    if (!node.children.length) return;
+    const count = node.children.length; const center = (count - 1) / 2; const denominator = Math.max(1, center); node.children.forEach((child, index) => {
+      const siblingOffset = ((index - center) / denominator) * 16; const childColor: HslColor = { hue: bounded.hue + 3.5 + siblingOffset, saturation: bounded.saturation - 1.5, lightness: bounded.lightness + 5 + ((index - center) / denominator) * 3 };
+      assign(child, childColor);
+    });
+  };
+  if (top.length) top.forEach((node, index) => assign(node, { hue: base.hue + index * 360 / top.length, saturation: base.saturation, lightness: base.lightness }));
+  // The synthetic root is not a cluster, but keeping a color for it makes
+  // callers that render every tree node behave consistently.
+  if (!nodeColors.has(root.id)) { nodeColors.set(root.id, VISUALIZATION_NOISE_COLOR); nodeHsl.set(root.id, { hue: 0, saturation: 0, lightness: 62 }); }
+  if (root.children.length === 1 && root.children[0].children.length) { nodeColors.set(root.children[0].id, hslHex(base)); nodeHsl.set(root.children[0].id, { ...base }); }
+  return { nodeColors, leafColors, nodeHsl };
+}
+export const visualizationClusterColors = visualizationColorScheme;
+/** Return the single color used for every splat in a cluster cloud. */
+export function visualizationCloudColor(node: VisualizationNode, palette: Pick<VisualizationColorScheme, "nodeColors">): string { return palette.nodeColors.get(node.id) || VISUALIZATION_NOISE_COLOR; }
+
 /** Normalize membership only for hue; unexplained mass never pulls the hue toward grey. */
-export function visualizationColorVector(row: readonly number[], leafOrdering: readonly number[]): [number, number, number] { let total = 0; let red = 0; let green = 0; let blue = 0; for (let index = 0; index < Math.min(row.length, leafOrdering.length); index++) { const weight = Math.max(0, Number(row[index]) || 0); if (!weight) continue; const [r, g, b] = rgb(visualizationColor(leafOrdering[index])); red += r * weight; green += g * weight; blue += b * weight; total += weight; } return total <= EPSILON ? rgb(VISUALIZATION_NOISE_COLOR) : [red / total, green / total, blue / total]; }
-export function blendVisualizationColor(row: readonly number[], leafOrdering: readonly number[]): string { return hex(visualizationColorVector(row, leafOrdering)); }
+export function visualizationColorVector(row: readonly number[], leafOrdering: readonly number[], leafColors?: ReadonlyMap<number, string>): [number, number, number] { let total = 0; let red = 0; let green = 0; let blue = 0; for (let index = 0; index < Math.min(row.length, leafOrdering.length); index++) { const weight = Math.max(0, Number(row[index]) || 0); if (!weight) continue; const [r, g, b] = rgb(leafColors?.get(leafOrdering[index]) || visualizationColor(leafOrdering[index])); red += r * weight; green += g * weight; blue += b * weight; total += weight; } return total <= EPSILON ? rgb(VISUALIZATION_NOISE_COLOR) : [red / total, green / total, blue / total]; }
+export function blendVisualizationColor(row: readonly number[], leafOrdering: readonly number[], leafColors?: ReadonlyMap<number, string>): string { return hex(visualizationColorVector(row, leafOrdering, leafColors)); }
 export function visualizationColor(label: number): string { return !Number.isSafeInteger(label) || label < 0 ? VISUALIZATION_NOISE_COLOR : TAB20[label % TAB20.length]; }
 export function visualizationP95RowSum(memberships: readonly number[][]): number { const values = memberships.map((row) => row.reduce((sum, value) => sum + Math.max(0, Number(value) || 0), 0)).sort((a, b) => a - b); return values.length ? values[Math.min(values.length - 1, Math.ceil(values.length * 0.95) - 1)] || 0 : 0; }
 export function visualizationMembershipAmplitude(row: readonly number[], p95RowSum: number): number { const sum = row.reduce((total, value) => total + Math.max(0, Number(value) || 0), 0); const confidence = p95RowSum > EPSILON ? Math.max(0, Math.min(1, sum / p95RowSum)) : 0; return 0.25 + 0.75 * Math.sqrt(confidence); }
@@ -108,8 +177,15 @@ export function visualizationMembershipAmplitude(row: readonly number[], p95RowS
 export function scaleVisualizationPoints(coordinates: readonly VisualizationCoordinate[], width: number, height: number, padding = VISUALIZATION_POINT_PADDING): VisualizationCoordinate[] { if (!coordinates.length || width <= 0 || height <= 0) return []; const safePadding = Math.max(0, Math.min(padding, Math.min(width, height) / 2)); const minX = Math.min(...coordinates.map(([x]) => x)); const maxX = Math.max(...coordinates.map(([x]) => x)); const minY = Math.min(...coordinates.map(([, y]) => y)); const maxY = Math.max(...coordinates.map(([, y]) => y)); const rangeX = maxX - minX; const rangeY = maxY - minY; const drawableWidth = Math.max(0, width - safePadding * 2); const drawableHeight = Math.max(0, height - safePadding * 2); const scale = Math.min(rangeX > 0 ? drawableWidth / rangeX : Number.POSITIVE_INFINITY, rangeY > 0 ? drawableHeight / rangeY : Number.POSITIVE_INFINITY); const finiteScale = Number.isFinite(scale) ? scale : 0; const contentWidth = rangeX * finiteScale; const contentHeight = rangeY * finiteScale; const offsetX = safePadding + (drawableWidth - contentWidth) / 2; const offsetY = safePadding + (drawableHeight - contentHeight) / 2; return coordinates.map(([x, y]) => [offsetX + (rangeX > 0 ? (x - minX) * finiteScale : 0), offsetY + (rangeY > 0 ? (maxY - y) * finiteScale : 0)]); }
 /** Camera maps one selected world region into the canvas; all coordinates remain global. */
 export function visualizationCameraTransform(region: { minX: number; maxX: number; minY: number; maxY: number }, width: number, height: number, padding = VISUALIZATION_POINT_PADDING): VisualizationCamera { const safeWidth = Math.max(1, width), safeHeight = Math.max(1, height); const safePadding = Math.max(0, Math.min(padding, Math.min(safeWidth, safeHeight) / 2)); const rangeX = Math.max(EPSILON, region.maxX - region.minX), rangeY = Math.max(EPSILON, region.maxY - region.minY); const scale = Math.min((safeWidth - safePadding * 2) / rangeX, (safeHeight - safePadding * 2) / rangeY); const contentWidth = rangeX * scale, contentHeight = rangeY * scale; return { scale, offsetX: safePadding + (safeWidth - safePadding * 2 - contentWidth) / 2 - region.minX * scale, offsetY: safePadding + (safeHeight - safePadding * 2 - contentHeight) / 2 + region.maxY * scale, width: safeWidth, height: safeHeight, worldRegion: region }; }
-/** Smoothstep easing used by camera navigation. */
-export function visualizationEaseInOut(progress: number): number { const t = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0)); return t * t * (3 - 2 * t); }
+/**
+ * Quintic ease-in-out used by camera navigation. Its zero velocity at both
+ * endpoints avoids the perceptual "snap" that smoothstep can leave when a
+ * semantic stage is replaced, while remaining monotonic for interpolation.
+ */
+export function visualizationEaseInOut(progress: number): number {
+  const t = Math.max(0, Math.min(1, Number.isFinite(progress) ? progress : 0));
+  return t < 0.5 ? 16 * t ** 5 : 1 - 16 * (1 - t) ** 5;
+}
 /**
  * Return the uniform CSS transform that maps target-camera pixels into the
  * interpolated source-to-target camera. Density is therefore rasterized only
@@ -117,12 +193,35 @@ export function visualizationEaseInOut(progress: number): number { const t = Mat
  */
 export function visualizationCameraLayerTransform(from: VisualizationCamera, to: VisualizationCamera, progress: number): VisualizationCameraLayerTransform {
   const eased = visualizationEaseInOut(progress);
+  if (eased <= 0) {
+    const sourceScale = to.scale === 0 ? 1 : from.scale / to.scale;
+    return { scale: sourceScale, translateX: from.offsetX - sourceScale * to.offsetX, translateY: from.offsetY - sourceScale * to.offsetY };
+  }
+  if (eased >= 1) return { scale: 1, translateX: 0, translateY: 0 };
   const sourceScale = to.scale === 0 ? 1 : from.scale / to.scale;
   const sourceX = from.offsetX - sourceScale * to.offsetX;
   const sourceY = from.offsetY - sourceScale * to.offsetY;
   return { scale: sourceScale + (1 - sourceScale) * eased, translateX: sourceX * (1 - eased), translateY: sourceY * (1 - eased) };
 }
 export const visualizationCameraTransitionTransform = visualizationCameraLayerTransform;
+/**
+ * Transform an image rendered with the source camera into the destination
+ * camera. Unlike visualizationCameraLayerTransform (which maps the already
+ * rendered destination stage back to the source at t=0), this starts at the
+ * source image's identity transform and ends at the destination mapping.
+ * This is used for the outgoing snapshot during semantic-stage navigation.
+ */
+export function visualizationOutgoingLayerTransform(from: VisualizationCamera, to: VisualizationCamera, progress: number): VisualizationCameraLayerTransform {
+  const eased = visualizationEaseInOut(progress);
+  const sourceScale = from.scale === 0 ? 1 : to.scale / from.scale;
+  const targetX = to.offsetX - sourceScale * from.offsetX;
+  const targetY = to.offsetY - sourceScale * from.offsetY;
+  return {
+    scale: 1 + (sourceScale - 1) * eased,
+    translateX: targetX * eased || 0,
+    translateY: targetY * eased || 0,
+  };
+}
 export function visualizationWorldToScreen(camera: VisualizationCamera, point: VisualizationCoordinate): VisualizationCoordinate { return [camera.offsetX + point[0] * camera.scale, camera.offsetY - point[1] * camera.scale]; }
 export function visualizationScreenToWorld(camera: VisualizationCamera, point: VisualizationCoordinate): VisualizationCoordinate { return [(point[0] - camera.offsetX) / camera.scale, (camera.offsetY - point[1]) / camera.scale]; }
 export function visualizationRegion(node: VisualizationNode, coordinates: readonly VisualizationCoordinate[]): { minX: number; maxX: number; minY: number; maxY: number } { const points = node.pointIndices.map((index) => coordinates[index]).filter((point): point is VisualizationCoordinate => !!point && point.every(Number.isFinite)); if (!points.length) return { minX: 0, maxX: 1, minY: 0, maxY: 1 }; const minX = Math.min(...points.map(([x]) => x)); const maxX = Math.max(...points.map(([x]) => x)); const minY = Math.min(...points.map(([, y]) => y)); const maxY = Math.max(...points.map(([, y]) => y)); const padX = Math.max(1e-6, (maxX - minX) * 0.12); const padY = Math.max(1e-6, (maxY - minY) * 0.12); return { minX: minX - padX, maxX: maxX + padX, minY: minY - padY, maxY: maxY + padY }; }
@@ -132,6 +231,67 @@ export function visualizationLeafOrdering(result: Pick<ClusterResult, "hierarchy
 
 export function validateVisualizationData(result: Pick<ClusterResult, "ids" | "schemaVersion" | "memberships" | "visualization" | "hierarchy" | "leafOrdering">): boolean { const visualization = result.visualization; const memberships = result.memberships; const ordering = result.leafOrdering; const validOrdering = Array.isArray(ordering) && ordering.length > 0 && ordering.length === result.hierarchy.leaves.length && ordering.every((label, index) => Number.isSafeInteger(label) && label >= 0 && ordering.indexOf(label) === index) && ordering.every((label) => result.hierarchy.leaves.includes(label)); return result.schemaVersion >= 4 && !!visualization && validOrdering && visualization.coordinates.length === result.ids.length && visualization.labels.length === result.ids.length && visualization.coordinates.every((point) => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)) && visualization.labels.every((label) => Number.isSafeInteger(label) && label >= -1 && (label === -1 || ordering.includes(label))) && visualization.leafOrdering?.length === ordering.length && visualization.leafOrdering.every((label, index) => label === ordering[index]) && Array.isArray(memberships) && memberships.length === result.ids.length && memberships.every((row) => Array.isArray(row) && row.length === ordering.length && row.every((value) => Number.isFinite(value) && value >= 0 && value <= 1) && row.reduce((sum, value) => sum + value, 0) <= 1 + 1e-6); }
 export function visualizationCloudGeometry(points: readonly VisualizationCoordinate[], indices: readonly number[], width: number, height: number): { x: number; y: number; radius: number } | null { const selected = indices.filter((index) => !!points[index]); if (!selected.length) return null; const x = selected.reduce((sum, index) => sum + points[index][0], 0) / selected.length; const y = selected.reduce((sum, index) => sum + points[index][1], 0) / selected.length; const variance = selected.reduce((sum, index) => sum + (points[index][0] - x) ** 2 + (points[index][1] - y) ** 2, 0) / selected.length; return { x, y, radius: Math.max(22, Math.min(Math.max(width, height) * .42, Math.sqrt(variance) * 2.5 + 20)) }; }
+
+/** Return the display name for a visible internal cluster, or null for notes/noise. */
+export function visualizationClusterLabelText(entry: Pick<VisualizationFrontierEntry, "node" | "actualPoints">, titles?: Readonly<Record<string, string>>): string | null {
+  if (entry.actualPoints || entry.node.sourceId === null || !Number.isSafeInteger(entry.node.sourceId)) return null;
+  const title = titles?.[String(entry.node.sourceId)]?.trim();
+  return title || `Cluster ${entry.node.sourceId}`;
+}
+
+function visualizationHexRgb(value: string): [number, number, number] | null {
+  const match = /^#([0-9a-f]{6})$/i.exec(value.trim());
+  return match ? [parseInt(match[1].slice(0, 2), 16), parseInt(match[1].slice(2, 4), 16), parseInt(match[1].slice(4, 6), 16)] : null;
+}
+function visualizationRelativeLuminance(value: string): number {
+  const rgbValue = visualizationHexRgb(value); if (!rgbValue) return 0.5;
+  const channels = rgbValue.map((channel) => channel / 255).map((channel) => channel <= 0.03928 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4);
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+/** Use a high-contrast pill: its fill contrasts the cloud and its text contrasts the pill. */
+export function visualizationLabelContrast(clusterColor: string): VisualizationLabelContrast {
+  const luminance = visualizationRelativeLuminance(clusterColor);
+  return luminance > 0.179 ? { foreground: "#000000", background: "#ffffff" } : { foreground: "#ffffff", background: "#000000" };
+}
+
+export interface VisualizationLabelLayoutOptions { margin?: number; gap?: number; labelHeight?: number; measureText?: (text: string) => number; }
+
+/**
+ * Lay out labels for the current cloud frontier in screen coordinates.  The
+ * candidate position is the centroid of the visible points (falling back to
+ * all points in a cluster when residual classification removed them). Labels
+ * are clamped to the viewport and nudged vertically to avoid simple overlaps.
+ */
+export function layoutVisualizationClusterLabels(
+  frontier: readonly VisualizationFrontierEntry[],
+  points: readonly VisualizationCoordinate[],
+  titles: Readonly<Record<string, string>> | undefined,
+  colors: ReadonlyMap<string, string>,
+  width: number,
+  height: number,
+  options: VisualizationLabelLayoutOptions = {},
+): VisualizationLabelPlacement[] {
+  const viewportWidth = Math.max(0, Number.isFinite(width) ? width : 0); const viewportHeight = Math.max(0, Number.isFinite(height) ? height : 0);
+  const margin = Math.max(2, Number.isFinite(options.margin) ? options.margin! : 8); const gap = Math.max(0, Number.isFinite(options.gap) ? options.gap! : 4); const labelHeight = Math.max(10, Number.isFinite(options.labelHeight) ? options.labelHeight! : 20);
+  const measure = options.measureText || ((text: string) => text.length * 7);
+  const placements: VisualizationLabelPlacement[] = [];
+  for (const entry of frontier) {
+    const text = visualizationClusterLabelText(entry, titles); if (!text) continue;
+    const indices = (entry.pointIndices.length ? entry.pointIndices : entry.node.pointIndices).filter((index) => !!points[index] && points[index].every(Number.isFinite)); if (!indices.length) continue;
+    const centerX = indices.reduce((sum, index) => sum + points[index][0], 0) / indices.length; const centerY = indices.reduce((sum, index) => sum + points[index][1], 0) / indices.length;
+    const textWidth = Math.max(1, Number(measure(text)) || text.length * 7); const boxWidth = textWidth + 16; const boxHeight = labelHeight; const minX = margin; const maxX = Math.max(minX, viewportWidth - margin - boxWidth); const minY = margin; const maxY = Math.max(minY, viewportHeight - margin - boxHeight);
+    const x = Math.max(minX, Math.min(maxX, centerX - boxWidth / 2)); let y = Math.max(minY, Math.min(maxY, centerY - boxHeight / 2));
+    const contrast = visualizationLabelContrast(colors.get(entry.node.id) || VISUALIZATION_NOISE_COLOR); const placement: VisualizationLabelPlacement = { id: entry.node.id, text, x, y, width: Math.min(boxWidth, Math.max(0, viewportWidth - margin * 2)), height: Math.min(boxHeight, Math.max(0, viewportHeight - margin * 2)), contrast };
+    // Try a deterministic sequence of vertical positions before accepting an overlap.
+    const candidates = [y, y - (boxHeight + gap), y + (boxHeight + gap), y - 2 * (boxHeight + gap), y + 2 * (boxHeight + gap)];
+    const overlaps = (left: VisualizationLabelPlacement, top: number): boolean => left.x < placement.x + placement.width + gap && placement.x < left.x + left.width + gap && top < left.y + left.height + gap && left.y < top + placement.height + gap;
+    for (const candidate of candidates) { const bounded = Math.max(minY, Math.min(maxY, candidate)); if (!placements.some((placed) => overlaps(placed, bounded))) { y = bounded; break; } }
+    placement.y = y; placements.push(placement);
+  }
+  return placements;
+}
+export const visualizationClusterLabels = layoutVisualizationClusterLabels;
 export function findNearestVisualizationPoint(points: readonly VisualizationCoordinate[], x: number, y: number, radius: number): number | null { const radiusSquared = Math.max(0, radius) ** 2; let closest: number | null = null; let closestDistance = radiusSquared; points.forEach(([pointX, pointY], index) => { const distance = (pointX - x) ** 2 + (pointY - y) ** 2; if (distance <= closestDistance) { closest = index; closestDistance = distance; } }); return closest; }
 
 /** Accumulate weighted RGB and optical density, clipping every splat at three sigma. */
