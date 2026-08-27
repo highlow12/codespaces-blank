@@ -42,6 +42,8 @@ export interface HdbscanExtractWasmResult {
   readonly probabilities: NumericInput;
   readonly outlier_scores: NumericInput;
   readonly cluster_count: number;
+  /** Row-major all-points membership vectors, one column per selected cluster. */
+  readonly memberships?: NumericInput;
 }
 
 export interface HnswWasmIndex {
@@ -77,6 +79,11 @@ export interface WasmBindings {
   hdbscan_extract?: (
     mstEdges: NumericInput, rowCount: number, minClusterSize: number,
     selectionMethod: number, allowSingleCluster: boolean
+  ) => HdbscanExtractWasmResult;
+  /** Optional extraction export with original rows for exact all-points memberships. */
+  hdbscan_extract_with_rows?: (
+    mstEdges: NumericInput, rows: NumericInput, rowCount: number, dimension: number,
+    minClusterSize: number, selectionMethod: number, allowSingleCluster: boolean
   ) => HdbscanExtractWasmResult;
 
   /** Current wasm-core export. */

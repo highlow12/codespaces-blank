@@ -48,6 +48,25 @@ test("WASM HDBSCAN contract forwards distinct minSamples and returns typed outpu
   assert.deepEqual(calls.find(([name]) => name === "extract").slice(2), [6, 3, 1, false]);
 });
 
+test("WASM HDBSCAN forwards reduced rows to all-points soft membership extraction", async () => {
+  const { WasmNumericKernel } = await loadWasmKernel();
+  let extracted = null;
+  const wasm = {
+    normalize: (rows) => rows, matmul: () => [], pca: () => ({ projected: [], explained: [] }), cosine_distances: () => [], exact_knn: () => [], mst: () => [],
+    euclidean_mutual_reachability_mst(_rows, rowCount) { return { edge_count: rowCount - 1, edges: new Float32Array([0, 1, 0.1, 1, 2, 0.1, 2, 3, 0.1]) }; },
+    hdbscan_extract() { throw new Error("legacy extraction must not be used when soft export exists"); },
+    hdbscan_extract_with_rows(edges, rows, rowCount, dimension, minClusterSize, selectionMethod, allowSingleCluster) {
+      extracted = { edges: Array.from(edges), rows: Array.from(rows), rowCount, dimension, minClusterSize, selectionMethod, allowSingleCluster };
+      return { labels: new Int32Array([0, 0, 1, 1]), probabilities: new Float32Array([1, 1, 1, 1]), outlier_scores: new Float32Array(4), memberships: new Float32Array([.8, .1, .2, .1, .1, .7, .1, .8]), cluster_count: 2 };
+    }
+  };
+  const rows = [[1, 0], [.9, .1], [-1, 0], [-.9, -.1]];
+  const result = new WasmNumericKernel(wasm).hdbscan(rows, 2, 2);
+  assert.deepEqual(extracted.rows, Array.from(Float32Array.from(rows.flat())));
+  assert.deepEqual([extracted.rowCount, extracted.dimension, extracted.minClusterSize, extracted.selectionMethod, extracted.allowSingleCluster], [4, 2, 2, 1, false]);
+  assert.deepEqual(result.memberships, Array.from({ length: 4 }, (_, row) => Array.from(new Float32Array([.8, .1, .2, .1, .1, .7, .1, .8]).slice(row * 2, row * 2 + 2))));
+});
+
 test("Euclidean HDBSCAN sends its complete mutual-reachability MST directly to extraction", async () => {
   const { WasmNumericKernel } = await loadWasmKernel();
   let extracted = null;

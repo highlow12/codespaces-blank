@@ -164,7 +164,7 @@ async function loadWasm(plugin) {
   if (!existsSync(gluePath) || !existsSync(wasmPath)) return { kernel: undefined, loaded: false, exports: [] };
   const wasm = await import(pathToFileURL(gluePath).href);
   wasm.initSync({ module: new WebAssembly.Module(await readFile(wasmPath)) });
-  const names = ["normalize", "matmul", "pca", "randomized_pca", "cosine_distances", "exact_knn", "exact_knn_cosine_tiled", "euclidean_mutual_reachability_mst", "mst", "mutual_reachability_mst", "hdbscan_extract", "HnswIndex"];
+  const names = ["normalize", "matmul", "pca", "randomized_pca", "cosine_distances", "exact_knn", "exact_knn_cosine_tiled", "euclidean_mutual_reachability_mst", "mst", "mutual_reachability_mst", "hdbscan_extract", "hdbscan_extract_with_rows", "HnswIndex"];
   const bindings = Object.fromEntries(names.filter((name) => typeof wasm[name] === "function").map((name) => [name, wasm[name]]));
   return { kernel: new plugin.WasmNumericKernel(bindings), loaded: true, exports: Object.keys(bindings) };
 }

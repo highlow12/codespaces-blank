@@ -188,9 +188,11 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   const leafOrder = hierarchy.leaves.slice();
   const clusterCount = leafOrder.length;
   const softMemberships = hdbscan.memberships || hdbscan.labels.map((label, index) => leafOrder.map((leaf) => label === leaf ? hdbscan.probabilities[index] : 0));
+  const memberships = softMemberships.map((row) => row.slice(0, clusterCount));
+  const completeVisualization = visualization ? { ...visualization, leafOrdering: leafOrder, memberships } : undefined;
   return {
     schemaVersion: 5, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy, softMemberships: softMemberships.map((row) => row.slice(0, clusterCount)), leafOrder, pca: selectedPca, hierarchy, ...(visualization ? { visualization } : {}),
+    outlierProxy: hdbscan.outlierProxy, softMemberships: memberships, leafOrder, leafOrdering: leafOrder, memberships, pca: selectedPca, hierarchy, ...(completeVisualization ? { visualization: completeVisualization } : {}),
     timings: { totalMs: Date.now() - started }
   };
 }

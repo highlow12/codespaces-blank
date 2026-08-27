@@ -79,14 +79,16 @@ function pythonResultToPluginResult(raw: Record<string, any>, ids: string[], fit
     distance: Number(merge.distance), mass: Number(merge.mass)
   }));
   const leaves = (tree.leaves || []).map((leaf: Record<string, any>) => Number(leaf.leaf));
+  const rawMemberships = Array.isArray(discovery.memberships) ? discovery.memberships.map((row: unknown) => Array.isArray(row) ? row.map(Number) : []) : [];
+  const memberships = rawMemberships.length === ids.length && rawMemberships.every((row: number[]) => row.length === leaves.length && row.every((value) => Number.isFinite(value) && value >= 0 && value <= 1) && row.reduce((sum, value) => sum + value, 0) <= 1 + 1e-6) ? rawMemberships : undefined;
   return {
     schemaVersion: 5,
     ids: Array.isArray(raw.ids) ? raw.ids.map(String) : ids,
     leafLabels: (discovery.leaf_labels || []).map(Number),
     probabilities: (discovery.probabilities || []).map(Number),
     outlierProxy: (discovery.outlier_scores || []).map(Number),
-    softMemberships: Array.isArray(discovery.memberships) ? discovery.memberships.map((row: unknown) => Array.isArray(row) ? row.map(Number) : []) : undefined,
-    leafOrder: leaves,
+    softMemberships: memberships,
+    leafOrder: leaves, leafOrdering: leaves, memberships,
     pca: {
       selected: Number(pca.selected_dimension), explainedVariance: Number(pca.candidates?.[pca.candidates.length - 1]?.cumulative_explained_variance || 0),
       totalVariance: 0, candidates: (pca.candidates || []).map((candidate: Record<string, any>) => Number(candidate.dimension)),
@@ -155,7 +157,9 @@ cluster_documents(embeddings, ids=ids, config=config, discovery_runner=runner)
   destroy(resultProxy);
   const selected = Number(result.pca?.selected_dimension) || fittedModel.components.length;
   const selectedModel = { ...fittedModel, components: fittedModel.components.slice(0, selected), explainedVariance: fittedModel.explainedVariance.slice(0, selected) };
-  return { ...pythonResultToPluginResult(result, request.ids, selectedModel), ...(visualization ? { visualization } : {}) };
+  const pluginResult = pythonResultToPluginResult(result, request.ids, selectedModel);
+  if (visualization && pluginResult.memberships && pluginResult.leafOrdering) pluginResult.visualization = { ...visualization, leafOrdering: pluginResult.leafOrdering, memberships: pluginResult.memberships };
+  return pluginResult;
 }
 
 function modelFingerprint(model: { mean: number[]; components: number[][]; explainedVariance: number[] }): string {

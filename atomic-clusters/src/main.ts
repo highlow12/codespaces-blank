@@ -47,7 +47,7 @@ export default class AtomicClustersPlugin extends Plugin {
     try { await this.openSqliteStore(adapter); }
     catch (error) { new Notice(`Atomic Clusters SQLite storage unavailable: ${safeRunError(error)}`); }
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
-    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf));
+    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters()));
     this.registerHoverLinkSource(VIEW_TYPE_CLUSTER_EXPLORER, { display: "Atomic Clusters", defaultMod: false });
     this.addCommand({ id: "build-note-clusters", name: "Build note clusters", callback: () => void this.buildClusters() });
     this.addCommand({ id: "regenerate-cluster-titles", name: "Regenerate cluster titles", callback: () => void this.regenerateTitles() });

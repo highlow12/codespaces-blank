@@ -10,7 +10,7 @@ const offlineSource = await readFile(new URL("../scripts/offline-e2e.mjs", impor
 const requiredExports = [
   "normalize", "matmul", "pca", "randomized_pca", "cosine_distances",
   "exact_knn", "exact_knn_cosine_tiled", "euclidean_mutual_reachability_mst",
-  "mst", "mutual_reachability_mst", "hdbscan_extract", "HnswIndex"
+  "mst", "mutual_reachability_mst", "hdbscan_extract", "hdbscan_extract_with_rows", "HnswIndex"
 ];
 
 test("WASM bootstrap paths bind every WasmKernelModule export", () => {

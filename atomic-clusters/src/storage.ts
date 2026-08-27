@@ -56,7 +56,7 @@ export class ClusterResultStore {
       // v1 had no titles; v2 could contain model-generated titles and model
       // metadata. Both are intentionally discarded on first read.
       if (result.schemaVersion === 3) return result;
-      if (result.schemaVersion === 5) return result;
+      if (result.schemaVersion === 4 || result.schemaVersion === 5) return result;
       const migrated = { ...result, schemaVersion: 3 as const, titles: undefined, titleGeneration: undefined };
       await this.save(migrated);
       return migrated;

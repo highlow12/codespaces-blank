@@ -35,14 +35,15 @@ async function run() {
           import { initSync, normalize, matmul, pca, randomized_pca,
             cosine_distances, exact_knn, exact_knn_cosine_tiled,
             euclidean_mutual_reachability_mst, mst,
-            mutual_reachability_mst, hdbscan_extract, HnswIndex } from ${JSON.stringify(gluePath)};
+            mutual_reachability_mst, hdbscan_extract,
+            hdbscan_extract_with_rows, HnswIndex } from ${JSON.stringify(gluePath)};
           const bytes = Uint8Array.from(Buffer.from(${JSON.stringify(encoded)}, "base64"));
           initSync({ module: new WebAssembly.Module(bytes) });
           globalThis.__ATOMIC_CLUSTERS_WASM__ = { normalize, matmul, pca,
             randomized_pca, cosine_distances, exact_knn,
             exact_knn_cosine_tiled, euclidean_mutual_reachability_mst,
             mst, mutual_reachability_mst,
-            hdbscan_extract, HnswIndex };
+            hdbscan_extract, hdbscan_extract_with_rows, HnswIndex };
         ` };
       });
     }

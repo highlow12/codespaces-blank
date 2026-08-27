@@ -141,6 +141,9 @@ export interface VisualizationConfiguration {
 export interface ClusterVisualization {
   coordinates: VisualizationCoordinate[];
   labels: number[];
+  /** Stable leaf-column order and row-aligned memberships for the explorer. */
+  leafOrdering?: number[];
+  memberships?: number[][];
   configuration: VisualizationConfiguration;
   timings?: Record<string, number>;
 }
@@ -187,6 +190,9 @@ export interface ClusterResult {
   softMemberships?: number[][];
   /** Stable display ordering of leaf labels. */
   leafOrder?: number[];
+  /** Compatibility aliases consumed by the hierarchical explorer. */
+  leafOrdering?: number[];
+  memberships?: number[][];
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;

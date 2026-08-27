@@ -169,9 +169,10 @@ export function validateClusterResultAlignment(result: ClusterResult): void {
   const n = result.ids.length;
   if (new Set(result.ids).size !== n) throw new Error("Cluster result ids must be unique");
   for (const [name, values] of [["leafLabels", result.leafLabels], ["probabilities", result.probabilities], ["outlierProxy", result.outlierProxy]] as const) if (values.length !== n) throw new Error(`Cluster result ${name} must align with ids`);
-  const leaves = result.leafOrder || result.hierarchy.leaves;
+  const leaves = result.leafOrder || result.leafOrdering || result.hierarchy.leaves;
   if (new Set(leaves).size !== leaves.length || leaves.some((leaf) => !Number.isSafeInteger(leaf) || leaf < 0)) throw new Error("Cluster result leaf order is invalid");
-  if (result.softMemberships && (result.softMemberships.length !== n || result.softMemberships.some((row) => row.length !== leaves.length))) throw new Error("Cluster result memberships must align with ids and leaf order");
+  const memberships = result.softMemberships || result.memberships;
+  if (memberships && (memberships.length !== n || memberships.some((row) => row.length !== leaves.length))) throw new Error("Cluster result memberships must align with ids and leaf order");
   if (result.visualization && (result.visualization.coordinates.length !== n || result.visualization.labels.length !== n)) throw new Error("Cluster visualization must align with ids");
   if (result.visualization?.coordinates.some((point) => point.length !== 2 || point.some((value) => !Number.isFinite(value)))) throw new Error("Cluster visualization coordinates must be finite 2D points");
 }
@@ -288,7 +289,8 @@ export class SqliteClusterStore {
       const suppliedCoordinates = result.visualization?.coordinates || result.ids.map((path) => options.coordinates?.[path]);
       suppliedCoordinates.forEach((point, ordinal) => { if (!point) return; db.run("INSERT INTO visualization_points(result_id,ordinal,path,x,y,leaf_label) VALUES(?,?,?,?,?,?)", [resultId, ordinal, result.ids[ordinal], point[0], point[1], result.visualization?.labels[ordinal] ?? result.leafLabels[ordinal]]); });
       for (const [node, title] of Object.entries(result.titles || {})) db.run("INSERT INTO cluster_titles(result_id,node_id,title) VALUES(?,?,?)", [resultId, Number(node), title]);
-      if (result.softMemberships) result.softMemberships.forEach((row, ordinal) => row.forEach((membership, leafIndex) => db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, result.ids[ordinal], (result.leafOrder || result.hierarchy.leaves)[leafIndex], membership])));
+      const memberships = result.softMemberships || result.memberships;
+      if (memberships) memberships.forEach((row, ordinal) => row.forEach((membership, leafIndex) => db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, result.ids[ordinal], (result.leafOrder || result.leafOrdering || result.hierarchy.leaves)[leafIndex], membership])));
       for (const [path, memberships] of Object.entries(options.softMemberships || {})) for (const [leaf, membership] of Object.entries(memberships)) db.run("INSERT INTO soft_memberships(result_id,path,leaf_id,membership) VALUES(?,?,?,?)", [resultId, path, Number(leaf), membership]);
     });
     return resultId;

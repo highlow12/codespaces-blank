@@ -37,6 +37,9 @@ Example:
 
 ## Parallel independent runs
 
+- Decompose implementation, review, and validation into independent workstreams and run them concurrently whenever their file ownership and dependencies do not overlap.
+- Use available sub-agents for independent code areas, read-only review, and test analysis; assign explicit file or responsibility boundaries to prevent conflicting edits.
+- Start independent checks as soon as their prerequisites are available instead of waiting for the entire implementation to finish.
 - Run independent benchmarks, seeds, or dataset slices in parallel whenever practical to reduce elapsed time.
 - Limit concurrency based on available CPU and memory; clustering runs may be resource-intensive, so avoid oversubscribing the machine.
 - Keep each run's output in a separate directory and aggregate results only after all parallel jobs complete.

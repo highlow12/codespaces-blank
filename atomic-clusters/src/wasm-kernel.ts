@@ -77,7 +77,9 @@ export class WasmNumericKernel implements NumericKernel {
     // minSamples core distances and a complete-graph Prim MST without an n²
     // JS allocation; cosine helpers remain available for non-HDBSCAN users.
     const mst = this.wasm.euclidean_mutual_reachability_mst(input.data, input.rows, input.cols, samples, 256);
-    const output = this.wasm.hdbscan_extract(Float32Array.from(mst.edges), input.rows, clusterSize, 1, false);
+    const output = this.wasm.hdbscan_extract_with_rows
+      ? this.wasm.hdbscan_extract_with_rows(Float32Array.from(mst.edges), input.data, input.rows, input.cols, clusterSize, 1, false)
+      : this.wasm.hdbscan_extract(Float32Array.from(mst.edges), input.rows, clusterSize, 1, false);
     return hdbscanOutput(output, input.rows);
   }
 
@@ -120,12 +122,14 @@ function hdbscanOutput(output: HdbscanExtractWasmResult, count: number): Hdbscan
       throw new TypeError(`WASM HDBSCAN output is invalid at row ${index}`);
     }
   }
-  const memberships = Array.from({ length: count }, (_, row) => {
-    const values = new Array(output.cluster_count).fill(0);
-    if (labels[row] >= 0) values[labels[row]] = probabilities[row];
-    return values;
-  });
-  return { labels, probabilities, outlierProxy, memberships };
+  let memberships: number[][] | undefined;
+  if (output.memberships !== undefined) {
+    const flat = Array.from(output.memberships);
+    if (flat.length !== count * output.cluster_count) throw new TypeError("WASM HDBSCAN memberships have an invalid shape");
+    memberships = Array.from({ length: count }, (_, row) => flat.slice(row * output.cluster_count, (row + 1) * output.cluster_count));
+    if (memberships.some((values) => values.some((value) => !Number.isFinite(value) || value < 0 || value > 1) || values.reduce((sum, value) => sum + value, 0) > 1 + 1e-5)) throw new TypeError("WASM HDBSCAN memberships are invalid");
+  }
+  return { labels, probabilities, outlierProxy, ...(memberships ? { memberships } : {}) };
 }
 
 interface Edge { left: number; right: number; distance: number; }

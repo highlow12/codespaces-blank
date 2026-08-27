@@ -14,10 +14,32 @@
 .atomic-clusters-progress-detail { color: var(--text-muted); font-size: var(--font-ui-small); margin: 3px 0; overflow-wrap: anywhere; }
 .atomic-clusters-progress-bar, .atomic-clusters-model-progress { width: 100%; accent-color: var(--interactive-accent); }
 .atomic-clusters-model-status { color: var(--text-muted); font-size: var(--font-ui-small); margin-top: 4px; max-width: 280px; overflow-wrap: anywhere; }
-.atomic-clusters-umap { position: relative; flex: 1 1 auto; width: 100%; min-height: 300px; margin: 8px 0 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; background: var(--background-primary); box-shadow: inset 0 0 0 1px var(--background-modifier-border-hover); }
+.atomic-clusters-umap { position: relative; display: flex; flex: 1 1 auto; width: 100%; min-height: 300px; margin: 8px 0 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; overflow: hidden; background: var(--background-primary); box-shadow: inset 0 0 0 1px var(--background-modifier-border-hover); }
+.atomic-clusters-umap-plot { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; }
+.atomic-clusters-umap-navigation { position: absolute; z-index: 2; inset: 6px 8px auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.atomic-clusters-breadcrumb { color: var(--text-muted); }
+.atomic-clusters-breadcrumb button { margin: 0 2px; }
+.atomic-clusters-umap-visual-layer { position: absolute; inset: 0; z-index: 1; transform-origin: 0 0; will-change: transform; }
+.atomic-clusters-umap-visual-layer.is-animating { pointer-events: none; }
 .atomic-clusters-umap-canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .atomic-clusters-umap-hit-layer { position: absolute; inset: 0; pointer-events: none; }
 /* Obsidian themes style every button. Keep these hit targets visually empty
    so they cannot cover the colored canvas markers underneath. */
 .atomic-clusters-umap-point-hit { appearance: none; position: absolute; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 50%; transform: translate(-50%, -50%); background: transparent !important; background-color: transparent !important; box-shadow: none !important; color: transparent; cursor: pointer; pointer-events: auto; }
 .atomic-clusters-umap-point-hit:hover, .atomic-clusters-umap-point-hit:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; background: transparent !important; background-color: transparent !important; }
+.atomic-clusters-umap-controls { flex: 0 0 190px; align-self: stretch; border-left: 1px solid var(--background-modifier-border); background: var(--background-secondary); padding: 8px; z-index: 3; }
+.atomic-clusters-umap-controls-toggle { width: 100%; margin: 0 0 8px; font-size: var(--font-ui-small); }
+.atomic-clusters-umap-controls-body { display: flex; flex-direction: column; gap: 6px; font-size: var(--font-ui-small); }
+.atomic-clusters-umap-control-row { display: flex; align-items: center; gap: 6px; }
+.atomic-clusters-umap-control-row input { flex: 1 1 auto; min-width: 0; accent-color: var(--interactive-accent); }
+.atomic-clusters-umap-control-row output { min-width: 42px; text-align: right; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.atomic-clusters-umap-controls.is-collapsed { flex-basis: 42px; padding: 6px 4px; }
+.atomic-clusters-umap-controls.is-collapsed .atomic-clusters-umap-controls-toggle { writing-mode: vertical-rl; width: 100%; min-height: 112px; margin: 0; padding: 4px 2px; }
+.atomic-clusters-umap-controls.is-collapsed .atomic-clusters-umap-controls-body { display: none; }
+@media (max-width: 640px) {
+  .atomic-clusters-umap { flex-direction: column; }
+  .atomic-clusters-umap-plot { flex: 1 1 auto; min-height: 250px; }
+  .atomic-clusters-umap-controls { flex: 0 0 auto; border-left: 0; border-top: 1px solid var(--background-modifier-border); }
+  .atomic-clusters-umap-controls.is-collapsed { flex-basis: auto; }
+  .atomic-clusters-umap-controls.is-collapsed .atomic-clusters-umap-controls-toggle { writing-mode: initial; min-height: 0; }
+}

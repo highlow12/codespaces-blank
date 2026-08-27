@@ -125,6 +125,8 @@ struct HdbscanResult {
     probabilities: Vec<f32>,
     outlier_scores: Vec<f32>,
     cluster_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    memberships: Option<Vec<f32>>,
 }
 
 #[derive(Clone, Copy)]
@@ -171,6 +173,7 @@ impl LinkageUf {
 }
 
 struct CondensedCluster {
+    node: usize,
     birth: f32,
     stability: f32,
     children: Vec<usize>,
@@ -231,9 +234,9 @@ fn condense_cluster(
             record_exit(nodes, left, cluster, split_lambda, clusters);
             record_exit(nodes, right, cluster, split_lambda, clusters);
             let left_cluster = clusters.len();
-            clusters.push(CondensedCluster { birth: split_lambda, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: true });
+            clusters.push(CondensedCluster { node: left, birth: split_lambda, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: true });
             let right_cluster = clusters.len();
-            clusters.push(CondensedCluster { birth: split_lambda, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: true });
+            clusters.push(CondensedCluster { node: right, birth: split_lambda, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: true });
             clusters[cluster].children.extend([left_cluster, right_cluster]);
             condense_cluster(nodes, left, left_cluster, min_cluster_size, clusters);
             condense_cluster(nodes, right, right_cluster, min_cluster_size, clusters);
@@ -280,11 +283,10 @@ fn select_leaves(cluster: usize, clusters: &[CondensedCluster], selected: &mut V
 }
 
 fn hdbscan_extract_impl(
-    edges: &[f32],
-    row_count: usize,
-    min_cluster_size: usize,
-    selection_method: u32,
+    edges: &[f32], row_count: usize, min_cluster_size: usize, selection_method: u32,
     allow_single_cluster: bool,
+    rows: Option<&[f32]>,
+    dimension: usize,
 ) -> Result<HdbscanResult, String> {
     if row_count == 0 { return Err("row_count must be positive".into()); }
     if min_cluster_size < 2 { return Err("min_cluster_size must be at least 2".into()); }
@@ -328,12 +330,12 @@ fn hdbscan_extract_impl(
     for root in roots {
         if nodes[root].size < min_cluster_size { continue; }
         let cluster = clusters.len();
-        clusters.push(CondensedCluster { birth: 0.0, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: allow_single_cluster });
+        clusters.push(CondensedCluster { node: root, birth: 0.0, stability: 0.0, children: Vec::new(), exits: Vec::new(), selectable: allow_single_cluster });
         root_clusters.push(cluster);
         condense_cluster(&nodes, root, cluster, min_cluster_size, &mut clusters);
     }
     let mut selected = Vec::new();
-    for root in root_clusters {
+    for &root in &root_clusters {
         if selection_method == 0 { select_eom(root, &clusters, &mut selected); }
         else { select_leaves(root, &clusters, &mut selected); }
     }
@@ -349,7 +351,121 @@ fn hdbscan_extract_impl(
         }
     }
     let outlier_scores = probabilities.iter().map(|probability| 1.0 - probability).collect();
-    Ok(HdbscanResult { labels, probabilities, outlier_scores, cluster_count: selected.len() })
+    let memberships = rows.map(|values| all_points_memberships(&nodes, &clusters, &root_clusters, &selected, row_count, min_cluster_size, values, dimension));
+    Ok(HdbscanResult { labels, probabilities, outlier_scores, cluster_count: selected.len(), memberships })
+}
+
+/// Build the raw condensed-tree information needed by hdbscan's prediction
+/// module.  The linkage tree is binary, while a condensed tree replaces a
+/// child smaller than min_cluster_size with one row per point.
+fn condensed_prediction_data(
+    nodes: &[LinkageNode], clusters: &[CondensedCluster], roots: &[usize], min_size: usize,
+) -> (Vec<Option<(usize, f32)>>, Vec<Option<(usize, f32)>>, Vec<f32>, Vec<Vec<usize>>) {
+    let mut parent = vec![None; clusters.len()];
+    let mut point_parent = vec![None; nodes.iter().filter(|n| n.left.is_none()).count()];
+    let mut point_rows: Vec<Vec<(usize, f32)>> = (0..clusters.len()).map(|_| Vec::new()).collect();
+    let mut max_lambda = vec![0.0; clusters.len()];
+    let mut leaves: Vec<Vec<usize>> = (0..clusters.len()).map(|_| Vec::new()).collect();
+    fn visit(nodes: &[LinkageNode], clusters: &[CondensedCluster], node: usize, cluster: usize, min_size: usize,
+             parent: &mut [Option<(usize, f32)>], point_parent: &mut [Option<(usize, f32)>],
+             point_rows: &mut [Vec<(usize, f32)>], max_lambda: &mut [f32]) {
+        let (left, right) = match (nodes[node].left, nodes[node].right) { (Some(left), Some(right)) => (left, right), _ => return };
+        let at = lambda(nodes[node].distance);
+        max_lambda[cluster] = max_lambda[cluster].max(at);
+        for child in [left, right] {
+            if nodes[child].size >= min_size {
+                let child_cluster = clusters[cluster].children.iter().find(|c| clusters[**c].node == child).copied();
+                // A one-big/one-small condensation split retains the same
+                // condensed cluster id for the big branch; only a
+                // two-big split creates a child cluster id.
+                let cc = child_cluster.unwrap_or(cluster);
+                if cc != cluster { parent[cc] = Some((cluster, at)); }
+                visit(nodes, clusters, child, cc, min_size, parent, point_parent, point_rows, max_lambda);
+            } else {
+                let mut points = Vec::new(); leaves_under(nodes, child, &mut points);
+                for point in points {
+                    point_parent[point] = Some((cluster, at));
+                    point_rows[cluster].push((point, at));
+                    max_lambda[cluster] = max_lambda[cluster].max(at);
+                }
+            }
+        }
+    }
+    for &root in roots {
+        let cluster = root;
+        visit(nodes, clusters, clusters[cluster].node, cluster, min_size, &mut parent, &mut point_parent, &mut point_rows, &mut max_lambda);
+    }
+    fn leaf_dfs(cluster: usize, clusters: &[CondensedCluster], leaves: &mut Vec<usize>) {
+        if clusters[cluster].children.is_empty() { leaves.push(cluster); }
+        else { for &child in &clusters[cluster].children { leaf_dfs(child, clusters, leaves); } }
+    }
+    for cluster in 0..clusters.len() { leaf_dfs(cluster, clusters, &mut leaves[cluster]); }
+    let exemplar_lists = leaves.iter().map(|leaf_clusters| {
+        let mut out = Vec::new();
+        for &leaf in leaf_clusters {
+            let max = point_rows[leaf].iter().map(|(_, l)| *l).fold(0.0, f32::max);
+            out.extend(point_rows[leaf].iter().filter(|(_, l)| *l == max).map(|(p, _)| *p));
+        }
+        // The Python implementation preserves raw-tree row order. Linkage
+        // traversal is deterministic, so this is already stable; sorting is
+        // only a tie-breaker for equivalent edge orderings.
+        out
+    }).collect();
+    (parent, point_parent, max_lambda, exemplar_lists)
+}
+
+fn merge_height(point_cluster: usize, point_lambda: f32, selected: usize, parent: &[Option<(usize, f32)>]) -> f64 {
+    let mut left = point_cluster; let mut right = selected; let mut took_left = false; let mut took_right = false; let mut last = point_lambda;
+    let mut guard = 0;
+    while left != right && guard <= parent.len() { guard += 1;
+        if left > right {
+            took_left = true; last = parent[left].map(|(_, l)| l).unwrap_or(point_lambda); left = parent[left].map(|(p, _)| p).unwrap_or(left);
+        } else {
+            took_right = true; last = parent[right].map(|(_, l)| l).unwrap_or(point_lambda); right = parent[right].map(|(p, _)| p).unwrap_or(right);
+        }
+    }
+    if took_left && took_right { last as f64 } else { point_lambda as f64 }
+}
+
+fn all_points_memberships(nodes: &[LinkageNode], clusters: &[CondensedCluster], roots: &[usize], selected: &[usize], count: usize, min_size: usize, rows: &[f32], dimension: usize) -> Vec<f32> {
+    if selected.is_empty() { return Vec::new(); }
+    let (parent, point_parent, leaf_max, exemplar_lists) = condensed_prediction_data(nodes, clusters, roots, min_size);
+    let c = selected.len();
+    let mut exemplars: Vec<Vec<usize>> = Vec::with_capacity(c);
+    for &cluster in selected { exemplars.push(exemplar_lists[cluster].clone()); }
+    let mut result = vec![0.0f32; count * c];
+    for point in 0..count {
+        let (point_cluster, point_lambda) = match point_parent[point] { Some(v) => v, None => continue };
+        let mut heights = vec![0.0f64; c];
+        let mut dist = vec![0.0f64; c];
+        let row = &rows[point * dimension..(point + 1) * dimension];
+        for (j, &cluster) in selected.iter().enumerate() {
+            heights[j] = merge_height(point_cluster, point_lambda, cluster, &parent);
+            let mut best = f64::MAX;
+            for &exemplar in &exemplars[j] {
+                let other = &rows[exemplar * dimension..(exemplar + 1) * dimension];
+                let d = row.iter().zip(other).map(|(a,b)| { let x = *a as f64 - *b as f64; x*x }).sum::<f64>().sqrt();
+                best = best.min(d);
+            }
+            dist[j] = if best > 0.0 { 1.0 / best } else { f64::MAX / c as f64 };
+        }
+        let dist_sum = dist.iter().sum::<f64>();
+        let per_cluster_scores = heights.iter().map(|&height| {
+            let max = leaf_max.get(point_cluster).copied().unwrap_or(point_lambda) + 1e-8;
+            if height > 0.0 { (-(max as f64) / height).exp() } else { 0.0 }
+        }).collect::<Vec<_>>();
+        let score_max = per_cluster_scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let outlier = per_cluster_scores.iter().map(|score| (score - score_max).exp()).collect::<Vec<_>>();
+        let outlier_sum = outlier.iter().sum::<f64>();
+        let max_height_index = heights.iter().enumerate().max_by(|a,b| a.1.total_cmp(b.1)).map(|(i,_)| i).unwrap_or(0);
+        let in_prob = heights.iter().copied().fold(0.0, f64::max) / leaf_max.get(selected[max_height_index]).copied().unwrap_or(point_lambda).max(point_lambda).max(1e-8) as f64;
+        for j in 0..c {
+            // all_points_membership_vectors: distance_vec * outlier_vec,
+            // normalize rows, then scale by probability in some cluster.
+            result[point*c+j] = ((dist[j] / dist_sum) * (outlier[j] / outlier_sum) * in_prob) as f32;
+        }
+    }
+    result
 }
 
 /// Extract HDBSCAN clusters from mutual-reachability MST triples.
@@ -365,7 +481,21 @@ pub fn hdbscan_extract(
     selection_method: u32,
     allow_single_cluster: bool,
 ) -> Result<JsValue, JsValue> {
-    let result = hdbscan_extract_impl(&mst_edges, row_count, min_cluster_size, selection_method, allow_single_cluster).map_err(err)?;
+    let result = hdbscan_extract_impl(&mst_edges, row_count, min_cluster_size, selection_method, allow_single_cluster, None, 0).map_err(err)?;
+    serde_wasm_bindgen::to_value(&result).map_err(|error| err(error.to_string()))
+}
+
+/// Extraction variant that also computes Python-compatible all-points soft
+/// memberships from the original feature rows. Keeping this as a separate
+/// export preserves the compact legacy extraction ABI for callers that only
+/// need labels and probabilities.
+#[wasm_bindgen]
+pub fn hdbscan_extract_with_rows(
+    mst_edges: Vec<f32>, rows: Vec<f32>, row_count: usize, dimension: usize,
+    min_cluster_size: usize, selection_method: u32, allow_single_cluster: bool,
+) -> Result<JsValue, JsValue> {
+    matrix(&rows, row_count, dimension, "rows").map_err(|value| value)?;
+    let result = hdbscan_extract_impl(&mst_edges, row_count, min_cluster_size, selection_method, allow_single_cluster, Some(&rows), dimension).map_err(err)?;
     serde_wasm_bindgen::to_value(&result).map_err(|error| err(error.to_string()))
 }
 
@@ -377,9 +507,9 @@ pub fn hdbscan_extract(
  #[test]
  fn hdbscan_extracts_separated_dense_components_deterministically(){
     let edges=vec![0.,1.,0.05,1.,2.,0.1,3.,4.,0.05,4.,5.,0.1,2.,3.,10.];
-    let forward=hdbscan_extract_impl(&edges,6,3,0,false).unwrap();
+    let forward=hdbscan_extract_impl(&edges,6,3,0,false,None,0).unwrap();
     let reversed=vec![2.,3.,10.,4.,5.,0.1,3.,4.,0.05,1.,2.,0.1,0.,1.,0.05];
-    let backward=hdbscan_extract_impl(&reversed,6,3,0,false).unwrap();
+    let backward=hdbscan_extract_impl(&reversed,6,3,0,false,None,0).unwrap();
     assert_eq!(forward.labels,vec![0,0,0,1,1,1]);
     assert_eq!(forward.labels,backward.labels);
     assert_eq!(forward.cluster_count,2);
@@ -391,8 +521,8 @@ pub fn hdbscan_extract(
     // children. EOM retains the stable four-point parents; leaf selection
     // deliberately returns the four terminal condensed-tree clusters.
     let edges=vec![0.,1.,0.99,2.,3.,0.99,4.,5.,0.99,6.,7.,0.99,1.,2.,1.,5.,6.,1.,3.,4.,10.];
-    let eom=hdbscan_extract_impl(&edges,8,2,0,false).unwrap();
-    let leaf=hdbscan_extract_impl(&edges,8,2,1,false).unwrap();
+    let eom=hdbscan_extract_impl(&edges,8,2,0,false,None,0).unwrap();
+    let leaf=hdbscan_extract_impl(&edges,8,2,1,false,None,0).unwrap();
     assert_eq!(eom.cluster_count,2);
     assert_eq!(eom.labels,vec![0,0,0,0,1,1,1,1]);
     assert_eq!(leaf.cluster_count,4);
@@ -400,11 +530,11 @@ pub fn hdbscan_extract(
  }
  #[test]
  fn hdbscan_marks_root_only_and_too_small_cases_as_noise_by_default(){
-    let root_only=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,3,0,false).unwrap();
+    let root_only=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,3,0,false,None,0).unwrap();
     assert_eq!(root_only.labels,vec![-1,-1,-1]);
-    let permitted=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,3,0,true).unwrap();
+    let permitted=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,3,0,true,None,0).unwrap();
     assert_eq!(permitted.labels,vec![0,0,0]);
-    let too_small=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,4,0,true).unwrap();
+    let too_small=hdbscan_extract_impl(&[0.,1.,0.1,1.,2.,0.1],3,4,0,true,None,0).unwrap();
     assert_eq!(too_small.labels,vec![-1,-1,-1]);
     assert!(too_small.outlier_scores.iter().all(|value|*value==1.0));
  }
@@ -414,14 +544,37 @@ pub fn hdbscan_extract(
     // the other three leave at lambda=2, so their persistence probabilities
     // are respectively 0.5 and 1.0.
     let edges=vec![0.,1.,0.5,1.,2.,0.5,2.,3.,1.,4.,5.,0.5,5.,6.,0.5,6.,7.,1.,3.,4.,10.];
-    let result=hdbscan_extract_impl(&edges,8,3,0,false).unwrap();
+    let result=hdbscan_extract_impl(&edges,8,3,0,false,None,0).unwrap();
     assert_eq!(result.labels,vec![0,0,0,0,1,1,1,1]);
     assert_eq!(result.probabilities,vec![1.,1.,1.,0.5,1.,1.,1.,0.5]);
     assert_eq!(result.outlier_scores,vec![0.,0.,0.,0.5,0.,0.,0.,0.5]);
  }
  #[test]
  fn hdbscan_rejects_an_incomplete_mst(){
-    let error=hdbscan_extract_impl(&[0.,1.,0.1],3,2,0,false).unwrap_err();
+    let error=hdbscan_extract_impl(&[0.,1.,0.1],3,2,0,false,None,0).unwrap_err();
     assert!(error.contains("connect every row"));
+ }
+ #[test]
+ fn all_points_memberships_are_soft_and_row_scaled(){
+    let edges=vec![0.,1.,0.05,1.,2.,0.1,3.,4.,0.05,4.,5.,0.1,2.,3.,10.];
+    let rows=vec![1.,0.,0.995,0.1,0.98,0.2,-1.,0.,-0.995,-0.1,-0.98,-0.2];
+    let result=hdbscan_extract_impl(&edges,6,3,0,false,Some(&rows),2).unwrap();
+    let memberships=result.memberships.unwrap();
+    assert_eq!(memberships.len(),12);
+    for point in 0..6 { let sum: f32=memberships[point*2..point*2+2].iter().sum(); assert!(sum <= 1.00001); }
+    assert!(memberships[0] > 0.5 && memberships[1] < 0.5);
+    assert!(memberships[3] < 0.5 && memberships[4] > 0.5);
+ }
+ #[test]
+ fn all_points_noise_keeps_nonzero_soft_mass(){
+    // Two selected three-point clusters, with a two-point discarded branch
+    // nested below the first cluster. The discarded points are noise labels,
+    // but prediction membership remains nonzero after scaling.
+    let edges=vec![0.,1.,0.5,1.,2.,0.5,6.,7.,0.5,2.,6.,2.,3.,4.,0.5,4.,5.,0.5,2.,3.,2.];
+    let rows=vec![0.,0.,0.1,0.,0.2,0.,1.,0.,1.1,0.,1.2,0.,0.3,0.,0.4,0.];
+    let result=hdbscan_extract_impl(&edges,8,3,0,false,Some(&rows),2).unwrap();
+    assert_eq!(result.labels[6], -1);
+    let memberships=result.memberships.unwrap();
+    assert!(memberships[12] > 0.0 && memberships[12] < 1.0);
  }
 }
