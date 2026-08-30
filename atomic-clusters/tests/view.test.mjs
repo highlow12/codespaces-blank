@@ -52,7 +52,7 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(view, /atomic-clusters-umap-hit-layer/);
   assert.match(view, /data-point-index/);
   assert.match(view, /mouseenter/);
-  assert.match(view, /targetEl: target \|\| this\.visualizationHitElements\[point\]/);
+  assert.match(view, /const pointButton = this\.visualizationHitElements\.find\(\(hit\) => Number\(hit\.dataset\.pointIndex\) === point\)/);
   assert.match(view, /openLinkText\(path, "", false\)/);
   assert.match(view, /atomic-clusters-tree-panel/);
   assert.match(css, /\.atomic-clusters-view \{[^}]*height: 100%/s);
@@ -69,12 +69,79 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(view, /cachedKey = ""; cachedBitmap = null; draw\(\)/);
   assert.match(view, /visualizationScaledStageSigma\(baseSigma, entry\.remainingDepth, isLeaf, kernelScale\)/);
   assert.match(view, /visualizationFrontier\(this\.visualizationRoot, \[current\.id\]/);
+  assert.match(view, /buildVisualizationPointSpatialIndex\(indexedPoints, pointHitRadius \* 2\)/);
+  assert.match(view, /queryNearest\(event\.clientX - rect\.left, event\.clientY - rect\.top, pointHitRadius\)/);
+  assert.match(view, /const maxPointHitTargets = 96/);
+  assert.match(view, /slice\(0, maxPointHitTargets\)/);
+  assert.match(view, /this\.visualizationRenderedPointIndices/);
   assert.match(view, /const clusterColor = visualizationCloudColor\(entry\.node, palette\)/);
   assert.doesNotMatch(view, /visualizationExpandedIds/);
   assert.match(view, /this\.navigateVisualization\(target\.node\.id, \(\) => undefined\)/);
   assert.match(view, /const parent = path\[path\.length - 2\]/);
+  assert.match(view, /const chunkSize = 80/);
+  assert.match(view, /viewport\.addEventListener\("scroll", onScroll\)/);
+  assert.doesNotMatch(view, /\.slice\(0, 3\)/);
+  assert.match(css, /\.atomic-clusters-note-list \{[^}]*overflow-y: auto/s);
   assert.match(css, /atomic-clusters-umap-controls/);
   assert.match(css, /@media \(max-width: 640px\)/);
+});
+
+test("restored explorer views can render the persisted result on first open", async () => {
+  const view = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(view, /initialResult\?: ClusterResult \| null/);
+  assert.match(view, /this\.result = initialResult \|\| null/);
+  assert.match(main, /this\.latestResult = await sqlite\.getResult\(\)/);
+  assert.match(main, /new ClusterExplorerView\(leaf, \(\) => this\.buildClusters\(\), this\.latestResult, /);
+  assert.match(main, /deferVisualization: true/);
+  assert.match(main, /getPcaCoordinatesMany\(result\.ids, modelHash\)/);
+  assert.match(main, /patchResultVisualization\(resultId, visualization\)/);
+});
+
+test("v6 results without UMAP schedule one idle visualization preparation and apply a returned visualization", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["requestIdleCallback", globalThis.requestIdleCallback], ["cancelIdleCallback", globalThis.cancelIdleCallback]]);
+  const idleCallbacks = []; let nextHandle = 1;
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  globalThis.requestIdleCallback = (callback) => { idleCallbacks.push(callback); return nextHandle++; }; globalThis.cancelIdleCallback = () => {};
+  try {
+    const { ClusterExplorerView } = await loadView(); let calls = 0;
+    const result = { schemaVersion: 6, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], outlierProxy: [0, 0], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null, nodes: [], rootChildren: [] }, pca: { selected: 2 }, timings: {} };
+    const visualization = { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} };
+    const view = new ClusterExplorerView({}, undefined, result, async (input) => { calls++; assert.equal(input, result); return visualization; });
+    view.setResult(result);
+    assert.equal(calls, 0); assert.equal(idleCallbacks.length, 1); assert.match(view.contentEl.children.at(-1).textContent, /Preparing visualization/);
+    idleCallbacks.shift()({ timeRemaining: () => 50 }); await Promise.resolve(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve();
+    assert.equal(calls, 1); assert.ok(view.contentEl.querySelector(".atomic-clusters-umap"));
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
+  }
+});
+
+test("lazy visualization completion is ignored after result replacement and close", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["requestIdleCallback", globalThis.requestIdleCallback], ["cancelIdleCallback", globalThis.cancelIdleCallback]]);
+  const idleCallbacks = []; let resolveVisualization;
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  globalThis.requestIdleCallback = (callback) => { idleCallbacks.push(callback); return idleCallbacks.length; }; globalThis.cancelIdleCallback = () => {};
+  try {
+    const { ClusterExplorerView } = await loadView();
+    const makeResult = (path) => ({ schemaVersion: 6, ids: [path], leafLabels: [-1], leafOrdering: [], memberships: [[]], probabilities: [0], outlierProxy: [1], titles: {}, hierarchy: { leaves: [], merges: [], root: null, nodes: [], rootChildren: [] }, pca: { selected: 0 }, timings: {} });
+    const first = makeResult("first.md"); const replacement = makeResult("replacement.md"); const visualization = { coordinates: [[0, 0]], labels: [-1], leafOrdering: [], memberships: [[]], configuration: {} };
+    const view = new ClusterExplorerView({}, undefined, first, async () => new Promise((resolve) => { resolveVisualization = resolve; }));
+    view.setResult(first); idleCallbacks.shift()({ timeRemaining: () => 50 }); await Promise.resolve(); view.setResult(replacement); resolveVisualization(visualization); await Promise.resolve(); await Promise.resolve();
+    assert.equal(view.contentEl.querySelector(".atomic-clusters-umap"), null); assert.match(view.contentEl.children.at(-1).textContent, /Preparing visualization/);
+    idleCallbacks.shift()({ timeRemaining: () => 50 }); await Promise.resolve(); view.onClose(); resolveVisualization(visualization); await Promise.resolve(); await Promise.resolve(); assert.equal(view.contentEl.children.length, 0);
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
+  }
+});
+
+test("plugin adds a ribbon button that opens the cluster explorer", async () => {
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /this\.addRibbonIcon\("scatter-chart", "Open Cluster Explorer", \(\) => void this\.openExplorer\(\)\)/);
 });
 
 test("resize observer ignores unchanged notifications and waits for a valid content box", async () => {

@@ -103,10 +103,31 @@ test("PCA preservation uses one bounded pilot plus final PCA, respects the cap, 
   assert.deepEqual(second.pca, first.pca);
   assert.deepEqual(secondCalls, firstCalls);
 
+  const deferred = await clusterEmbeddings(largeRows.map((_, index) => `deferred-${index}`), largeRows, { deferVisualization: true }, { kernel: pcaKernel(sharp, []) });
+  assert.equal(deferred.visualization, undefined);
+  assert.equal(deferred.schemaVersion, 6);
+  assert.equal(deferred.hierarchyPlacements.length, largeRows.length);
+
   const cappedRows = Array.from({ length: 80 }, (_, row) => Array.from({ length: 40 }, (_, column) => ((row + column) % 5) + 1));
   const cappedCalls = [];
   const capped = await clusterEmbeddings(cappedRows.map((_, index) => `cap-${index}`), cappedRows, { pcaMaxComponents: 40 }, { kernel: pcaKernel(Array(40).fill(1), cappedCalls) });
   assert.equal(capped.pca.selected, 32);
   assert.deepEqual(capped.pca.candidates, [32]);
   assert.deepEqual(cappedCalls, [40, 32]);
+});
+
+test("PCA preservation reuses its prefix row workspace across candidate widths", async () => {
+  const { selectPcaByPreservation } = await loadClustering();
+  const normalizedInputs = [];
+  const kernel = {
+    normalize(rows) { normalizedInputs.push(rows); return rows; },
+    exactKnn(rows, k) { return rows.map((_, index) => Array.from({ length: k }, (_, rank) => (index + rank + 1) % rows.length)); }
+  };
+  const rows = Array.from({ length: 8 }, (_, row) => [row + 1, row + 2, row + 3]);
+  selectPcaByPreservation(rows, rows.map((row) => row.slice()), [1, 2, 3], rows.length, 0.9, kernel);
+  // One call is the original-space reference; all prefix calls share one
+  // matrix and only resize/refill its row buffers between candidates.
+  assert.equal(normalizedInputs.length, 3);
+  assert.equal(new Set(normalizedInputs.slice(0, 1)).size, 1);
+  assert.equal(new Set(normalizedInputs.slice(1)).size, 1);
 });

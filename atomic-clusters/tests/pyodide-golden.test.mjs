@@ -42,6 +42,9 @@ test("Pyodide worker invokes cluster_documents through an injected discovery sea
   assert.match(source, /loadPyodide/);
   assert.match(source, /cluster_documents\(embeddings, ids=ids, config=config, discovery_runner=runner\)/);
   assert.match(source, /discoverPcaFeatures/);
+  assert.match(source, /buildHierarchy/);
+  assert.match(source, /computeHierarchyPlacements/);
+  assert.match(source, /pluginResult\.schemaVersion = 6/);
   assert.match(source, /runtime\.FS\.writeFile/);
   assert.match(client, /class PyodideClusteringWorker/);
   assert.match(client, /type: "INIT"/);

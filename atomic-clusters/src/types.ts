@@ -69,6 +69,8 @@ export interface EmbeddingRunLog {
 
 export interface ClusteringConfig {
   seed?: number;
+  /** Defer the Explorer-only 2D projection until the saved result is opened or the UI is idle. */
+  deferVisualization?: boolean;
   /**
    * Legacy display setting retained for saved configurations. PCA dimension
    * selection uses k-NN preservation rather than a variance cutoff.
@@ -160,6 +162,31 @@ export interface HierarchyTree {
   leaves: number[];
   merges: HierarchyMerge[];
   root: number | null;
+  /** v6 n-ary hierarchy, retained beside the binary dendrogram for parity. */
+  nodes?: HierarchyNode[];
+  rootChildren?: number[];
+  splitMethod?: "distance-knee-2-5";
+}
+
+/** Required user-facing hierarchy persisted by schema-v6 results. */
+export interface HierarchyTreeV6 extends HierarchyTree {
+  nodes: HierarchyNode[];
+  rootChildren: number[];
+  splitMethod: "distance-knee-2-5";
+}
+
+export interface HierarchyNode {
+  id: number;
+  children: number[];
+  descendantLeaves: number[];
+  distance: number;
+  mass: number;
+}
+
+export interface HierarchyPlacement {
+  kind: "leaf" | "residual";
+  nodeId: number | null;
+  confidence: number;
 }
 
 export type ClusterTitleStatus = "generated" | "empty";
@@ -177,7 +204,7 @@ export interface ClusterTitleGeneration {
 }
 
 export interface ClusterResult {
-  schemaVersion: 1 | 2 | 3 | 4 | 5;
+  schemaVersion: 1 | 2 | 3 | 4 | 5 | 6;
   ids: string[];
   leafLabels: number[];
   probabilities: number[];
@@ -193,6 +220,8 @@ export interface ClusterResult {
   /** Compatibility aliases consumed by the hierarchical explorer. */
   leafOrdering?: number[];
   memberships?: number[][];
+  /** One terminal location per note in v6. Root noise has nodeId=null. */
+  hierarchyPlacements?: HierarchyPlacement[];
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;

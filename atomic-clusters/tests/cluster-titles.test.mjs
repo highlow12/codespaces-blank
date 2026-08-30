@@ -54,3 +54,26 @@ test("result storage preserves keyword titles in v3 and strips legacy titles onl
   assert.match(storage, /if \(result\.schemaVersion === 3\) return result;/);
   assert.match(storage, /schemaVersion: 3 as const, titles: undefined, titleGeneration: undefined/);
 });
+
+test("v6 titles use field-aware ngrams, preserve inflected forms, and include residuals in parent scoring", async () => {
+  const { generateKeywordTitles, KEYWORD_TITLE_ALGORITHM_VERSION } = await loadTitle();
+  const v6 = {
+    schemaVersion: 6, ids: ["a.md", "b.md", "c.md"], leafLabels: [0, 1, 1], probabilities: [1, 1, 1], outlierProxy: [0, 0, 0],
+    hierarchy: {
+      leaves: [0, 1], merges: [{ id: 2, left: 0, right: 1, distance: 1, mass: 3 }], root: 2,
+      nodes: [{ id: 0, children: [], descendantLeaves: [0], distance: 0, mass: 1 }, { id: 1, children: [], descendantLeaves: [1], distance: 0, mass: 2 }, { id: 2, children: [0, 1], descendantLeaves: [0, 1], distance: 1, mass: 3 }], rootChildren: [0, 1], splitMethod: "distance-knee-2-5"
+    }, hierarchyPlacements: [{ kind: "leaf", nodeId: 0, confidence: 1 }, { kind: "leaf", nodeId: 1, confidence: 1 }, { kind: "residual", nodeId: 2, confidence: 0.4 }], pca: {}, timings: {}
+  };
+  const v6Notes = [
+    { path: "a.md", title: "Crochet Bags", content: "---\ntags: [handmade]\n---\n# Crochet Bags\n[[Yarn|Yarn craft]]\ncrochet bags and handles", hash: "a" },
+    { path: "Muscle.md", title: "Muscle", content: "## Anatomy\nmuscle movement", hash: "b" },
+    { path: "Noise.md", title: "Residual", content: "handmade yarn", hash: "c" }
+  ];
+  const titled = generateKeywordTitles(v6, v6Notes);
+  assert.equal(titled.titleGeneration.algorithmVersion, KEYWORD_TITLE_ALGORITHM_VERSION);
+  assert.equal(titled.titleGeneration.algorithmVersion, "contrastive-keyphrases-v2");
+  assert.ok(titled.titles["0"].includes("crochet"));
+  assert.ok(titled.titles["2"].length > 0);
+  assert.ok(titled.titles["0"].split(" · ").length <= 2);
+  assert.deepEqual(v6.titles, undefined);
+});

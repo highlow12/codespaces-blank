@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import { ClusterResult } from "./types";
-import { accumulateVisualizationDensity, blendVisualizationColor, buildVisualizationTree, clampVisualizationKernelScale, findNearestVisualizationPoint, layoutVisualizationClusterLabels, pickVisualizationCloud, validateVisualizationData, visualizationBaseBandwidth, visualizationOutgoingLayerTransform, visualizationCameraTransform, visualizationCloudColor, visualizationColorScheme, visualizationColorVector, visualizationDensityAlpha, visualizationFrontier, visualizationLeafOrdering, visualizationMembershipAmplitude, visualizationPath, visualizationP95RowSum, visualizationRegion, visualizationScaledStageSigma, visualizationWorldToScreen, VisualizationCamera, VisualizationNode, VisualizationSplat, VISUALIZATION_KERNEL_SCALE_DEFAULT, VISUALIZATION_KERNEL_SCALE_MAX, VISUALIZATION_KERNEL_SCALE_MIN, VISUALIZATION_KERNEL_SCALE_STEP, VISUALIZATION_NOISE_COLOR } from "./visualization";
+import { accumulateVisualizationDensity, blendVisualizationColor, buildVisualizationPointSpatialIndex, buildVisualizationTree, clampVisualizationKernelScale, layoutVisualizationClusterLabels, pickVisualizationCloud, validateVisualizationData, visualizationBaseBandwidth, visualizationOutgoingLayerTransform, visualizationCameraTransform, visualizationCloudColor, visualizationColorScheme, visualizationColorVector, visualizationDensityAlpha, visualizationFrontier, visualizationLeafOrdering, visualizationMembershipAmplitude, visualizationPath, visualizationP95RowSum, visualizationRegion, visualizationScaledStageSigma, visualizationWorldToScreen, VisualizationCamera, VisualizationNode, VisualizationPointSpatialIndex, VisualizationSplat, VISUALIZATION_KERNEL_SCALE_DEFAULT, VISUALIZATION_KERNEL_SCALE_MAX, VISUALIZATION_KERNEL_SCALE_MIN, VISUALIZATION_KERNEL_SCALE_STEP, VISUALIZATION_NOISE_COLOR } from "./visualization";
 
 export const VIEW_TYPE_CLUSTER_EXPLORER = "atomic-clusters-explorer";
 // Keep navigation long enough for the hierarchy change to read as a camera
@@ -11,12 +11,19 @@ const VISUALIZATION_CAMERA_TRANSITION_MS = 460;
 // without treating the first post-render notification as a real resize.
 const VISUALIZATION_VIEWPORT_TOLERANCE = 1.25;
 
+/** Returned by the lazy projection hook: either a complete result or just its visualization. */
+export type EnsureVisualizationResult = ClusterResult | ClusterResult["visualization"] | null | undefined;
+export type EnsureVisualization = (result: ClusterResult) => Promise<EnsureVisualizationResult>;
+
 export class ClusterExplorerView extends ItemView {
   private static visualizationControlsCounter = 0;
   private result: ClusterResult | null = null;
   private progress: { phase: string; value: number } | null = null;
   private visualizationPoints: [number, number][] = [];
+  /** Every visible note is painted on canvas; this is the complete dot set. */
+  private visualizationRenderedPointIndices: number[] = [];
   private visualizationHitElements: HTMLButtonElement[] = [];
+  private visualizationSpatialIndex: VisualizationPointSpatialIndex | null = null;
   private visualizationResizeObserver: ResizeObserver | null = null;
   private visualizationCleanup: (() => void) | null = null;
   private hoveredVisualizationPoint: number | null = null;
@@ -35,13 +42,61 @@ export class ClusterExplorerView extends ItemView {
   private visualizationAnimationCleanup: (() => void) | null = null;
   private readonly visualizationControlsId = ++ClusterExplorerView.visualizationControlsCounter;
   private readonly rebuildClusters?: () => void | Promise<void>;
-  constructor(leaf: WorkspaceLeaf, rebuildClusters?: () => void | Promise<void>) { super(leaf); this.rebuildClusters = rebuildClusters; }
+  private readonly ensureVisualization?: EnsureVisualization;
+  private visualizationGenerationResult: ClusterResult | null = null;
+  private visualizationGenerationIdleHandle: number | null = null;
+  private visualizationGenerationCancel: (() => void) | null = null;
+  private visualizationGenerationToken = 0;
+  private visualizationGenerationScheduled = false;
+  private visualizationGenerationInFlight = false;
+  private visualizationGenerationError: string | null = null;
+  private visualizationClosed = false;
+  constructor(leaf: WorkspaceLeaf, rebuildClusters?: () => void | Promise<void>, initialResult?: ClusterResult | null, ensureVisualization?: EnsureVisualization) {
+    super(leaf);
+    this.rebuildClusters = rebuildClusters;
+    this.ensureVisualization = ensureVisualization;
+    // Workspace leaves are restored while the plugin is loading.  Accept the
+    // already-loaded persisted result so a restored explorer can render its
+    // visualization during its first onOpen instead of briefly showing the
+    // empty-state message until the user opens it manually.
+    this.result = initialResult || null;
+  }
   getViewType(): string { return VIEW_TYPE_CLUSTER_EXPLORER; }
   getDisplayText(): string { return "Atomic Clusters"; }
-  async onOpen(): Promise<void> { this.render(); }
-  async onClose(): Promise<void> { this.disposeVisualization(); this.contentEl.empty(); }
-  setResult(result: ClusterResult): void { this.cancelVisualizationAnimation(false); this.result = result; this.visualizationNodeId = "root"; this.visualizationTransition = null; this.visualizationLastCamera = null; this.visualizationDisplayedCamera = null; this.render(); }
+  async onOpen(): Promise<void> { this.visualizationClosed = false; this.render(); }
+  async onClose(): Promise<void> { this.visualizationClosed = true; this.invalidateVisualizationGeneration(); this.disposeVisualization(); this.contentEl.empty(); }
+  setResult(result: ClusterResult): void { if (this.result !== result) this.invalidateVisualizationGeneration(); this.cancelVisualizationAnimation(false); this.result = result; this.visualizationNodeId = "root"; this.visualizationTransition = null; this.visualizationLastCamera = null; this.visualizationDisplayedCamera = null; this.render(); }
   setProgress(phase: string, value: number): void { this.progress = { phase, value }; this.render(); }
+  private invalidateVisualizationGeneration(): void {
+    this.visualizationGenerationToken++;
+    if (this.visualizationGenerationIdleHandle !== null) this.visualizationGenerationCancel?.();
+    this.visualizationGenerationIdleHandle = null; this.visualizationGenerationCancel = null;
+    this.visualizationGenerationResult = null; this.visualizationGenerationScheduled = false; this.visualizationGenerationInFlight = false; this.visualizationGenerationError = null;
+  }
+  private scheduleVisualizationGeneration(result: ClusterResult): void {
+    if (!this.ensureVisualization || this.visualizationClosed || this.visualizationGenerationError || (this.visualizationGenerationResult === result && (this.visualizationGenerationScheduled || this.visualizationGenerationInFlight))) return;
+    this.visualizationGenerationResult = result; this.visualizationGenerationScheduled = true; const token = this.visualizationGenerationToken;
+    const run = (): void => {
+      this.visualizationGenerationIdleHandle = null; this.visualizationGenerationCancel = null;
+      if (this.visualizationClosed || token !== this.visualizationGenerationToken || this.result !== result) { this.visualizationGenerationScheduled = false; return; }
+      this.visualizationGenerationScheduled = false; this.visualizationGenerationInFlight = true;
+      Promise.resolve().then(() => this.ensureVisualization!(result)).then((returned) => {
+        if (this.visualizationClosed || token !== this.visualizationGenerationToken || this.result !== result) return;
+        const complete = returned && typeof returned === "object" && Array.isArray((returned as ClusterResult).ids) && "hierarchy" in returned ? returned as ClusterResult : null;
+        const returnedVisualization = returned && typeof returned === "object" && "coordinates" in returned ? returned as NonNullable<ClusterResult["visualization"]> : undefined;
+        const visualization = complete?.visualization || returnedVisualization || result.visualization;
+        if (!visualization) throw new Error("Visualization generation returned no coordinates");
+        const nextResult = complete || { ...result, visualization };
+        this.visualizationGenerationInFlight = false; this.visualizationGenerationResult = null; this.visualizationGenerationError = null; this.result = nextResult; this.visualizationNodeId = "root"; this.render();
+      }).catch((error: unknown) => {
+        if (this.visualizationClosed || token !== this.visualizationGenerationToken || this.result !== result) return;
+        this.visualizationGenerationInFlight = false; this.visualizationGenerationError = `Visualization preparation failed: ${error instanceof Error ? error.message : String(error)}`; this.render();
+      });
+    };
+    const idle = (globalThis as typeof globalThis & { requestIdleCallback?: (callback: (deadline: { timeRemaining: () => number }) => void) => number; cancelIdleCallback?: (handle: number) => void }).requestIdleCallback;
+    if (typeof idle === "function") { const handle = idle(() => run()); this.visualizationGenerationIdleHandle = handle; this.visualizationGenerationCancel = () => (globalThis as typeof globalThis & { cancelIdleCallback?: (handle: number) => void }).cancelIdleCallback?.(handle); }
+    else { const handle = globalThis.setTimeout(run, 0) as unknown as number; this.visualizationGenerationIdleHandle = handle; this.visualizationGenerationCancel = () => globalThis.clearTimeout(handle); }
+  }
   private render(): void {
     this.disposeVisualization(); this.contentEl.empty(); this.contentEl.addClass("atomic-clusters-view");
     const header = this.contentEl.createDiv({ cls: "atomic-clusters-view-header" }); header.createEl("h3", { text: "Atomic Clusters" });
@@ -56,16 +111,44 @@ export class ClusterExplorerView extends ItemView {
     // a just-started navigation animation.
     const tree = this.contentEl.createEl("details", { cls: "atomic-clusters-tree-panel" }); tree.createEl("summary", { text: `Cluster hierarchy · ${this.result.hierarchy.leaves.length} leaves` });
     const list = tree.createDiv({ cls: "atomic-clusters-tree" }); const adapterRoot = buildVisualizationTree(this.result.hierarchy, this.result.leafLabels); const palette = visualizationColorScheme(adapterRoot);
-    const renderNode = (item: VisualizationNode, parent: HTMLElement, depth: number): void => { if (!item.children.length) { const id = item.sourceId ?? -1; const node = parent.createDiv({ cls: "atomic-clusters-node" }); node.style.setProperty("--atomic-cluster-color", palette.nodeColors.get(item.id) || "#9aa0a6"); const title = this.result!.titles?.[String(id)]; node.createEl("strong", { text: `${title ? `${title} · ` : ""}Leaf ${id}` }); const files = this.result!.ids.map((path, index) => ({ path, index })).filter((entry) => this.result!.leafLabels[entry.index] === id).sort((a, b) => (this.result!.probabilities[b.index] || 0) - (this.result!.probabilities[a.index] || 0) || a.path.localeCompare(b.path)).slice(0, 3).map((entry) => entry.path); node.createDiv({ text: files.length ? "Representative notes:" : "No representative notes" }).addClass("atomic-clusters-status"); for (const path of files) node.createEl("button", { text: path, attr: { type: "button" } }).addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); return; } const details = parent.createEl("details", { cls: "atomic-clusters-node" }) as HTMLDetailsElement; details.style.setProperty("--atomic-cluster-color", palette.nodeColors.get(item.id) || "#9aa0a6"); details.open = depth === 0; const id = item.sourceId; details.createEl("summary", { text: `${id === null ? "All notes" : `${this.result!.titles?.[String(id)] ? `${this.result!.titles![String(id)]} · ` : ""}Merge ${id}`}` }); item.children.forEach((child) => renderNode(child, details, depth + 1)); };
+    const residuals = (this.result.hierarchyPlacements || []).map((placement, index) => ({ placement, path: this.result!.ids[index], index })).filter(({ placement }) => placement.kind === "residual");
+    const renderScrollableNotes = (parent: HTMLElement, paths: readonly string[]): void => {
+      const viewport = parent.createDiv({ cls: "atomic-clusters-note-list", attr: { tabindex: "0" } }); let rendered = 0; const chunkSize = 80;
+      const appendChunk = (): void => { const end = Math.min(paths.length, rendered + chunkSize); for (; rendered < end; rendered++) { const path = paths[rendered]; viewport.createEl("button", { text: path, attr: { type: "button" } }).addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); } };
+      const onScroll = (): void => { if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 96) appendChunk(); };
+      appendChunk(); viewport.addEventListener("scroll", onScroll);
+    };
+    const renderResidualSection = (parent: HTMLElement, nodeId: number | null): void => {
+      const direct = residuals.filter(({ placement }) => placement.nodeId === nodeId); if (!direct.length) return;
+      const section = parent.createEl("details", { cls: "atomic-clusters-residuals" }); section.createEl("summary", { text: `Notes remaining at this stage · ${direct.length}` });
+      renderScrollableNotes(section, direct.map((item) => item.path));
+    };
+    const renderNode = (item: VisualizationNode, parent: HTMLElement, depth: number): void => {
+      if (!item.children.length) {
+        const id = item.sourceId ?? -1; const node = parent.createDiv({ cls: "atomic-clusters-node" }); node.style.setProperty("--atomic-cluster-color", palette.nodeColors.get(item.id) || "#9aa0a6"); const title = this.result!.titles?.[String(id)]; node.createEl("strong", { text: `${title ? `${title} · ` : ""}Leaf ${id}` });
+        const files = this.result!.ids.map((path, index) => ({ path, index })).filter((entry) => this.result!.hierarchyPlacements?.length ? this.result!.hierarchyPlacements[entry.index]?.kind === "leaf" && this.result!.hierarchyPlacements[entry.index]?.nodeId === id : this.result!.leafLabels[entry.index] === id).sort((a, b) => (this.result!.probabilities[b.index] || 0) - (this.result!.probabilities[a.index] || 0) || a.path.localeCompare(b.path)).map((entry) => entry.path);
+        node.createDiv({ text: files.length ? `Notes · ${files.length}` : "No notes" }).addClass("atomic-clusters-status"); if (files.length) renderScrollableNotes(node, files); return;
+      }
+      const details = parent.createEl("details", { cls: "atomic-clusters-node" }) as HTMLDetailsElement; details.style.setProperty("--atomic-cluster-color", palette.nodeColors.get(item.id) || "#9aa0a6"); details.open = depth === 0; const id = item.sourceId; details.createEl("summary", { text: `${id === null ? "All notes" : `${this.result!.titles?.[String(id)] ? `${this.result!.titles![String(id)]} · ` : ""}Merge ${id}`}` }); renderResidualSection(details, id); item.children.forEach((child) => renderNode(child, details, depth + 1));
+    };
     if (adapterRoot.children.length) adapterRoot.children.forEach((child) => renderNode(child, list, 0)); else list.createDiv({ text: "No non-noise clusters found." }).addClass("atomic-clusters-status");
+    renderResidualSection(list, null);
     this.renderVisualization();
   }
   private renderVisualization(): void {
     const result = this.result!; const visualization = result.visualization; const ordering = visualizationLeafOrdering(result);
-    if (!validateVisualizationData(result) || !visualization) { this.contentEl.createDiv({ text: "Hierarchical Gaussian-cloud visualization is unavailable for this saved result. Rebuild clusters to create a v4 result with soft memberships." }).addClass("atomic-clusters-status"); const rebuild = this.contentEl.createEl("button", { text: "Rebuild clusters", attr: { type: "button" } }); rebuild.addEventListener("click", () => void this.rebuildClusters?.()); return; }
-    const coordinates = visualization.coordinates; const memberships = result.memberships!; const labels = visualization.labels; this.visualizationRoot = buildVisualizationTree(result.hierarchy, labels); const palette = visualizationColorScheme(this.visualizationRoot); // Global-world baseline retained for compatibility: scaleVisualizationPoints(visualization.coordinates, width, height)
+    if (!validateVisualizationData(result) || !visualization) {
+      if (result.schemaVersion >= 6) {
+        const message = this.visualizationGenerationError || (this.ensureVisualization ? "Preparing visualization…" : "Visualization will be prepared when the explorer is connected to a projection worker.");
+        this.contentEl.createDiv({ text: message }).addClass("atomic-clusters-status");
+        if (this.ensureVisualization && !this.visualizationGenerationError) this.scheduleVisualizationGeneration(result);
+        return;
+      }
+      this.contentEl.createDiv({ text: "Hierarchical Gaussian-cloud visualization is unavailable for this saved result. Rebuild clusters to create a v4 result with soft memberships." }).addClass("atomic-clusters-status"); const rebuild = this.contentEl.createEl("button", { text: "Rebuild clusters", attr: { type: "button" } }); rebuild.addEventListener("click", () => void this.rebuildClusters?.()); return;
+    }
+    const coordinates = visualization.coordinates; const memberships = result.memberships!; const labels = visualization.labels; this.visualizationRoot = buildVisualizationTree(result.hierarchy, labels); const palette = visualizationColorScheme(this.visualizationRoot); const hierarchyDepths = new Map<number, number>(); const indexDepths = (node: VisualizationNode): void => { if (node.sourceId !== null) hierarchyDepths.set(node.sourceId, node.depth); node.children.forEach(indexDepths); }; indexDepths(this.visualizationRoot); // Global-world baseline retained for compatibility: scaleVisualizationPoints(visualization.coordinates, width, height)
     const findNode = (node: VisualizationNode): VisualizationNode | null => node.id === this.visualizationNodeId ? node : node.children.reduce<VisualizationNode | null>((found, child) => found || findNode(child), null); const current = findNode(this.visualizationRoot) || this.visualizationRoot; this.visualizationNodeId = current.id;
-    const frontier = visualizationFrontier(this.visualizationRoot, [current.id], memberships, ordering); const frame = this.contentEl.createDiv({ cls: "atomic-clusters-umap" }); const plot = frame.createDiv({ cls: "atomic-clusters-umap-plot" }); const navigation = plot.createDiv({ cls: "atomic-clusters-umap-navigation" }); const path = visualizationPath(this.visualizationRoot, current.id);
+    const frontier = visualizationFrontier(this.visualizationRoot, [current.id], memberships, ordering, result.hierarchyPlacements); const frame = this.contentEl.createDiv({ cls: "atomic-clusters-umap" }); const plot = frame.createDiv({ cls: "atomic-clusters-umap-plot" }); const navigation = plot.createDiv({ cls: "atomic-clusters-umap-navigation" }); const path = visualizationPath(this.visualizationRoot, current.id);
     const back = navigation.createEl("button", { text: "Back", attr: { type: "button", "aria-label": "Back to parent cluster" } }); back.disabled = path.length <= 1; back.addEventListener("click", () => { if (path.length > 1) { const parent = path[path.length - 2]; this.navigateVisualization(parent.id, () => undefined); } });
     const crumbs = navigation.createDiv({ cls: "atomic-clusters-breadcrumb" }); path.forEach((node, index) => { if (index) crumbs.createSpan({ text: " / " }); const title = node.sourceId === null ? "All notes" : result.titles?.[String(node.sourceId)]; const crumb = crumbs.createEl("button", { text: title || `Cluster ${node.sourceId}`, attr: { type: "button", "aria-current": index === path.length - 1 ? "page" : "false" } }); crumb.addEventListener("click", () => { this.navigateVisualization(node.id, () => undefined); }); });
     // Canvas and hit targets share one transformed layer. Controls/navigation
@@ -98,6 +181,7 @@ export class ClusterExplorerView extends ItemView {
     const canvas = visualLayer.createEl("canvas", { cls: "atomic-clusters-umap-canvas" }); canvas.setAttribute("role", "img"); canvas.setAttribute("aria-label", "Hierarchical Gaussian cloud visualization. Click a cloud to zoom; hover a note to preview it; click a note to open it."); const hitLayer = visualLayer.createDiv({ cls: "atomic-clusters-umap-hit-layer" });
     // Keep all notes in the global UMAP world and fit only the selected node in the camera.
     const region = visualizationRegion(current, coordinates); const baseSigma = visualizationBaseBandwidth(coordinates); const p95 = visualizationP95RowSum(memberships); let cachedKey = ""; let cachedClouds: VisualizationSplat[][] = []; let cachedBitmap: HTMLCanvasElement | null = null;
+    const pointHitRadius = 14; const maxPointHitTargets = 96; const pointHitButtons = new Map<number, HTMLButtonElement>();
     type VisualizationViewport = [number, number];
     // ResizeObserver and canvas layout do not necessarily report the same
     // floating-point CSS size.  A freshly mounted plot can also differ by a
@@ -133,13 +217,31 @@ export class ClusterExplorerView extends ItemView {
       const kernelScale = clampVisualizationKernelScale(this.visualizationKernelScale); this.visualizationKernelScale = kernelScale;
       const key = `${current.id}|${Math.round(width)}x${Math.round(height)}|${baseSigma}|${kernelScale}|${dpr}`;
       if (key !== cachedKey) { cachedKey = key; cachedBitmap = null; const longAxis = Math.max(width, height); const rasterLong = Math.max(256, Math.min(512, Math.round(longAxis * .5))); const rasterScale = rasterLong / longAxis; const rasterWidth = Math.max(1, Math.round(width * rasterScale)); const rasterHeight = Math.max(1, Math.round(height * rasterScale)); cachedClouds = []; const allDots = new Set<number>();
-        while (hitLayer.firstChild) hitLayer.removeChild(hitLayer.firstChild); for (const entry of frontier) { const isLeaf = !entry.node.children.length; const splats: VisualizationSplat[] = []; const clusterColor = visualizationCloudColor(entry.node, palette); const color = /^#[0-9a-f]{6}$/i.test(clusterColor) ? [parseInt(clusterColor.slice(1, 3), 16), parseInt(clusterColor.slice(3, 5), 16), parseInt(clusterColor.slice(5, 7), 16)] as [number, number, number] : visualizationColorVector([], ordering); if (entry.actualPoints) for (const index of entry.pointIndices) allDots.add(index); else { for (const index of entry.pointIndices) { const point = points[index]; const row = memberships[index] || []; if (!point) continue; splats.push({ x: point[0] * rasterScale, y: point[1] * rasterScale, sigma: visualizationScaledStageSigma(baseSigma, entry.remainingDepth, isLeaf, kernelScale) * camera.scale * rasterScale, color, amplitude: visualizationMembershipAmplitude(row, p95) }); } cachedClouds.push(splats); } for (const index of entry.residualIndices) allDots.add(index); }
+        for (const entry of frontier) { const isLeaf = !entry.node.children.length; const splats: VisualizationSplat[] = []; const clusterColor = visualizationCloudColor(entry.node, palette); const color = /^#[0-9a-f]{6}$/i.test(clusterColor) ? [parseInt(clusterColor.slice(1, 3), 16), parseInt(clusterColor.slice(3, 5), 16), parseInt(clusterColor.slice(5, 7), 16)] as [number, number, number] : visualizationColorVector([], ordering); if (entry.actualPoints) for (const index of entry.pointIndices) allDots.add(index); else { for (const index of entry.pointIndices) { const point = points[index]; const row = memberships[index] || []; if (!point) continue; splats.push({ x: point[0] * rasterScale, y: point[1] * rasterScale, sigma: visualizationScaledStageSigma(baseSigma, entry.remainingDepth, isLeaf, kernelScale) * camera.scale * rasterScale, color, amplitude: visualizationMembershipAmplitude(row, p95) }); } cachedClouds.push(splats); } for (const index of entry.residualIndices) allDots.add(index); }
         // A residual can be adjacent to multiple children, but is represented by one dot only.
-        this.visualizationHitElements = [...allDots].sort((a, b) => a - b).map((index) => { const hit = hitLayer.createEl("button", { cls: "atomic-clusters-umap-point-hit", attr: { type: "button", "aria-label": result.ids[index], "data-point-index": String(index) } }); hit.addEventListener("mouseenter", (event) => this.setHoveredVisualizationPoint(index, event, hit, draw)); hit.addEventListener("click", (event) => { event.preventDefault(); void this.app.workspace.openLinkText(result.ids[index], "", false); }); return hit; });
+        this.visualizationRenderedPointIndices = [...allDots].sort((a, b) => a - b);
+        // Index only points belonging to this stage. Hidden notes must not
+        // steal hover/clicks while a child subtree is focused.
+        const indexedPoints = points.map((point, index) => allDots.has(index) ? point : [Number.NaN, Number.NaN] as [number, number]);
+        this.visualizationSpatialIndex = buildVisualizationPointSpatialIndex(indexedPoints, pointHitRadius * 2);
+        // Keep a small, reusable semantic button pool near the current
+        // viewport. Every note remains painted and picked by the canvas; the
+        // pool exists only for keyboard/accessibility affordances.
+        const centerX = width / 2; const centerY = height / 2;
+        const poolIndices = this.visualizationSpatialIndex.queryRect(-pointHitRadius, -pointHitRadius, width + pointHitRadius, height + pointHitRadius)
+          .sort((a, b) => ((points[a][0] - centerX) ** 2 + (points[a][1] - centerY) ** 2) - ((points[b][0] - centerX) ** 2 + (points[b][1] - centerY) ** 2) || a - b)
+          .slice(0, maxPointHitTargets);
+        const poolSet = new Set(poolIndices);
+        for (const [index, hit] of pointHitButtons) if (!poolSet.has(index)) { if (hit.parentElement === hitLayer) hitLayer.removeChild(hit); pointHitButtons.delete(index); }
+        this.visualizationHitElements = poolIndices.map((index) => {
+          const placement = result.hierarchyPlacements?.[index]; const residualDepth = placement?.nodeId === null ? 0 : hierarchyDepths.get(placement?.nodeId ?? -1) || 0; const residualDetail = placement?.kind === "residual" ? ` · residual at ${placement.nodeId === null ? "root" : `node ${placement.nodeId}`} · depth ${residualDepth} · max child confidence ${placement.confidence.toFixed(3)}` : "";
+          let hit = pointHitButtons.get(index); if (!hit) { hit = hitLayer.createEl("button", { cls: "atomic-clusters-umap-point-hit", attr: { type: "button", "data-point-index": String(index) } }); hit.addEventListener("mouseenter", (event) => this.setHoveredVisualizationPoint(index, event, hit!, draw)); hit.addEventListener("click", (event) => { event.preventDefault(); void this.app.workspace.openLinkText(result.ids[index], "", false); }); pointHitButtons.set(index, hit); }
+          hit.setAttribute("aria-label", `${result.ids[index]}${residualDetail}`); hit.setAttribute("title", `${result.ids[index]}${residualDetail}`); return hit;
+        });
         const field = accumulateVisualizationDensity(cachedClouds.flat(), rasterWidth, rasterHeight); const bitmap = typeof document === "undefined" ? null : document.createElement("canvas"); if (bitmap) { bitmap.width = rasterWidth; bitmap.height = rasterHeight; const bitmapContext = bitmap.getContext("2d"); if (bitmapContext) { const image = bitmapContext.createImageData(rasterWidth, rasterHeight); for (let offset = 0; offset < field.density.length; offset++) { const density = field.density[offset]; const alpha = visualizationDensityAlpha(density); image.data[offset * 4] = density > 0 ? Math.round(field.red[offset] / density) : 0; image.data[offset * 4 + 1] = density > 0 ? Math.round(field.green[offset] / density) : 0; image.data[offset * 4 + 2] = density > 0 ? Math.round(field.blue[offset] / density) : 0; image.data[offset * 4 + 3] = Math.round(alpha * 255); } bitmapContext.putImageData(image, 0, 0); cachedBitmap = bitmap; } }
       }
       if (cachedBitmap) { context.imageSmoothingEnabled = true; context.drawImage(cachedBitmap, 0, 0, width, height); }
-      const computedStyle = typeof getComputedStyle === "function" ? getComputedStyle(frame) : null; const background = computedStyle?.getPropertyValue("--background-primary").trim() || "transparent"; const residualDots = new Set(frontier.flatMap((entry) => entry.residualIndices)); const dotIndices = this.visualizationHitElements.map((hit) => Number(hit.dataset.pointIndex)); dotIndices.forEach((index) => { const point = points[index]; if (!point) return; const radius = index === this.hoveredVisualizationPoint ? 6 : 4; context.beginPath(); const label = labels[index]; context.fillStyle = label === -1 || residualDots.has(index) ? VISUALIZATION_NOISE_COLOR : blendVisualizationColor(memberships[index], ordering, palette.leafColors); context.globalAlpha = index === this.hoveredVisualizationPoint ? 1 : .9; context.arc(point[0], point[1], radius, 0, Math.PI * 2); context.fill(); context.globalAlpha = 1; context.strokeStyle = background; context.stroke(); });
+      const computedStyle = typeof getComputedStyle === "function" ? getComputedStyle(frame) : null; const background = computedStyle?.getPropertyValue("--background-primary").trim() || "transparent"; const residualDots = new Set(frontier.flatMap((entry) => entry.residualIndices)); const directResidualDots = new Set(frontier.flatMap((entry) => entry.directResidualIndices || [])); const dotIndices = this.visualizationRenderedPointIndices; dotIndices.forEach((index) => { const point = points[index]; if (!point) return; const radius = index === this.hoveredVisualizationPoint ? 6 : 4; context.beginPath(); const label = labels[index]; context.fillStyle = directResidualDots.has(index) ? "#6f757b" : label === -1 || residualDots.has(index) ? VISUALIZATION_NOISE_COLOR : blendVisualizationColor(memberships[index], ordering, palette.leafColors); context.globalAlpha = index === this.hoveredVisualizationPoint ? 1 : .9; context.arc(point[0], point[1], radius, 0, Math.PI * 2); context.fill(); context.globalAlpha = 1; context.strokeStyle = background; context.stroke(); });
       // Labels live on the same canvas as the cloud and dots.  Consequently
       // the outgoing navigation snapshot contains them too, with no DOM
       // overlay flashing during the camera transition.  They are deliberately
@@ -154,7 +256,7 @@ export class ClusterExplorerView extends ItemView {
         context.fillStyle = placement.contrast.background; context.globalAlpha = .92; context.fill(); context.globalAlpha = 1; // The outer stroke is the color that contrasts the cloud, so the pill remains visible even when its fill is near the cloud color.
         context.strokeStyle = placement.contrast.foreground; context.lineWidth = 2; context.stroke(); context.fillStyle = placement.contrast.foreground; context.font = "600 12px system-ui, sans-serif"; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(placement.text, placement.x + placement.width / 2, placement.y + placement.height / 2); context.restore();
       }
-      this.visualizationHitElements.forEach((hit, index) => { const point = points[dotIndices[index]]; if (point) { hit.style.left = `${point[0]}px`; hit.style.top = `${point[1]}px`; } }); if (this.hoveredVisualizationPoint !== null) { const point = points[this.hoveredVisualizationPoint]; if (point) { context.beginPath(); context.strokeStyle = computedStyle?.color || "currentColor"; context.lineWidth = 1.5; context.arc(point[0], point[1], 10, 0, Math.PI * 2); context.stroke(); } } context.globalAlpha = 1;
+      const hitPointIndices = this.visualizationHitElements.map((hit) => Number(hit.dataset.pointIndex)); this.visualizationHitElements.forEach((hit, index) => { const point = points[hitPointIndices[index]]; if (point) { hit.style.left = `${point[0]}px`; hit.style.top = `${point[1]}px`; } }); if (this.hoveredVisualizationPoint !== null) { const point = points[this.hoveredVisualizationPoint]; if (point) { context.beginPath(); context.strokeStyle = computedStyle?.color || "currentColor"; context.lineWidth = 1.5; context.arc(point[0], point[1], 10, 0, Math.PI * 2); context.stroke(); } } context.globalAlpha = 1;
       return true;
     };
     const controlsBodyId = `atomic-clusters-umap-controls-body-${this.visualizationControlsId}`; const scaleInputId = `atomic-clusters-kernel-scale-${this.visualizationControlsId}`;
@@ -168,9 +270,9 @@ export class ClusterExplorerView extends ItemView {
     if (this.visualizationControlsCollapsed) controls.addClass("is-collapsed");
     toggle.addEventListener("click", () => { this.visualizationControlsCollapsed = !this.visualizationControlsCollapsed; controls.toggleClass("is-collapsed", this.visualizationControlsCollapsed); toggle.setAttribute("aria-expanded", String(!this.visualizationControlsCollapsed)); toggle.setText(this.visualizationControlsCollapsed ? "Show adjustments" : "Hide adjustments"); });
     scaleInput.addEventListener("input", () => { this.visualizationKernelScale = clampVisualizationKernelScale(Number(scaleInput.value)); scaleOutput.setText(`${this.visualizationKernelScale.toFixed(2)}×`); cachedKey = ""; cachedBitmap = null; draw(); });
-    frame.addEventListener("click", (event) => { if (this.visualizationAnimating || !(event.target instanceof HTMLCanvasElement)) return; const rect = canvas.getBoundingClientRect(); const x = event.clientX - rect.left, y = event.clientY - rect.top; const longAxis = Math.max(rect.width, rect.height); const rasterScale = Math.max(256, Math.min(512, Math.round(longAxis * .5))) / longAxis; const picked = pickVisualizationCloud(cachedClouds, x * rasterScale, y * rasterScale); if (picked !== null) { const cloudEntries = frontier.filter((entry) => !entry.actualPoints); const target = cloudEntries[picked]; if (target) this.navigateVisualization(target.node.id, () => undefined); } });
-    const onMove = (event: MouseEvent): void => { if (this.visualizationAnimating) return; const rect = canvas.getBoundingClientRect(); const dotIndices = this.visualizationHitElements.map((hit) => Number(hit.dataset.pointIndex)); const visible = dotIndices.map((index) => this.visualizationPoints[index]); const nearestVisible = findNearestVisualizationPoint(visible, event.clientX - rect.left, event.clientY - rect.top, 14); const index = nearestVisible === null ? null : dotIndices[nearestVisible]; const target = event.target instanceof HTMLElement && event.target.classList.contains("atomic-clusters-umap-point-hit") ? event.target : canvas; this.setHoveredVisualizationPoint(index, event, target, draw); }; const onLeave = (): void => this.setHoveredVisualizationPoint(null, null, null, draw); frame.addEventListener("mousemove", onMove); frame.addEventListener("mouseleave", onLeave); const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape" && path.length > 1) { event.preventDefault(); const parent = path[path.length - 2]; this.navigateVisualization(parent.id, () => undefined); } }; const focusFrame = (): void => frame.focus(); frame.tabIndex = 0; frame.addEventListener("keydown", onKey); frame.addEventListener("pointerdown", focusFrame);
-    this.visualizationCleanup = () => { frame.removeEventListener("mousemove", onMove); frame.removeEventListener("mouseleave", onLeave); frame.removeEventListener("keydown", onKey); frame.removeEventListener("pointerdown", focusFrame); this.visualizationHitElements = []; };
+    frame.addEventListener("click", (event) => { if (this.visualizationAnimating) return; const pointButton = event.target instanceof HTMLElement && event.target.classList.contains("atomic-clusters-umap-point-hit"); const rect = canvas.getBoundingClientRect(); const x = event.clientX - rect.left, y = event.clientY - rect.top; if (!pointButton) { const note = this.visualizationSpatialIndex?.queryNearest(x, y, pointHitRadius) ?? null; if (note !== null) { void this.app.workspace.openLinkText(result.ids[note], "", false); return; } } if (!(event.target instanceof HTMLCanvasElement)) return; const longAxis = Math.max(rect.width, rect.height); const rasterScale = Math.max(256, Math.min(512, Math.round(longAxis * .5))) / longAxis; const picked = pickVisualizationCloud(cachedClouds, x * rasterScale, y * rasterScale); if (picked !== null) { const cloudEntries = frontier.filter((entry) => !entry.actualPoints); const target = cloudEntries[picked]; if (target) this.navigateVisualization(target.node.id, () => undefined); } });
+    const onMove = (event: MouseEvent): void => { if (this.visualizationAnimating) return; const rect = canvas.getBoundingClientRect(); const index = this.visualizationSpatialIndex?.queryNearest(event.clientX - rect.left, event.clientY - rect.top, pointHitRadius) ?? null; const target = event.target instanceof HTMLElement && event.target.classList.contains("atomic-clusters-umap-point-hit") ? event.target : canvas; this.setHoveredVisualizationPoint(index, event, target, draw); }; const onLeave = (): void => this.setHoveredVisualizationPoint(null, null, null, draw); frame.addEventListener("mousemove", onMove); frame.addEventListener("mouseleave", onLeave); const onKey = (event: KeyboardEvent): void => { if (event.key === "Escape" && path.length > 1) { event.preventDefault(); const parent = path[path.length - 2]; this.navigateVisualization(parent.id, () => undefined); } }; const focusFrame = (): void => frame.focus(); frame.tabIndex = 0; frame.addEventListener("keydown", onKey); frame.addEventListener("pointerdown", focusFrame);
+    this.visualizationCleanup = () => { frame.removeEventListener("mousemove", onMove); frame.removeEventListener("mouseleave", onLeave); frame.removeEventListener("keydown", onKey); frame.removeEventListener("pointerdown", focusFrame); this.visualizationHitElements = []; this.visualizationRenderedPointIndices = []; this.visualizationSpatialIndex = null; };
     // A freshly replaced pane can report a temporary fallback size (usually
     // 320×280) before flex layout settles. Do not consume the transition in
     // that state: the old camera cannot be interpolated against a different
@@ -255,6 +357,6 @@ export class ClusterExplorerView extends ItemView {
     if (snap && this.visualizationAnimationTarget) this.visualizationDisplayedCamera = this.visualizationAnimationTarget;
     this.visualizationAnimationTarget = null; this.visualizationAnimating = false; const cleanup = this.visualizationAnimationCleanup; this.visualizationAnimationCleanup = null; cleanup?.();
   }
-  private setHoveredVisualizationPoint(point: number | null, event: MouseEvent | null, target: HTMLElement | null, draw: () => void): void { if (this.visualizationAnimating) return; if (point === this.hoveredVisualizationPoint && target === this.hoveredVisualizationTarget) return; this.hoveredVisualizationPoint = point; this.hoveredVisualizationTarget = target; draw(); if (point !== null && event && this.result?.ids[point]) this.app.workspace.trigger("hover-link", { event, source: VIEW_TYPE_CLUSTER_EXPLORER, hoverParent: this.leaf, targetEl: target || this.visualizationHitElements[point] || this.visualizationHitElements[0], linktext: this.result.ids[point], sourcePath: "" }); }
+  private setHoveredVisualizationPoint(point: number | null, event: MouseEvent | null, target: HTMLElement | null, draw: () => void): void { if (this.visualizationAnimating) return; if (point === this.hoveredVisualizationPoint && target === this.hoveredVisualizationTarget) return; this.hoveredVisualizationPoint = point; this.hoveredVisualizationTarget = target; draw(); if (point !== null && event && this.result?.ids[point]) { const pointButton = this.visualizationHitElements.find((hit) => Number(hit.dataset.pointIndex) === point); this.app.workspace.trigger("hover-link", { event, source: VIEW_TYPE_CLUSTER_EXPLORER, hoverParent: this.leaf, targetEl: target || pointButton || this.visualizationHitElements[0], linktext: this.result.ids[point], sourcePath: "" }); } }
   private disposeVisualization(): void { this.cancelVisualizationAnimation(false); this.visualizationCleanup?.(); this.visualizationCleanup = null; this.visualizationResizeObserver?.disconnect(); this.visualizationResizeObserver = null; this.visualizationPoints = []; this.visualizationHitElements = []; this.hoveredVisualizationPoint = null; this.hoveredVisualizationTarget = null; }
 }

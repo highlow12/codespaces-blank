@@ -9,9 +9,9 @@ async function loadStorage() {
   source = source.replace('import { contentHash } from "./hash";', `
     async function contentHash(value) { let h = 2166136261; for (let i = 0; i < value.length; i++) { h ^= value.charCodeAt(i); h = Math.imul(h, 16777619); } return "fnv1a-" + (h >>> 0).toString(16); }
   `);
-  source = source.replace('import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord } from "./types";', "");
+  source = source.replace(/import \{[\s\S]*?\} from "\.\/types";/, "");
   const result = await transform(source, { loader: "ts", format: "esm", target: "es2020" });
-  return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
+  try { return await import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`); } catch (error) { console.error("LOAD STORAGE DEBUG", error); throw error; }
 }
 
 class MemoryAdapter {
@@ -65,7 +65,7 @@ test("sql.js round-trip persists notes, immutable embeddings, PCA, visualization
   await store.saveEmbeddingLog({ version: 1, startedAt: "s", completedAt: "e", provider: "local", model: "m", total: 1, succeeded: 1, failed: 0, cached: 0, entries: [] });
   await store.flush(); store.close();
   const reopened = await new SqliteClusterStore(adapter, SQL).open();
-  assert.equal((await reopened.getResult(resultId)).schemaVersion, 5);
+  assert.equal((await reopened.getResult(resultId)).schemaVersion, 6);
   assert.deepEqual(reopened.getVisualization("r1")[0], { path: "a.md", x: 1, y: 2, leafLabel: 0 });
   assert.deepEqual(reopened.getSoftMemberships("r1")[0], { path: "a.md", leafId: 0, membership: 0.9 });
   assert.equal((await reopened.loadLatestEmbeddingLog()).provider, "local");

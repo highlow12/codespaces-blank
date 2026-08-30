@@ -6,7 +6,7 @@ import { transform } from "esbuild";
 async function loadEmbedding() {
   const source = await readFile(new URL("../src/embedding.ts", import.meta.url), "utf8");
   const stubbed = source
-    .replace('import { requestUrl } from "obsidian";', 'const requestUrl = async ({ url }) => ({ arrayBuffer: new TextEncoder().encode(url.includes("tokenizer") ? "tokenizer" : "onnx").buffer });')
+    .replace('import { requestUrl } from "obsidian";', 'const requestUrl = async (request) => globalThis.__ATOMIC_CLUSTERS_REQUEST_URL__?.(request) || ({ arrayBuffer: new TextEncoder().encode(request.url.includes("tokenizer") ? "tokenizer" : "onnx").buffer });')
     .replace('import * as ort from "onnxruntime-web/wasm";', 'const ort = { env: { wasm: {} }, Tensor: class { constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; } }, InferenceSession: { async create() { return { inputNames: ["input_ids", "attention_mask"], outputNames: ["last_hidden_state"], async run(feeds) { const batch = feeds.input_ids.dims[0]; const sequence = feeds.input_ids.dims[1]; return { last_hidden_state: { dims: [batch, sequence, 2], data: new Float32Array(batch * sequence * 2).fill(1) } }; } }; } } };')
     .replace('import * as ortWebGpu from "onnxruntime-web/webgpu";', 'const ortWebGpu = ort;');
   const result = await transform(`${stubbed}\nexport { ort, ortWebGpu };`, { loader: "ts", format: "esm", target: "es2020" });
@@ -151,6 +151,24 @@ test("local provider cancellation does not retry notes after a cancelled batch",
   ];
   await assert.rejects(() => provider.embed(notes, undefined, undefined, controller.signal), /Clustering cancelled/);
   assert.equal(calls, 1);
+});
+
+test("Gemini exposes successful batches and splits only payload/input failures", async () => {
+  const { GeminiEmbeddingProvider } = await loadEmbedding();
+  const calls = [];
+  globalThis.__ATOMIC_CLUSTERS_REQUEST_URL__ = async ({ body }) => {
+    const count = JSON.parse(body).requests.length; calls.push(count);
+    if (count > 1) { const error = new Error("payload too large"); error.status = 413; throw error; }
+    return { json: { embeddings: [{ values: new Array(768).fill(0.1) }] } };
+  };
+  try {
+    const notes = [{ path: "a.md", title: "A", content: "a", hash: "a", mtime: 1 }, { path: "b.md", title: "B", content: "b", hash: "b", mtime: 2 }];
+    const provider = new GeminiEmbeddingProvider({ geminiModel: "gemini-test", geminiSecretRef: "key" }, { async getSecret() { return "secret"; } });
+    const batches = [];
+    for await (const batch of provider.embedBatches(notes)) batches.push(batch);
+    assert.deepEqual(calls, [2, 1, 1]);
+    assert.deepEqual(batches.map((batch) => batch.map((entry) => entry.path)), [["a.md"], ["b.md"]]);
+  } finally { delete globalThis.__ATOMIC_CLUSTERS_REQUEST_URL__; }
 });
 
 test("Unigram tokenizer bounds very long notes before dynamic programming", async () => {

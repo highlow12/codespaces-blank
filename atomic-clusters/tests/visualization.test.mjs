@@ -75,6 +75,17 @@ test("nearest-point hit testing returns only the closest point within radius", a
   assert.equal(findNearestVisualizationPoint([[10, 10]], 20, 20, 3), null);
 });
 
+test("screen-space spatial index matches deterministic nearest-point semantics without scanning all points", async () => {
+  const { buildVisualizationPointSpatialIndex, findNearestVisualizationPoint } = await loadVisualization();
+  const points = [[0, 0], [12, 0], [24, 0], [12, 12], [100, 100], [Number.NaN, 4]];
+  const index = buildVisualizationPointSpatialIndex(points, 12);
+  for (const [x, y, radius] of [[0, 0, 0], [11.5, 0, 3], [18, 5, 10], [99, 99, 3], [50, 50, 5]]) {
+    assert.equal(index.queryNearest(x, y, radius), findNearestVisualizationPoint(points, x, y, radius));
+  }
+  assert.deepEqual(index.queryRect(-1, -1, 25, 13).sort((a, b) => a - b), [0, 1, 2, 3]);
+  assert.equal(index.queryNearest(Number.NaN, 0, 10), null);
+});
+
 test("adapter exposes a virtual root and generalized children with soft residuals", async () => {
   const { buildVisualizationTree, residualPointIndices, blendVisualizationColor, validateVisualizationData, visualizationCloudGeometry, visualizationPath, visualizationParent } = await loadVisualization();
   const hierarchy = { leaves: [0, 1, 2], merges: [{ id: 3, left: 0, right: 1, distance: 1, mass: 2 }, { id: 4, left: 3, right: 2, distance: 2, mass: 3 }], root: 4 };
@@ -244,4 +255,84 @@ test("first real hierarchy split classifies zero-free ambiguous rows against the
   assert.deepEqual(frontier.map((entry) => entry.node.id), ["node:0", "node:1", "node:2"]);
   assert.deepEqual(frontier.flatMap((entry) => entry.residualIndices), [0, 1, 2]);
   assert.ok(frontier.every((entry) => entry.pointIndices.length === 0 && !entry.actualPoints));
+});
+
+test("v6 placements render every root and local residual exactly once at each visible stage", async () => {
+  const { buildVisualizationTree, visualizationFrontier } = await loadVisualization();
+  const hierarchy = {
+    leaves: [0, 1, 2, 3],
+    merges: [
+      { id: 4, left: 0, right: 1, distance: 1, mass: 2 },
+      { id: 5, left: 2, right: 3, distance: 1, mass: 2 },
+      { id: 6, left: 4, right: 5, distance: 2, mass: 4 }
+    ],
+    root: 6,
+    nodes: [
+      { id: 0, children: [], descendantLeaves: [0] },
+      { id: 1, children: [], descendantLeaves: [1] },
+      { id: 2, children: [], descendantLeaves: [2] },
+      { id: 3, children: [], descendantLeaves: [3] },
+      { id: 4, children: [0, 1], descendantLeaves: [0, 1] },
+      { id: 5, children: [2, 3], descendantLeaves: [2, 3] },
+      { id: 6, children: [4, 5], descendantLeaves: [0, 1, 2, 3] }
+    ],
+    rootChildren: [4, 5]
+  };
+  const labels = [0, 1, 2, 3, -1, 1, 2];
+  const placements = [
+    { kind: "leaf", nodeId: 0, confidence: 0.8 },
+    { kind: "residual", nodeId: 4, confidence: 0.5 },
+    { kind: "residual", nodeId: 5, confidence: 0.5 },
+    { kind: "leaf", nodeId: 3, confidence: 0.9 },
+    { kind: "residual", nodeId: null, confidence: 0 },
+    { kind: "leaf", nodeId: 1, confidence: 0.7 },
+    { kind: "residual", nodeId: 5, confidence: 0 }
+  ];
+  const tree = buildVisualizationTree(hierarchy, labels);
+  const rootStage = visualizationFrontier(tree, ["root"], undefined, undefined, placements);
+  const rootClouds = rootStage.flatMap((entry) => entry.pointIndices);
+  const rootResiduals = rootStage.flatMap((entry) => entry.residualIndices);
+  assert.deepEqual(rootClouds, [0, 5, 3]);
+  assert.deepEqual(rootResiduals, [1, 2, 4, 6]);
+  assert.deepEqual(rootStage.flatMap((entry) => entry.directResidualIndices), []);
+  assert.deepEqual(rootStage.flatMap((entry) => entry.descendantResidualIndices), [1, 2, 4, 6]);
+  assert.deepEqual([...rootClouds, ...rootResiduals].sort((a, b) => a - b), labels.map((_, index) => index));
+  assert.equal(new Set([...rootClouds, ...rootResiduals]).size, labels.length);
+
+  const focused = visualizationFrontier(tree, ["node:5"], undefined, undefined, placements);
+  assert.deepEqual(focused.flatMap((entry) => entry.pointIndices), [3]);
+  assert.deepEqual(focused.flatMap((entry) => entry.residualIndices), [2, 6]);
+  assert.deepEqual(focused.flatMap((entry) => entry.directResidualIndices), [2, 6]);
+  assert.deepEqual(focused.flatMap((entry) => entry.descendantResidualIndices), []);
+});
+
+test("v6 all-noise visualization keeps every note as an interactive residual point", async () => {
+  const { buildVisualizationTree, visualizationFrontier, validateVisualizationData } = await loadVisualization();
+  const result = {
+    schemaVersion: 6,
+    ids: ["a.md", "b.md", "c.md"],
+    leafLabels: [-1, -1, -1],
+    leafOrdering: [],
+    memberships: [[], [], []],
+    hierarchyPlacements: [
+      { kind: "residual", nodeId: null, confidence: 0 },
+      { kind: "residual", nodeId: null, confidence: 0 },
+      { kind: "residual", nodeId: null, confidence: 0 }
+    ],
+    hierarchy: { leaves: [], merges: [], root: null, nodes: [], rootChildren: [] },
+    visualization: {
+      coordinates: [[-1, 0], [0, 0], [1, 0]],
+      labels: [-1, -1, -1],
+      leafOrdering: [],
+      memberships: [[], [], []],
+      configuration: { runtime: "test", seed: 42, nComponents: 2, nNeighbors: 2, minDist: 1, spread: 1 }
+    }
+  };
+  assert.equal(validateVisualizationData(result), true);
+  const tree = buildVisualizationTree(result.hierarchy, result.leafLabels);
+  const stage = visualizationFrontier(tree, ["root"], result.memberships, result.leafOrdering, result.hierarchyPlacements);
+  assert.equal(stage.length, 1);
+  assert.deepEqual(stage[0].pointIndices, []);
+  assert.deepEqual(stage[0].residualIndices, [0, 1, 2]);
+  assert.deepEqual(stage[0].directResidualIndices, [0, 1, 2]);
 });

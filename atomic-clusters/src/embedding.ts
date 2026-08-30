@@ -7,6 +7,8 @@ export interface EmbeddingProvider {
   readonly id: EmbeddingProviderId;
   readonly model: string;
   embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: (entry: EmbeddingLogEntry) => void, signal?: AbortSignal): Promise<CachedEmbedding[]>;
+  /** Optional successful-batch stream. `embed` remains the compatibility adapter. */
+  embedBatches?(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: (entry: EmbeddingLogEntry) => void, signal?: AbortSignal): AsyncGenerator<CachedEmbedding[], void, unknown>;
 }
 
 function checkCancelled(signal?: AbortSignal): void { if (signal?.aborted) throw new Error("Clustering cancelled"); }
@@ -193,10 +195,11 @@ export class LocalInferenceBackendError extends Error {
 }
 
 interface UnigramEntry { token: string; id: number; score: number; length: number; }
+interface UnigramTrieNode { children: Map<string, UnigramTrieNode>; terminal?: UnigramEntry; }
 
 /** Minimal offline tokenizer for the SentencePiece Unigram tokenizer used by e5-small. */
 export class UnigramTokenizer implements LocalTokenizer {
-  private readonly entriesByFirst = new Map<string, UnigramEntry[]>();
+  private readonly trie: UnigramTrieNode = { children: new Map() };
   private readonly unknown: UnigramEntry;
   private readonly bos: number;
   private readonly eos: number;
@@ -207,7 +210,13 @@ export class UnigramTokenizer implements LocalTokenizer {
     if (!model || model.type !== "Unigram" || !model.vocab) throw new Error("Unsupported local tokenizer: expected a SentencePiece Unigram tokenizer.json.");
     const vocab = Array.isArray(model.vocab) ? model.vocab.map(([token, score], id) => [token, score, id] as const) : Object.entries(model.vocab).map(([token, id]) => [token, 0, id] as const);
     const entries = vocab.filter(([token]) => !token.startsWith("<")).map(([token, score, id]) => ({ token, score: Number(score), id: Number(id), length: Array.from(token).length }));
-    for (const entry of entries) { const first = Array.from(entry.token)[0]; if (!first) continue; this.entriesByFirst.set(first, [...(this.entriesByFirst.get(first) || []), entry]); }
+    for (const entry of entries) {
+      let node = this.trie;
+      for (const character of Array.from(entry.token)) { let next = node.children.get(character); if (!next) { next = { children: new Map() }; node.children.set(character, next); } node = next; }
+      // SentencePiece vocabularies are unique, but keeping the highest score
+      // makes malformed/hand-authored tokenizers deterministic as well.
+      if (!node.terminal || entry.score > node.terminal.score || (entry.score === node.terminal.score && entry.id < node.terminal.id)) node.terminal = entry;
+    }
     this.unknown = entries.find((entry) => entry.token === "<unk>") || { token: "<unk>", id: Number(model.unk_id ?? 3), score: -100, length: 1 };
     const special = new Map((parsed.added_tokens || []).map((token) => [token.content, token.id]));
     this.bos = special.get("<s>") ?? 0; this.eos = special.get("</s>") ?? 2; this.pad = special.get("<pad>") ?? 1;
@@ -227,18 +236,26 @@ export class UnigramTokenizer implements LocalTokenizer {
   }
 
   private segment(text: string): number[] {
-    const normalized = `▁${text.normalize("NFKC").replace(/\s+/g, "▁")}`;
-    const chars = Array.from(normalized); const best: Array<{ score: number; ids: number[] } | undefined> = new Array(chars.length + 1); best[0] = { score: 0, ids: [] };
+    const chars = Array.from(`▁${text.normalize("NFKC").replace(/\s+/g, "▁")}`);
+    // Backpointers avoid copying a growing token-id array at every DP state.
+    const scores = new Float64Array(chars.length + 1); scores.fill(Number.NEGATIVE_INFINITY); scores[0] = 0;
+    const previous = new Int32Array(chars.length + 1); previous.fill(-1);
+    const tokenIds = new Int32Array(chars.length + 1); tokenIds.fill(this.unknown.id);
     for (let position = 0; position < chars.length; position++) {
-      const current = best[position]; if (!current) continue;
-      const candidates = this.entriesByFirst.get(chars[position]) || [];
-      let matched = false;
-      for (const entry of candidates) if (chars.slice(position, position + entry.length).join("") === entry.token) {
-        matched = true; const next = position + entry.length; const score = current.score + entry.score; if (!best[next] || score > best[next]!.score) best[next] = { score, ids: [...current.ids, entry.id] };
+      if (!Number.isFinite(scores[position])) continue;
+      let node: UnigramTrieNode | undefined = this.trie;
+      for (let end = position; end < chars.length && node; end++) {
+        node = node.children.get(chars[end]); if (!node) break;
+        const entry = node.terminal; if (!entry) continue;
+        const next = end + 1; const score = scores[position] + entry.score;
+        if (score > scores[next] || (score === scores[next] && entry.id < tokenIds[next])) { scores[next] = score; previous[next] = position; tokenIds[next] = entry.id; }
       }
-      if (!matched) { const next = position + 1; const score = current.score + this.unknown.score; if (!best[next] || score > best[next]!.score) best[next] = { score, ids: [...current.ids, this.unknown.id] }; }
+      const unknownNext = position + 1; const unknownScore = scores[position] + this.unknown.score;
+      if (unknownScore > scores[unknownNext] || (unknownScore === scores[unknownNext] && this.unknown.id < tokenIds[unknownNext])) { scores[unknownNext] = unknownScore; previous[unknownNext] = position; tokenIds[unknownNext] = this.unknown.id; }
     }
-    return best[chars.length]?.ids || [this.unknown.id];
+    const output: number[] = []; let cursor = chars.length;
+    while (cursor > 0 && previous[cursor] >= 0) { output.push(tokenIds[cursor]); cursor = previous[cursor]; }
+    output.reverse(); return output.length ? output : [this.unknown.id];
   }
 }
 
@@ -306,7 +323,11 @@ export class OrtEmbeddingRuntime implements LocalInferenceRuntime {
   }
 }
 
-function flattenBigInt(rows: number[][]): BigInt64Array { return BigInt64Array.from(rows.flat().map((value) => BigInt(value))); }
+function flattenBigInt(rows: number[][]): BigInt64Array {
+  const length = rows.reduce((sum, row) => sum + row.length, 0); const output = new BigInt64Array(length); let offset = 0;
+  for (const row of rows) for (const value of row) output[offset++] = BigInt(value);
+  return output;
+}
 
 /** MessageChannel queues a task without the aggressive background timer throttling used by Electron. */
 function yieldToEventLoop(): Promise<void> {
@@ -322,14 +343,24 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
   get model(): string { return this.settings.geminiModel; }
 
   async embed(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger, signal?: AbortSignal): Promise<CachedEmbedding[]> {
+    const result: CachedEmbedding[] = [];
+    for await (const batch of this.embedBatches(notes, onProgress, onNote, signal)) result.push(...batch);
+    return result;
+  }
+
+  async *embedBatches(notes: NoteRecord[], onProgress?: (done: number, total: number) => void, onNote?: EmbeddingNoteLogger, signal?: AbortSignal): AsyncGenerator<CachedEmbedding[], void, unknown> {
     checkCancelled(signal);
     const key = await this.secrets.getSecret(this.settings.geminiSecretRef);
     if (!key) throw new Error("Gemini API key is not configured. Store it in Obsidian SecretStorage and set its reference in settings.");
     if (!(await this.confirmTransmission(notes.length))) throw new Error("Gemini transmission cancelled");
-    const result: CachedEmbedding[] = [];
     const batchSize = 32;
     let processed = 0;
-    const embedBatch = async (batch: NoteRecord[]): Promise<void> => {
+    let lastProgressAt = 0; let lastProgress = -1;
+    const reportProgress = (force = false): void => {
+      const now = Date.now(); const fraction = notes.length ? processed / notes.length : 1;
+      if (force || processed === notes.length || processed === 0 || fraction - lastProgress >= 0.01 || now - lastProgressAt >= 100) { lastProgressAt = now; lastProgress = fraction; onProgress?.(processed, notes.length); }
+    };
+    const embedBatch = async (batch: NoteRecord[]): Promise<CachedEmbedding[][]> => {
       checkCancelled(signal);
       const started = performance.now();
       try {
@@ -343,18 +374,20 @@ export class GeminiEmbeddingProvider implements EmbeddingProvider {
         const values = (response.json?.embeddings || []) as Array<{ values: number[] }>;
         if (values.length !== batch.length) throw new Error(`Gemini returned ${values.length} embeddings for ${batch.length} notes.`);
         if (values.some((value) => value.values.length !== 768)) throw new Error("Gemini embedding contract violation: expected 768-dimensional vectors.");
-        values.forEach((value, index) => { result.push({ path: batch[index].path, hash: batch[index].hash, provider: this.id, model: this.model, vector: value.values }); onNote?.(logEntry(batch[index], this.id, this.model, "success", started)); });
-        processed += batch.length; onProgress?.(processed, notes.length);
+        const embeddings = values.map((value, index) => { onNote?.(logEntry(batch[index], this.id, this.model, "success", started)); return { path: batch[index].path, hash: batch[index].hash, provider: this.id, model: this.model, vector: value.values }; });
+        processed += batch.length; reportProgress(); return [embeddings];
       } catch (error) {
-        // Batch APIs can reject one malformed note along with its neighbours.
-        // Split failed batches recursively so healthy notes still complete;
-        // a single-note failure is recorded and skipped.
-        if (batch.length > 1) { checkCancelled(signal); const midpoint = Math.ceil(batch.length / 2); await embedBatch(batch.slice(0, midpoint)); await embedBatch(batch.slice(midpoint)); return; }
-        processed++; onNote?.(logEntry(batch[0], this.id, this.model, "failure", started, error)); onProgress?.(processed, notes.length);
+        checkCancelled(signal);
+        // Retryable transport/rate-limit/server failures have already been
+        // retried by withRetry. A payload-too-large response, or a regular
+        // input 4xx, is isolated by splitting; no other batch is discarded.
+        if (batch.length > 1 && shouldSplitGeminiBatch(error)) { checkCancelled(signal); const midpoint = Math.ceil(batch.length / 2); return [...await embedBatch(batch.slice(0, midpoint)), ...await embedBatch(batch.slice(midpoint))]; }
+        for (const note of batch) { processed++; onNote?.(logEntry(note, this.id, this.model, "failure", started, error)); }
+        reportProgress(); return [];
       }
     };
-    for (let start = 0; start < notes.length; start += batchSize) { checkCancelled(signal); await embedBatch(notes.slice(start, start + batchSize)); }
-    return result;
+    for (let start = 0; start < notes.length; start += batchSize) { checkCancelled(signal); const batches = await embedBatch(notes.slice(start, start + batchSize)); for (const batch of batches) if (batch.length) yield batch; }
+    reportProgress(true);
   }
 }
 
@@ -365,12 +398,36 @@ async function withRetry<T>(request: () => Promise<T>, signal?: AbortSignal, att
     try { return await request(); } catch (error) {
       lastError = error;
       const status = (error as { status?: number; response?: { status?: number } })?.status || (error as { response?: { status?: number } })?.response?.status;
-      if (status !== 429 && (!status || status < 500) || attempt === attempts - 1) throw error;
-      await new Promise((resolve) => setTimeout(resolve, 500 * 2 ** attempt + Math.floor(Math.random() * 200)));
-      checkCancelled(signal);
+      const retryable = status === 429 || (typeof status === "number" && status >= 500) || status === 0 || status === undefined;
+      if (!retryable) throw error;
+      if (attempt === attempts - 1) { if (error && typeof error === "object") (error as { retryExhausted?: boolean }).retryExhausted = true; throw error; }
+      await abortableDelay(500 * 2 ** attempt, signal);
     }
   }
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
+
+function geminiStatus(error: unknown): number | undefined {
+  const direct = (error as { status?: unknown })?.status; const nested = (error as { response?: { status?: unknown } })?.response?.status; const value = typeof direct === "number" ? direct : nested;
+  return typeof value === "number" ? value : undefined;
+}
+
+function shouldSplitGeminiBatch(error: unknown): boolean {
+  const status = geminiStatus(error);
+  // 413 is the only transport response that specifically asks us to reduce
+  // payload size. Other input-level 4xx errors are isolated one note at a
+  // time; exhausted 429/5xx/network errors must remain batch failures.
+  return status === 413 || (typeof status === "number" && status >= 400 && status < 500 && status !== 429);
+}
+
+function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  checkCancelled(signal);
+  return new Promise((resolve, reject) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = (): void => { if (timer !== undefined) clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new Error("Clustering cancelled")); };
+    timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, milliseconds);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 export type LocalRuntimeFactory = (artifact: LocalModelArtifact, executionProvider?: LocalExecutionProvider) => Promise<LocalInferenceRuntime>;

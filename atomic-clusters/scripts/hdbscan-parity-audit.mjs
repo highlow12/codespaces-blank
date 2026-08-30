@@ -19,17 +19,18 @@ const repositoryDir = resolve(pluginDir, "..");
 const defaultInput = join(repositoryDir, "dbpedia_gemini_embeddings.json.gz");
 
 export function parseArgs(argv) {
-  const options = { input: defaultInput, sampleSize: 100, sampleSeed: 42, seed: 42, fast: false, output: undefined, strict: false, minLabelAgreement: undefined, maxProbabilityMae: undefined, maxOutlierMae: undefined };
+  const options = { input: defaultInput, sampleSize: 100, sampleSeed: 42, seed: 42, fast: false, output: undefined, strict: false, minLabelAgreement: undefined, minAdjustedRandIndex: undefined, requireExactNoise: false, maxProbabilityMae: undefined, maxProbabilityError: undefined, maxOutlierMae: undefined, maxOutlierError: undefined };
   const valueFor = (arg, index) => { const inline = arg.indexOf("="); if (inline >= 0) return [arg.slice(inline + 1), index]; if (index + 1 >= argv.length || argv[index + 1].startsWith("--")) throw new Error(`${arg} requires a value`); return [argv[index + 1], index + 1]; };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === "--help" || arg === "-h") return { help: true };
     if (arg === "--fast") { options.fast = true; continue; }
     if (arg === "--strict") { options.strict = true; continue; }
+    if (arg === "--require-exact-noise") { options.requireExactNoise = true; continue; }
     const names = [
       ["--input-json", "input"], ["--output-json", "output"], ["--output", "output"],
       ["--dataset-sample-size", "sampleSize"], ["--dataset-sample-seed", "sampleSeed"], ["--seed", "seed"],
-      ["--min-label-agreement", "minLabelAgreement"], ["--max-probability-mae", "maxProbabilityMae"], ["--max-outlier-mae", "maxOutlierMae"]
+      ["--min-label-agreement", "minLabelAgreement"], ["--min-ari", "minAdjustedRandIndex"], ["--max-probability-mae", "maxProbabilityMae"], ["--max-probability-error", "maxProbabilityError"], ["--max-outlier-mae", "maxOutlierMae"], ["--max-outlier-error", "maxOutlierError"]
     ];
     const match = names.find(([name]) => arg === name || arg.startsWith(`${name}=`));
     if (match) { const [value, next] = valueFor(arg, index); options[match[1]] = match[1] === "input" || match[1] === "output" ? value : number(value, match[1]); index = next; continue; }
@@ -41,7 +42,7 @@ export function parseArgs(argv) {
 function number(value, name) { const parsed = Number(value); if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${name} must be a non-negative number`); return parsed; }
 
 export function usage() {
-  return `Usage: node scripts/hdbscan-parity-audit.mjs [options]\n\nOptions:\n  --input-json PATH             Gemini embeddings (.json or .json.gz)\n  --dataset-sample-size N       Python sample size (default: 100)\n  --dataset-sample-seed N       Python sample seed (default: 42)\n  --seed N                      PCA/UMAP seed (default: 42)\n  --fast                        Use small deterministic PCA/UMAP settings\n  --output-json PATH            Audit report path (default: /tmp/atomic-clusters-hdbscan-parity-*.json)\n  --strict                      Fail if supplied metric limits are exceeded\n  --min-label-agreement N       Strict label agreement lower bound\n  --max-probability-mae N       Strict probability MAE upper bound\n  --max-outlier-mae N           Strict outlier MAE upper bound\n`;
+  return `Usage: node scripts/hdbscan-parity-audit.mjs [options]\n\nOptions:\n  --input-json PATH             Gemini embeddings (.json or .json.gz)\n  --dataset-sample-size N       Python sample size (default: 100)\n  --dataset-sample-seed N       Python sample seed (default: 42)\n  --seed N                      PCA/UMAP seed (default: 42)\n  --fast                        Use small deterministic PCA/UMAP settings\n  --output-json PATH            Audit report path (default: /tmp/atomic-clusters-hdbscan-parity-*.json)\n  --strict                      Fail if supplied metric limits are exceeded\n  --min-label-agreement N       Strict label agreement lower bound\n  --min-ari N                   Strict adjusted Rand index lower bound\n  --require-exact-noise         Require every row's noise/non-noise status to match\n  --max-probability-mae N       Strict probability MAE upper bound\n  --max-probability-error N     Strict maximum probability error\n  --max-outlier-mae N           Strict outlier MAE upper bound\n  --max-outlier-error N         Strict maximum outlier error\n`;
 }
 
 async function loadParityModule() {
@@ -92,8 +93,12 @@ export async function run(options) {
   };
   const failures = [];
   if (options.minLabelAgreement !== undefined && metrics.labelAgreement < options.minLabelAgreement) failures.push(`labelAgreement ${metrics.labelAgreement} < ${options.minLabelAgreement}`);
+  if (options.minAdjustedRandIndex !== undefined && metrics.adjustedRandIndex < options.minAdjustedRandIndex) failures.push(`adjustedRandIndex ${metrics.adjustedRandIndex} < ${options.minAdjustedRandIndex}`);
+  if (options.requireExactNoise && !metrics.noiseExact) failures.push(`noiseExact is false (agreement ${metrics.noiseAgreement})`);
   if (options.maxProbabilityMae !== undefined && metrics.probabilityMae > options.maxProbabilityMae) failures.push(`probabilityMae ${metrics.probabilityMae} > ${options.maxProbabilityMae}`);
+  if (options.maxProbabilityError !== undefined && metrics.probabilityMaxError > options.maxProbabilityError) failures.push(`probabilityMaxError ${metrics.probabilityMaxError} > ${options.maxProbabilityError}`);
   if (options.maxOutlierMae !== undefined && metrics.outlierMae > options.maxOutlierMae) failures.push(`outlierMae ${metrics.outlierMae} > ${options.maxOutlierMae}`);
+  if (options.maxOutlierError !== undefined && metrics.outlierMaxError > options.maxOutlierError) failures.push(`outlierMaxError ${metrics.outlierMaxError} > ${options.maxOutlierError}`);
   report.strictFailures = failures;
   if (options.strict && failures.length) { report.status = "failed"; } else report.status = "informational";
   const output = resolve(options.output || `/tmp/atomic-clusters-hdbscan-parity-${Date.now()}.json`);

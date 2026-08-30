@@ -57,6 +57,7 @@ export class ClusterResultStore {
       // metadata. Both are intentionally discarded on first read.
       if (result.schemaVersion === 3) return result;
       if (result.schemaVersion === 4 || result.schemaVersion === 5) return result;
+      if (result.schemaVersion === 6) return result;
       const migrated = { ...result, schemaVersion: 3 as const, titles: undefined, titleGeneration: undefined };
       await this.save(migrated);
       return migrated;

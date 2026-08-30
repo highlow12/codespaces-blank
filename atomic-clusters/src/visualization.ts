@@ -1,4 +1,4 @@
-import { ClusterResult, HierarchyMerge, HierarchyTree, VisualizationCoordinate } from "./types";
+import { ClusterResult, HierarchyMerge, HierarchyPlacement, HierarchyTree, VisualizationCoordinate } from "./types";
 
 const TAB20 = ["#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78", "#2ca02c", "#98df8a", "#d62728", "#ff9896", "#9467bd", "#c5b0d5", "#8c564b", "#c49c94", "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c7", "#bcbd22", "#dbdb8d", "#17becf", "#9edae5"] as const;
 export const VISUALIZATION_NOISE_COLOR = "#9aa0a6";
@@ -9,9 +9,9 @@ export const VISUALIZATION_KERNEL_SCALE_STEP = 0.05;
 export const VISUALIZATION_KERNEL_SCALE_DEFAULT = 0.65;
 const EPSILON = 1e-9;
 
-export interface VisualizationNode { id: string; sourceId: number | null; children: VisualizationNode[]; leafLabels: number[]; pointIndices: number[]; depth: number; }
-export interface NaryVisualizationHierarchy { leaves: number[]; root: number | null; children: Record<string, number[]>; merges?: HierarchyMerge[]; }
-export interface VisualizationFrontierEntry { node: VisualizationNode; depth: number; remainingDepth: number; pointIndices: number[]; residualIndices: number[]; /** true when a leaf was explicitly selected and its actual notes should be shown. */ actualPoints: boolean; }
+export interface VisualizationNode { id: string; sourceId: number | null; children: VisualizationNode[]; leafLabels: number[]; pointIndices: number[]; depth: number; nary?: boolean; }
+export interface NaryVisualizationHierarchy { leaves: number[]; root: number | null; children?: Record<string, number[]>; nodes?: Array<{ id: number; children: number[]; descendantLeaves?: number[] }>; rootChildren?: number[]; merges?: HierarchyMerge[]; }
+export interface VisualizationFrontierEntry { node: VisualizationNode; depth: number; remainingDepth: number; pointIndices: number[]; residualIndices: number[]; directResidualIndices?: number[]; descendantResidualIndices?: number[]; /** true when a leaf was explicitly selected and its actual notes should be shown. */ actualPoints: boolean; }
 export interface VisualizationCamera { scale: number; offsetX: number; offsetY: number; width: number; height: number; worldRegion: { minX: number; maxX: number; minY: number; maxY: number }; }
 export interface VisualizationCameraLayerTransform { scale: number; translateX: number; translateY: number; }
 export interface VisualizationSplat { x: number; y: number; sigma: number; color: [number, number, number]; amplitude: number; }
@@ -21,23 +21,87 @@ export interface VisualizationColorScheme { nodeColors: Map<string, string>; lea
 export interface VisualizationLabelContrast { foreground: "#000000" | "#ffffff"; background: "#000000" | "#ffffff"; }
 export interface VisualizationLabelPlacement { id: string; text: string; x: number; y: number; width: number; height: number; contrast: VisualizationLabelContrast; }
 
+/**
+ * A deterministic uniform-grid index for screen-space note picking.
+ *
+ * The canvas is the source of truth for interaction, so this index includes
+ * every finite point even when only a bounded accessibility button pool is
+ * mounted in the DOM.  Querying the few neighboring cells keeps pointer
+ * movement independent of the total number of notes.
+ */
+export interface VisualizationPointSpatialIndex {
+  readonly cellSize: number;
+  readonly points: readonly VisualizationCoordinate[];
+  queryNearest(x: number, y: number, radius: number): number | null;
+  queryRect(minX: number, minY: number, maxX: number, maxY: number): number[];
+}
+
+function spatialCellKey(x: number, y: number): string { return `${x},${y}`; }
+
+export function buildVisualizationPointSpatialIndex(points: readonly VisualizationCoordinate[], cellSize = 24): VisualizationPointSpatialIndex {
+  const size = Number.isFinite(cellSize) && cellSize > 0 ? cellSize : 24;
+  const buckets = new Map<string, number[]>();
+  const cell = (value: number): number => Math.floor(value / size);
+  for (let index = 0; index < points.length; index++) {
+    const point = points[index];
+    if (!point || point.length < 2 || !Number.isFinite(point[0]) || !Number.isFinite(point[1])) continue;
+    const key = spatialCellKey(cell(point[0]), cell(point[1]));
+    const bucket = buckets.get(key);
+    if (bucket) bucket.push(index); else buckets.set(key, [index]);
+  }
+  const queryRect = (minX: number, minY: number, maxX: number, maxY: number): number[] => {
+    if (![minX, minY, maxX, maxY].every(Number.isFinite)) return [];
+    const left = Math.floor(Math.min(minX, maxX) / size); const right = Math.floor(Math.max(minX, maxX) / size);
+    const top = Math.floor(Math.min(minY, maxY) / size); const bottom = Math.floor(Math.max(minY, maxY) / size);
+    const found: number[] = [];
+    for (let y = top; y <= bottom; y++) for (let x = left; x <= right; x++) {
+      const bucket = buckets.get(spatialCellKey(x, y)); if (bucket) found.push(...bucket);
+    }
+    return found;
+  };
+  const queryNearest = (x: number, y: number, radius: number): number | null => {
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    const boundedRadius = Math.max(0, Number.isFinite(radius) ? radius : 0); const radiusSquared = boundedRadius ** 2;
+    let closest: number | null = null; let closestDistance = radiusSquared;
+    for (const index of queryRect(x - boundedRadius, y - boundedRadius, x + boundedRadius, y + boundedRadius)) {
+      const point = points[index]; if (!point) continue;
+      const distance = (point[0] - x) ** 2 + (point[1] - y) ** 2;
+      // Match the historical helper's deterministic later-index tie break.
+      if (distance <= closestDistance && (distance < closestDistance || closest === null || index >= closest)) { closest = index; closestDistance = distance; }
+    }
+    return closest;
+  };
+  return { cellSize: size, points, queryNearest, queryRect };
+}
+
+export const createVisualizationPointSpatialIndex = buildVisualizationPointSpatialIndex;
+
 /** Build a generalized children[] tree. Binary left/right knowledge ends here. */
 export function buildVisualizationTree(hierarchy: HierarchyTree | NaryVisualizationHierarchy, labels: readonly number[]): VisualizationNode {
   const mergeList = hierarchy.merges || []; const mergeIds = new Set<number>();
   for (const merge of mergeList) { if (!Number.isSafeInteger(merge.id) || mergeIds.has(merge.id)) throw new Error("Hierarchy contains malformed or duplicate node ids"); mergeIds.add(merge.id); }
   if (!Array.isArray(hierarchy.leaves) || hierarchy.leaves.some((label, index) => !Number.isSafeInteger(label) || hierarchy.leaves.indexOf(label) !== index || mergeIds.has(label))) throw new Error("Hierarchy contains malformed or duplicate leaf ids");
-  const merges = new Map<number, HierarchyMerge>(mergeList.map((merge) => [merge.id, merge])); const visiting = new Set<number>(); const built = new Set<number>();
+  const merges = new Map<number, HierarchyMerge>(mergeList.map((merge) => [merge.id, merge]));
+  const naryChildren = new Map<number, number[]>((hierarchy.nodes || []).map((node) => [node.id, node.children]));
+  const explicitChildren = "children" in hierarchy ? hierarchy.children : undefined;
+  const visiting = new Set<number>(); const built = new Set<number>();
   const make = (sourceId: number, depth: number): VisualizationNode => {
     if (!Number.isSafeInteger(sourceId)) throw new Error("Hierarchy contains a malformed node id"); if (visiting.has(sourceId)) throw new Error("Hierarchy contains a cycle"); if (built.has(sourceId)) throw new Error("Hierarchy contains duplicate node references"); built.add(sourceId); visiting.add(sourceId);
-    const merge = merges.get(sourceId); const futureChildren = "children" in hierarchy ? hierarchy.children?.[String(sourceId)] : undefined; if (futureChildren !== undefined && !Array.isArray(futureChildren)) throw new Error("Hierarchy children must be arrays"); const children = (futureChildren || (merge ? [merge.left, merge.right] : [])).map((child: number) => make(child, depth + 1)); visiting.delete(sourceId);
+    const merge = merges.get(sourceId); const futureChildren = naryChildren.get(sourceId) ?? explicitChildren?.[String(sourceId)]; if (futureChildren !== undefined && !Array.isArray(futureChildren)) throw new Error("Hierarchy children must be arrays"); const children = (futureChildren || (merge ? [merge.left, merge.right] : [])).map((child: number) => make(child, depth + 1)); visiting.delete(sourceId);
     const leafLabels = children.length ? children.flatMap((child) => child.leafLabels) : [sourceId]; const uniqueLeaves = [...new Set(leafLabels)]; const pointIndices = labels.map((label, index) => label === sourceId || uniqueLeaves.includes(label) ? index : -1).filter((index) => index >= 0); return { id: `node:${sourceId}`, sourceId, children, leafLabels: uniqueLeaves, pointIndices, depth };
   };
-  const roots = hierarchy.root === null ? hierarchy.leaves.map((leaf) => make(leaf, 1)) : [make(hierarchy.root, 1)]; return { id: "root", sourceId: null, children: roots, leafLabels: [...new Set(roots.flatMap((node) => node.leafLabels))], pointIndices: labels.map((_label, index) => index), depth: 0 };
+  const roots = hierarchy.root === null ? hierarchy.leaves.map((leaf) => make(leaf, 1)) : [make(hierarchy.root, 1)]; return { id: "root", sourceId: null, children: roots, leafLabels: [...new Set(roots.flatMap((node) => node.leafLabels))], pointIndices: labels.map((_label, index) => index), depth: 0, nary: !!(hierarchy.nodes || explicitChildren) };
 }
 
 export function childMembershipMass(node: VisualizationNode, row: readonly number[], leafOrdering: readonly number[]): number { const leaves = new Set(node.leafLabels); let mass = 0; for (let column = 0; column < Math.min(leafOrdering.length, row.length); column++) if (leaves.has(leafOrdering[column])) mass += Math.max(0, Number(row[column]) || 0); return mass; }
 /** Identify notes below 0.5 conditional membership as residual. */
-export function residualPointIndices(node: VisualizationNode, _labels: readonly number[], memberships: readonly number[][], leafOrdering: readonly number[]): number[] { if (!node.children.length) return node.pointIndices.slice(); return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total < 0.5; }); }
+export function residualPointIndices(node: VisualizationNode, _labels: readonly number[], memberships: readonly number[][], leafOrdering: readonly number[]): number[] { if (!node.children.length) return []; return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total <= 0.5; }); }
+function visualizationResidualIndices(node: VisualizationNode, memberships: readonly number[][], leafOrdering: readonly number[], strictLegacy = false): number[] { if (!strictLegacy) return residualPointIndices(node, [], memberships, leafOrdering); if (!node.children.length) return []; return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total < 0.5; }); }
+function visualizationResidualNodes(root: VisualizationNode, parent: VisualizationNode): VisualizationNode[] {
+  const nodes = visualizationPath(root, parent.id); if (!root.nary) return nodes;
+  const descendants: VisualizationNode[] = []; const visit = (node: VisualizationNode) => { descendants.push(node); node.children.forEach(visit); }; visit(parent);
+  return descendants;
+}
 
 /**
  * Return the visible stage for one focused node.
@@ -53,7 +117,7 @@ export function residualPointIndices(node: VisualizationNode, _labels: readonly 
  * now represents the focused node (the last valid id), rather than a set of
  * independently expanded branches.
  */
-export function visualizationFrontier(root: VisualizationNode, expandedIds: Iterable<string> = [], memberships?: readonly number[][], leafOrdering?: readonly number[]): VisualizationFrontierEntry[] {
+export function visualizationFrontier(root: VisualizationNode, expandedIds: Iterable<string> = [], memberships?: readonly number[][], leafOrdering?: readonly number[], placements?: readonly HierarchyPlacement[]): VisualizationFrontierEntry[] {
   const ids = [...expandedIds];
   const find = (node: VisualizationNode, id: string): VisualizationNode | null => {
     if (node.id === id) return node;
@@ -62,29 +126,45 @@ export function visualizationFrontier(root: VisualizationNode, expandedIds: Iter
   };
   const requested = ids.length ? ids[ids.length - 1] : "root";
   const focused = requested === "root" ? null : find(root, requested);
+  const overview = !focused;
   const hierarchyRoot = root.children.length === 1 && root.children[0].children.length ? root.children[0] : root;
   const parent = focused || hierarchyRoot;
   const maxDepth = visualizationTreeDepth(root);
+  const placementAware = !!placements && placements.length === root.pointIndices.length;
+  const subtreeIds = new Set<number>(); const subtreeLeaves = new Set<number>();
+  const collect = (node: VisualizationNode): void => { if (node.sourceId !== null) subtreeIds.add(node.sourceId); if (!node.children.length && node.sourceId !== null) subtreeLeaves.add(node.sourceId); node.children.forEach(collect); };
+  collect(parent);
+  const inFocusedSubtree = (placement: HierarchyPlacement): boolean => overview
+    ? true
+    : placement.nodeId !== null && (placement.kind === "leaf" ? subtreeLeaves.has(placement.nodeId) : subtreeIds.has(placement.nodeId));
+  const placedResiduals = placementAware ? placements!.map((placement, index) => placement.kind === "residual" && inFocusedSubtree(placement) ? index : -1).filter((index) => index >= 0) : [];
+  const directResiduals = placementAware ? placedResiduals.filter((index) => placements![index].nodeId === parent.sourceId) : [];
+  const directResidualSet = new Set(directResiduals); const descendantResiduals = placementAware ? placedResiduals.filter((index) => !directResidualSet.has(index)) : [];
+  const placedLeafPoints = (node: VisualizationNode): number[] => placementAware
+    ? placements!.map((placement, index) => placement.kind === "leaf" && placement.nodeId !== null && node.leafLabels.includes(placement.nodeId) ? index : -1).filter((index) => index >= 0)
+    : node.pointIndices.slice();
   if (!parent.children.length) {
-    const residual = memberships && leafOrdering
-      ? new Set(visualizationPath(root, parent.id).filter((node) => node.children.length).flatMap((node) => residualPointIndices(node, [], memberships, leafOrdering)))
+    const residual = placementAware ? new Set(placedResiduals) : memberships && leafOrdering
+      ? new Set(visualizationResidualNodes(root, parent).filter((node) => node.children.length).flatMap((node) => visualizationResidualIndices(node, memberships, leafOrdering, !root.nary)))
       : new Set<number>();
-    return [{ node: parent, depth: parent.depth, remainingDepth: Math.max(0, maxDepth - parent.depth), pointIndices: parent.pointIndices.filter((point) => !residual.has(point)), residualIndices: [...residual], actualPoints: true }];
+    return [{ node: parent, depth: parent.depth, remainingDepth: Math.max(0, maxDepth - parent.depth), pointIndices: placedLeafPoints(parent).filter((point) => !residual.has(point)), residualIndices: [...residual], directResidualIndices: directResiduals, descendantResidualIndices: descendantResiduals, actualPoints: true }];
   }
   // Residual/noise is emitted once at the current boundary. Normal cluster
   // members remain in their cloud and are not exposed as note dots until a
   // leaf is selected. Include every internal ancestor so synthetic-root noise
   // and residuals classified at a previous split survive zooming.
-  const residual = memberships && leafOrdering
-    ? new Set(visualizationPath(root, parent.id).filter((node) => node.children.length).flatMap((node) => residualPointIndices(node, [], memberships, leafOrdering)))
+  const residual = placementAware ? new Set(placedResiduals) : memberships && leafOrdering
+    ? new Set(visualizationResidualNodes(root, parent).filter((node) => node.children.length).flatMap((node) => visualizationResidualIndices(node, memberships, leafOrdering, !root.nary)))
     : new Set<number>();
   const residualIndices = [...residual];
   return parent.children.map((node) => ({
     node,
     depth: node.depth,
     remainingDepth: Math.max(0, maxDepth - node.depth),
-    pointIndices: node.pointIndices.filter((point) => !residual.has(point)),
+    pointIndices: placedLeafPoints(node).filter((point) => !residual.has(point)),
     residualIndices: node === parent.children[0] ? residualIndices : [],
+    directResidualIndices: node === parent.children[0] ? directResiduals : [],
+    descendantResidualIndices: node === parent.children[0] ? descendantResiduals : [],
     actualPoints: false,
   }));
 }
@@ -229,7 +309,7 @@ export function visualizationPath(root: VisualizationNode, targetId: string): Vi
 export function visualizationParent(root: VisualizationNode, targetId: string): VisualizationNode | null { const path = visualizationPath(root, targetId); return path.length > 1 ? path[path.length - 2] : null; }
 export function visualizationLeafOrdering(result: Pick<ClusterResult, "hierarchy" | "leafOrdering" | "visualization">): number[] { return [...(result.leafOrdering || result.visualization?.leafOrdering || result.hierarchy.leaves)].filter((label, index, values) => Number.isSafeInteger(label) && values.indexOf(label) === index); }
 
-export function validateVisualizationData(result: Pick<ClusterResult, "ids" | "schemaVersion" | "memberships" | "visualization" | "hierarchy" | "leafOrdering">): boolean { const visualization = result.visualization; const memberships = result.memberships; const ordering = result.leafOrdering; const validOrdering = Array.isArray(ordering) && ordering.length > 0 && ordering.length === result.hierarchy.leaves.length && ordering.every((label, index) => Number.isSafeInteger(label) && label >= 0 && ordering.indexOf(label) === index) && ordering.every((label) => result.hierarchy.leaves.includes(label)); return result.schemaVersion >= 4 && !!visualization && validOrdering && visualization.coordinates.length === result.ids.length && visualization.labels.length === result.ids.length && visualization.coordinates.every((point) => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)) && visualization.labels.every((label) => Number.isSafeInteger(label) && label >= -1 && (label === -1 || ordering.includes(label))) && visualization.leafOrdering?.length === ordering.length && visualization.leafOrdering.every((label, index) => label === ordering[index]) && Array.isArray(memberships) && memberships.length === result.ids.length && memberships.every((row) => Array.isArray(row) && row.length === ordering.length && row.every((value) => Number.isFinite(value) && value >= 0 && value <= 1) && row.reduce((sum, value) => sum + value, 0) <= 1 + 1e-6); }
+export function validateVisualizationData(result: Pick<ClusterResult, "ids" | "schemaVersion" | "memberships" | "visualization" | "hierarchy" | "leafOrdering">): boolean { const visualization = result.visualization; const memberships = result.memberships; const ordering = result.leafOrdering; const allNoise = result.schemaVersion >= 6 && result.hierarchy.leaves.length === 0; const validOrdering = Array.isArray(ordering) && (ordering.length > 0 || allNoise) && ordering.length === result.hierarchy.leaves.length && ordering.every((label, index) => Number.isSafeInteger(label) && label >= 0 && ordering.indexOf(label) === index) && ordering.every((label) => result.hierarchy.leaves.includes(label)); return result.schemaVersion >= 4 && !!visualization && validOrdering && visualization.coordinates.length === result.ids.length && visualization.labels.length === result.ids.length && visualization.coordinates.every((point) => Array.isArray(point) && point.length === 2 && point.every(Number.isFinite)) && visualization.labels.every((label) => Number.isSafeInteger(label) && label >= -1 && (label === -1 || ordering!.includes(label))) && visualization.leafOrdering?.length === ordering!.length && visualization.leafOrdering.every((label, index) => label === ordering![index]) && Array.isArray(memberships) && memberships.length === result.ids.length && memberships.every((row) => Array.isArray(row) && row.length === ordering!.length && row.every((value) => Number.isFinite(value) && value >= 0 && value <= 1) && row.reduce((sum, value) => sum + value, 0) <= 1 + 1e-6); }
 export function visualizationCloudGeometry(points: readonly VisualizationCoordinate[], indices: readonly number[], width: number, height: number): { x: number; y: number; radius: number } | null { const selected = indices.filter((index) => !!points[index]); if (!selected.length) return null; const x = selected.reduce((sum, index) => sum + points[index][0], 0) / selected.length; const y = selected.reduce((sum, index) => sum + points[index][1], 0) / selected.length; const variance = selected.reduce((sum, index) => sum + (points[index][0] - x) ** 2 + (points[index][1] - y) ** 2, 0) / selected.length; return { x, y, radius: Math.max(22, Math.min(Math.max(width, height) * .42, Math.sqrt(variance) * 2.5 + 20)) }; }
 
 /** Return the display name for a visible internal cluster, or null for notes/noise. */

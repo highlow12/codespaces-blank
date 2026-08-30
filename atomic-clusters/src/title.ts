@@ -1,6 +1,6 @@
 import { ClusterResult, NoteRecord } from "./types";
 
-export const KEYWORD_TITLE_ALGORITHM_VERSION = "keywords-tfidf-bm25-v1";
+export const KEYWORD_TITLE_ALGORITHM_VERSION = "contrastive-keyphrases-v2";
 export const KEYWORD_TITLE_METHOD = "keywords" as const;
 
 const STOP_WORDS = new Set([
@@ -91,7 +91,7 @@ function titleForNode(nodeId: number, result: ClusterResult, index: KeywordIndex
 }
 
 export interface KeywordTitleOptions { signal?: AbortSignal; onProgress?: (done: number, total: number) => void; onNode?: (nodeId: number, title: string, scores: KeywordScore[]) => void; }
-export function generateKeywordTitles(result: ClusterResult, notes: NoteRecord[], options: KeywordTitleOptions = {}): ClusterResult {
+function generateLegacyKeywordTitles(result: ClusterResult, notes: NoteRecord[], options: KeywordTitleOptions = {}): ClusterResult {
   const started = Date.now(); const membersByNode = nodeMembers(result); const index = buildIndex(notes, result.ids); const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge]));
   const depth = (id: number): number => { const merge = merges.get(id); return merge ? Math.max(depth(merge.left), depth(merge.right)) + 1 : 0; }; const nodes = [...membersByNode.keys()].sort((a, b) => depth(a) - depth(b) || a - b);
   const titles: Record<string, string> = {}; const statuses: Record<string, "generated" | "empty"> = {}; const scores: Record<string, Array<{ keyword: string; score: number }>> = {};
@@ -102,3 +102,110 @@ export function generateKeywordTitles(result: ClusterResult, notes: NoteRecord[]
 export class KeywordClusterTitleGenerator { generate(result: ClusterResult, notes: NoteRecord[], options: KeywordTitleOptions = {}): ClusterResult { return generateKeywordTitles(result, notes, options); } }
 export const LocalClusterTitleGenerator = KeywordClusterTitleGenerator;
 export function validateTitle(raw: string): { valid: boolean; reason?: string } { const title = String(raw || "").trim(); if (!title) return { valid: false, reason: "empty output" }; const parts = title.split(/\s*·\s*/).filter(Boolean); if (parts.length > 3 || new Set(parts).size !== parts.length) return { valid: false, reason: "duplicate or too many keywords" }; if (parts.some((part) => !tokenizeKeywords(part).length)) return { valid: false, reason: "invalid keyword" }; return { valid: true }; }
+
+interface V2PhraseStats { phrase: string; score: number; prevalence: number; coverage: number; documentFrequency: number; }
+interface V2Terms { phrases: Map<string, number>; title: string; }
+
+const V2_FIELD_BOOSTS: Record<string, number> = { filename: 4.5, h1: 4, h2: 3.2, alias: 3.5, tag: 3, title: 3, body: 1 };
+
+/** Tokenization for v2 deliberately does not stem or strip Korean particles. */
+function tokenizeV2(raw: string): string[] {
+  const text = String(raw ?? "").normalize("NFKC");
+  return (text.match(/[A-Za-z][A-Za-z'’-]*|[가-힣]+|[一-鿿ぁ-ゟァ-ヿ]+|\d+/gu) || [])
+    .map((token) => token.toLocaleLowerCase()).filter((token) => token.length >= 2 && !STOP_WORDS.has(token));
+}
+
+function v2Ngrams(tokens: string[]): string[] {
+  const result: string[] = [];
+  for (let index = 0; index < tokens.length; index++) for (let width = 1; width <= 3 && index + width <= tokens.length; width++) result.push(tokens.slice(index, index + width).join(" "));
+  return result;
+}
+
+function v2FieldTerms(value: string, field: string): Map<string, number> {
+  const output = new Map<string, number>(); const boost = V2_FIELD_BOOSTS[field] || 1;
+  for (const phrase of v2Ngrams(tokenizeV2(value))) output.set(phrase, (output.get(phrase) || 0) + boost);
+  return output;
+}
+
+function extractV2Terms(note: NoteRecord): V2Terms {
+  const text = String(note.content || ""); const fields: Array<[string, string]> = [];
+  const filename = String(note.path || note.title || "").split(/[\\/]/).pop()?.replace(/\.(?:md|markdown)$/i, "") || "";
+  fields.push(["filename", filename], ["title", note.title || filename]);
+  for (const match of text.matchAll(/^\s{0,3}(#{1,2})\s+(.+?)\s*#*\s*$/gmu)) fields.push([match[1].length === 1 ? "h1" : "h2", match[2]]);
+  for (const match of text.matchAll(/!??\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|([^\]]+))?\]\]/gu)) fields.push(["alias", match[2] || match[1].split(/[\\/]/).pop() || match[1]]);
+  const frontmatter = /^\uFEFF?---\s*(?:\r?\n)([\s\S]*?)(?:\r?\n)---\s*(?:\r?\n|$)/u.exec(text)?.[1] || "";
+  for (const match of frontmatter.matchAll(/^\s*(?:tags?|keywords?)\s*:\s*(.*?)\s*$/gim)) for (const tag of match[1].replace(/[\[\]{}]/g, "").split(/[\s,]+/).filter(Boolean)) fields.push(["tag", tag.replace(/^#/, "")]);
+  const body = text.replace(/^\uFEFF?---\s*(?:\r?\n)[\s\S]*?(?:\r?\n)---\s*(?:\r?\n|$)/u, " ").replace(/```[\s\S]*?```|~~~[\s\S]*?~~~/g, " ").replace(/!?\[([^\]]+)\]\([^)]*\)/g, "$1");
+  fields.push(["body", body]);
+  const phrases = new Map<string, number>(); for (const [field, value] of fields) for (const [phrase, weight] of v2FieldTerms(value, field)) phrases.set(phrase, (phrases.get(phrase) || 0) + weight);
+  return { phrases, title: cleanNoteTitle(note.title || filename) };
+}
+
+function v2NodeMembers(result: ClusterResult): Map<number, number[]> {
+  const placements = result.hierarchyPlacements || [];
+  const groups = new Map<number, number[]>(); const hasAlignedPlacements = placements.length === result.ids.length;
+  result.leafLabels.forEach((label, index) => { if (label >= 0 && (!hasAlignedPlacements || placements[index]?.kind === "leaf")) groups.set(label, [...(groups.get(label) || []), index]); });
+  const directResidual = new Map<number, number[]>(); placements.forEach((placement, index) => { if (placement.kind === "residual" && placement.nodeId !== null) directResidual.set(placement.nodeId, [...(directResidual.get(placement.nodeId) || []), index]); });
+  const nodes = result.hierarchy.nodes || []; const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge]));
+  const children = new Map<number, number[]>(); for (const node of nodes) children.set(node.id, node.children); for (const merge of merges.values()) if (!children.has(merge.id)) children.set(merge.id, [merge.left, merge.right]);
+  const visit = (id: number): number[] => { const childIds = children.get(id) || []; if (!childIds.length) return groups.get(id) || []; const members = [...new Set(childIds.flatMap(visit).concat(directResidual.get(id) || []))].sort((a, b) => a - b); if (members.length) groups.set(id, members); return members; };
+  const roots = result.hierarchy.root === null ? (result.hierarchy.rootChildren || []) : [result.hierarchy.root]; roots.forEach(visit);
+  return groups;
+}
+
+function v2NodeChildren(result: ClusterResult): Map<number, number[]> {
+  const output = new Map<number, number[]>(); for (const node of result.hierarchy.nodes || []) output.set(node.id, node.children); for (const merge of result.hierarchy.merges) if (!output.has(merge.id)) output.set(merge.id, [merge.left, merge.right]); return output;
+}
+
+function v2ScoreNode(index: V2Terms[], members: number[], childMembers: number[][], siblingMembers: number[][], totalDocuments: number): V2PhraseStats[] {
+  if (!members.length) return [];
+  const counts = new Map<string, number>(); const df = new Map<string, number>();
+  for (const member of members) { const terms = index[member]; if (!terms) continue; for (const [phrase, count] of terms.phrases) { counts.set(phrase, (counts.get(phrase) || 0) + count); df.set(phrase, (df.get(phrase) || 0) + 1); } }
+  const childSets = childMembers.map((child) => { const set = new Set<string>(); for (const member of child) index[member]?.phrases.forEach((_value, phrase) => set.add(phrase)); return set; });
+  const contrastDocuments = [...new Set(siblingMembers.flat())];
+  return [...counts].map(([phrase, weighted]) => {
+    const documentFrequency = df.get(phrase) || 0; const prevalence = documentFrequency / members.length; const idf = Math.log((totalDocuments + 1) / (documentFrequency + 1)) + 1; const tf = weighted / (weighted + 1.25);
+    const childHits = childSets.filter((set) => set.has(phrase)).length; const coverage = childSets.length ? childHits / childSets.length : 0;
+    const outsidePresent = contrastDocuments.filter((member) => index[member]?.phrases.has(phrase)).length;
+    const logOdds = contrastDocuments.length ? Math.log(((documentFrequency + 0.5) / (members.length - documentFrequency + 0.5)) / ((outsidePresent + 0.5) / (contrastDocuments.length - outsidePresent + 0.5))) : 0;
+    return { phrase, score: tf * idf * (0.35 + 0.65 * prevalence) + 0.3 * logOdds + 0.45 * coverage, prevalence, coverage, documentFrequency };
+  }).sort((a, b) => b.score - a.score || b.prevalence - a.prevalence || b.coverage - a.coverage || a.phrase.localeCompare(b.phrase));
+}
+
+function phraseSimilarity(left: string, right: string): number {
+  const a = new Set(left.split(" ")); const b = new Set(right.split(" ")); const intersection = [...a].filter((token) => b.has(token)).length; return intersection / Math.max(1, new Set([...a, ...b]).size);
+}
+
+function v2Select(scores: V2PhraseStats[], limit = 2): V2PhraseStats[] {
+  const chosen: V2PhraseStats[] = []; const remaining = scores.slice();
+  while (chosen.length < limit && remaining.length) { let best = remaining[0]; let bestValue = -Infinity; for (const candidate of remaining) { const redundancy = chosen.length ? Math.max(...chosen.map((item) => phraseSimilarity(item.phrase, candidate.phrase))) : 0; const value = candidate.score - 0.35 * redundancy; if (value > bestValue + 1e-12 || (Math.abs(value - bestValue) <= 1e-12 && candidate.phrase < best.phrase)) { best = candidate; bestValue = value; } } chosen.push(best); remaining.splice(remaining.indexOf(best), 1); }
+  return chosen;
+}
+
+function generateV2Titles(result: ClusterResult, notes: NoteRecord[], options: KeywordTitleOptions = {}): ClusterResult {
+  const started = Date.now(); const byPath = new Map(notes.map((note) => [note.path, note])); const alignedNotes = result.ids.map((id) => byPath.get(id) || ({ path: id, title: id, content: "", hash: "", mtime: 0 } as NoteRecord)); const terms = alignedNotes.map(extractV2Terms); const members = v2NodeMembers(result); const children = v2NodeChildren(result); const parents = new Map<number, number>(); for (const [parent, childIds] of children) for (const child of childIds) parents.set(child, parent); const nodes = [...members.keys()].sort((a, b) => a - b); const titles: Record<string, string> = {}; const statuses: Record<string, "generated" | "empty"> = {}; const scores: Record<string, Array<{ keyword: string; score: number }>> = {};
+  for (const [done, nodeId] of nodes.entries()) {
+    if (options.signal?.aborted) throw new Error("Clustering cancelled");
+    const nodeMembers = members.get(nodeId) || []; const childMembers = (children.get(nodeId) || []).map((child) => (members.get(child) || []).filter((member) => !result.hierarchyPlacements?.[member] || result.hierarchyPlacements[member].kind === "leaf")); const parent = parents.get(nodeId); const siblingMembers = parent === undefined ? [] : (children.get(parent) || []).filter((sibling) => sibling !== nodeId).map((sibling) => members.get(sibling) || []); const ranked = v2ScoreNode(terms, nodeMembers, childMembers, siblingMembers, alignedNotes.length); const selected = v2Select(ranked); let title = selected.map((item) => item.phrase).join(" · ");
+    if (!title) {
+      const coordinates = result.visualization?.coordinates;
+      const validMembers = nodeMembers.filter((member) => alignedNotes[member]);
+      let representative: number | undefined;
+      if (coordinates && validMembers.length) {
+        const center = validMembers.reduce<[number, number]>(([x, y], member) => [x + coordinates[member][0] / validMembers.length, y + coordinates[member][1] / validMembers.length], [0, 0]);
+        representative = validMembers.slice().sort((a, b) => ((coordinates[a][0] - center[0]) ** 2 + (coordinates[a][1] - center[1]) ** 2) - ((coordinates[b][0] - center[0]) ** 2 + (coordinates[b][1] - center[1]) ** 2) || (result.probabilities[b] || 0) - (result.probabilities[a] || 0) || alignedNotes[a].path.localeCompare(alignedNotes[b].path))[0];
+      } else representative = validMembers.slice().sort((a, b) => (result.probabilities[b] || 0) - (result.probabilities[a] || 0) || alignedNotes[a].path.localeCompare(alignedNotes[b].path))[0];
+      title = representative === undefined ? "" : cleanNoteTitle(alignedNotes[representative]?.title || "");
+    }
+    titles[String(nodeId)] = title; statuses[String(nodeId)] = title ? "generated" : "empty"; scores[String(nodeId)] = selected.map((item) => ({ keyword: item.phrase, score: Number(item.score.toFixed(8)) })); options.onNode?.(nodeId, title, ranked.map((item) => ({ keyword: item.phrase, score: item.score, prevalence: item.prevalence, titleCount: 0, documentFrequency: item.documentFrequency }))); options.onProgress?.(done + 1, nodes.length);
+  }
+  // Keep this result pure: callers can atomically publish it only after every
+  // node succeeds, so cancellation/error leaves the previously saved titles.
+  const inputFingerprint = stableFingerprint(notes.map((note) => `${note.path}:${note.hash}`).concat(result.ids));
+  return { ...result, titles, titleGeneration: { method: KEYWORD_TITLE_METHOD, algorithmVersion: KEYWORD_TITLE_ALGORITHM_VERSION, inputFingerprint, generatedAt: new Date().toISOString(), nodeCount: nodes.length, statuses, scores, durationMs: Date.now() - started } };
+}
+
+/** Generate v2 titles for v6/n-ary results; retain the legacy contract for old saved results. */
+export function generateKeywordTitles(result: ClusterResult, notes: NoteRecord[], options: KeywordTitleOptions = {}): ClusterResult {
+  return result.schemaVersion >= 6 || !!result.hierarchy.nodes ? generateV2Titles(result, notes, options) : generateLegacyKeywordTitles(result, notes, options);
+}

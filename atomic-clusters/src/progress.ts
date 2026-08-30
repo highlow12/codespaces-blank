@@ -13,6 +13,9 @@ export class AtomicClustersProgress {
   private readonly detailEl: HTMLElement;
   private readonly barEl: HTMLProgressElement;
   private disposed = false;
+  private lastUpdateAt = 0;
+  private lastProgress = Number.NEGATIVE_INFINITY;
+  private lastPhase = "";
 
   constructor(title: string) {
     this.notice = new Notice("", 0);
@@ -26,6 +29,9 @@ export class AtomicClustersProgress {
   update(update: ProgressUpdate): void {
     if (this.disposed) return;
     const value = Math.max(0, Math.min(1, update.progress));
+    const now = Date.now();
+    if (update.phase === this.lastPhase && value < 1 && value - this.lastProgress < 0.01 && now - this.lastUpdateAt < 100) return;
+    this.lastUpdateAt = now; this.lastProgress = value; this.lastPhase = update.phase;
     this.labelEl.setText(`${update.phase} · ${Math.round(value * 100)}%`);
     this.detailEl.setText(update.detail || "");
     this.barEl.value = value;

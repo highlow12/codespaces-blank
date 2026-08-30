@@ -1,5 +1,5 @@
 import { UMAP } from "umap-js";
-import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyTree, PcaModelArtifact, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
+import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyNode, HierarchyPlacement, HierarchyTree, PcaModelArtifact, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
 
 export interface NumericKernel {
   normalize(rows: number[][]): number[][];
@@ -83,6 +83,16 @@ export class DeterministicHdbscanProvider implements HdbscanProvider {
 
 export interface ClusterProgress { (phase: string, progress: number): void; }
 
+function throttledProgress(callback: ClusterProgress): ClusterProgress {
+  let lastAt = 0; let lastValue = -Infinity; let lastPhase = "";
+  return (phase, value) => {
+    const now = Date.now(); const bounded = Math.max(0, Math.min(1, value));
+    if (phase !== lastPhase || bounded >= 1 || bounded - lastValue >= 0.01 || now - lastAt >= 100) {
+      lastAt = now; lastValue = bounded; lastPhase = phase; callback(phase, bounded);
+    }
+  };
+}
+
 const jsKernel: NumericKernel = {
   normalize, pca: jsPca, cosineDistances, exactKnn,
   mst: (rows, k) => minimumSpanningTree(rows, k)
@@ -112,7 +122,7 @@ export async function projectVisualization(pcaFeatures: number[][], labels: numb
   if (labels.length !== pcaFeatures.length) throw new Error("Visualization labels must align with features.");
   if (pcaFeatures.some((row) => row.some((value) => !Number.isFinite(value)))) throw new Error("Visualization features must be finite.");
   checkCancelled(options);
-  const progress = options.onProgress || (() => undefined);
+  const progress = throttledProgress(options.onProgress || (() => undefined));
   const seed = options.seed ?? 42;
   const nNeighbors = Math.min(24, pcaFeatures.length - 1);
   const minDist = 1.0;
@@ -146,10 +156,36 @@ export async function projectVisualization(pcaFeatures: number[][], labels: numb
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
   if (input.length < 3) {
-    return { schemaVersion: 5, ids, leafLabels: input.map(() => -1), probabilities: input.map(() => 0), outlierProxy: input.map(() => 1), softMemberships: input.map(() => []), leafOrder: [], pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 }, hierarchy: { leaves: [], merges: [], root: null }, timings: { totalMs: 0 } };
+    const leafLabels = input.map(() => -1);
+    const memberships = input.map(() => [] as number[]);
+    const leafOrdering: number[] = [];
+    const coordinates: VisualizationCoordinate[] = input.length === 1 ? [[0, 0]] : [[-0.5, 0], [0.5, 0]];
+    return {
+      schemaVersion: 6,
+      ids,
+      leafLabels,
+      probabilities: input.map(() => 0),
+      outlierProxy: input.map(() => 1),
+      softMemberships: memberships,
+      memberships,
+      leafOrder: leafOrdering,
+      leafOrdering,
+      hierarchyPlacements: input.map(() => ({ kind: "residual", nodeId: null, confidence: 0 })),
+      pca: { selected: 1, explainedVariance: 1, totalVariance: 0, candidates: [1], preservationCandidates: [], selectionReason: "small_dataset", sampleSize: input.length, varianceTarget: config.pcaVarianceTarget ?? 0.9 },
+      hierarchy: { leaves: [], merges: [], root: null, nodes: [], rootChildren: [], splitMethod: "distance-knee-2-5" },
+      visualization: {
+        coordinates,
+        labels: leafLabels.slice(),
+        leafOrdering,
+        memberships,
+        configuration: { runtime: "deterministic-small", seed: config.seed ?? 42, nComponents: 2, nNeighbors: Math.max(1, input.length - 1), minDist: 1, spread: 1.8 },
+        timings: { totalMs: 0 }
+      },
+      timings: { totalMs: 0 }
+    };
   }
   const kernel = options.kernel || jsKernel;
-  const progress = options.onProgress || (() => undefined);
+  const progress = throttledProgress(options.onProgress || (() => undefined));
   const started = Date.now();
   const normalized = kernel.normalize(input);
   checkCancelled(options);
@@ -171,15 +207,15 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   selectedPca.model = { modelHash, inputDimension: normalized[0].length, outputDimension: selectedPca.selected, normalization: "l2", mean: fitted.mean, components: fitted.components, explainedVariance: pca.explained.slice(0, selectedPca.selected) };
   checkCancelled(options);
   progress("umap", 0.2);
-  const discovery = await discoverPcaFeatures(pca.projected, config, options);
+  const discovery = await discoverPcaFeatures(pca.projected, config, { ...options, onProgress: progress });
   const hdbscan = discovery;
   /* The Python/Pyodide worker uses this same boundary after fitting its
    * authoritative PCA. Keeping discovery separate makes the JS callback a
    * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
   progress("hdbscan", 0.78);
-  const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel);
+  const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel, config.minClusterSize || 1);
   progress("hierarchy", 0.86);
-  const visualization = await projectVisualization(pca.projected, hdbscan.labels, {
+  const visualization = config.deferVisualization ? undefined : await projectVisualization(pca.projected, hdbscan.labels, {
     seed: config.seed ?? 42,
     signal: options.signal,
     onProgress: (phase, value) => progress(phase, 0.86 + value * 0.1)
@@ -187,21 +223,49 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   progress("complete", 1);
   const leafOrder = hierarchy.leaves.slice();
   const clusterCount = leafOrder.length;
-  const softMemberships = hdbscan.memberships || hdbscan.labels.map((label, index) => leafOrder.map((leaf) => label === leaf ? hdbscan.probabilities[index] : 0));
+  const softMemberships = hdbscan.memberships || computeCentroidSoftMemberships(pca.projected, hdbscan.labels, hdbscan.probabilities, leafOrder);
   const memberships = softMemberships.map((row) => row.slice(0, clusterCount));
+  const hierarchyPlacements = computeHierarchyPlacements(hdbscan.labels, hdbscan.probabilities, memberships, hierarchy);
+  const placedHierarchy = applyHierarchyPlacementMasses(hierarchy, hierarchyPlacements);
   const completeVisualization = visualization ? { ...visualization, leafOrdering: leafOrder, memberships } : undefined;
   return {
-    schemaVersion: 5, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy, softMemberships: memberships, leafOrder, leafOrdering: leafOrder, memberships, pca: selectedPca, hierarchy, ...(completeVisualization ? { visualization: completeVisualization } : {}),
+    schemaVersion: 6, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
+    outlierProxy: hdbscan.outlierProxy, softMemberships: memberships, leafOrder, leafOrdering: leafOrder, memberships, pca: selectedPca, hierarchy: placedHierarchy, ...(completeVisualization ? { visualization: completeVisualization } : {}),
+    hierarchyPlacements,
     timings: { totalMs: Date.now() - started }
   };
+}
+
+/** Exact cosine soft memberships for providers that expose labels only. */
+export function computeCentroidSoftMemberships(rows: readonly number[][], labels: readonly number[], probabilities: readonly number[], leafOrder: readonly number[]): number[][] {
+  const centers = new Map<number, number[]>();
+  const dimension = rows[0]?.length || 0;
+  for (const leaf of leafOrder) {
+    const center = new Array<number>(dimension).fill(0); let total = 0; let memberCount = 0;
+    // Avoid creating a member-index array for every leaf.  This also keeps
+    // the centroid accumulation order identical to the old labels.map/filter
+    // implementation, which is important for deterministic soft memberships.
+    for (let index = 0; index < labels.length; index++) if (labels[index] === leaf) {
+      memberCount++;
+      const weight = Math.max(1e-6, probabilities[index] || 0); total += weight;
+      const row = rows[index]; for (let d = 0; d < dimension; d++) center[d] += row[d] * weight;
+    }
+    if (!memberCount) { centers.set(leaf, center); continue; }
+    for (let d = 0; d < dimension; d++) center[d] /= total;
+    centers.set(leaf, normalizeVector(center));
+  }
+  return rows.map((row, index) => {
+    const vector = normalizeVector(row); const scores = leafOrder.map((leaf) => Math.max(0, dot(vector, centers.get(leaf) || vector))); const total = scores.reduce((sum, score) => sum + score, 0); const probability = Math.max(0, Math.min(1, probabilities[index] || 0));
+    if (total <= 1e-12) return leafOrder.map((leaf) => leaf === labels[index] ? probability : 0);
+    return scores.map((score) => probability * score / total);
+  });
 }
 
 /** Run the browser-side UMAP/HDBSCAN discovery boundary on PCA features. */
 export async function discoverPcaFeatures(pcaFeatures: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<DiscoveryResult> {
   if (!pcaFeatures.length || pcaFeatures.some((row) => row.length !== pcaFeatures[0].length)) throw new Error("PCA features must be a non-empty rectangular matrix.");
   const kernel = options.kernel || jsKernel;
-  const progress = options.onProgress || (() => undefined);
+  const progress = throttledProgress(options.onProgress || (() => undefined));
   checkCancelled(options);
   progress("umap", 0.2);
   // umap-js initializes its simplicial-set embedding from this seeded random
@@ -249,9 +313,21 @@ export function selectPcaByPreservation(originalRows: number[][], projected: num
   const kValues = neighborhoodKValues(originalRows.length);
   const maximumK = Math.max(...kValues);
   const reference = kernel.exactKnn(originalRows, maximumK);
+  // Reuse one row workspace for every PCA prefix.  Calling `slice()` here
+  // used to allocate a complete N x D nested matrix for every candidate,
+  // even though normalization and k-NN consume it synchronously.  Keeping
+  // the public NumericKernel boundary as number[][] preserves third-party
+  // kernels and exact tie-breaking while removing those transient rows.
+  const prefixWidth = Math.max(...validCandidates);
+  const prefixRows = projected.map(() => new Array<number>(prefixWidth));
   const diagnostics: PcaPreservationCandidate[] = [];
   for (const dimension of validCandidates) {
-    const prefix = kernel.normalize(projected.map((row) => row.slice(0, dimension)));
+    for (let rowIndex = 0; rowIndex < projected.length; rowIndex++) {
+      const source = projected[rowIndex]; const target = prefixRows[rowIndex];
+      for (let column = 0; column < dimension; column++) target[column] = source[column];
+      target.length = dimension;
+    }
+    const prefix = kernel.normalize(prefixRows);
     const neighbors = kernel.exactKnn(prefix, maximumK);
     const byK: Record<number, number> = {};
     for (const k of kValues) byK[k] = meanNeighborPreservation(reference, neighbors, k);
@@ -284,9 +360,11 @@ function neighborhoodKValues(rows: number): number[] {
 
 function meanNeighborPreservation(reference: number[][], candidate: number[][], k: number): number {
   let preserved = 0;
+  const wanted = new Set<number>();
   for (let row = 0; row < reference.length; row++) {
-    const wanted = new Set(reference[row].slice(0, k));
-    for (const neighbor of candidate[row].slice(0, k)) if (wanted.has(neighbor)) preserved++;
+    wanted.clear();
+    for (let index = 0; index < k; index++) wanted.add(reference[row][index]);
+    for (let index = 0; index < k; index++) if (wanted.has(candidate[row][index])) preserved++;
   }
   return preserved / (reference.length * k);
 }
@@ -326,7 +404,7 @@ function centeredVarianceTrace(rows: number[][]): number {
   return squaredDistance / (rows.length - 1);
 }
 
-export function buildHierarchy(rows: number[][], labels: number[], probabilities: number[], kernel: NumericKernel = jsKernel): HierarchyTree {
+function buildBinaryHierarchy(rows: number[][], labels: number[], probabilities: number[], kernel: NumericKernel = jsKernel): HierarchyTree {
   const groups = new Map<number, number[]>();
   labels.forEach((label, index) => { if (label >= 0) groups.set(label, [...(groups.get(label) || []), index]); });
   const leaves = [...groups.keys()].sort((a, b) => a - b);
@@ -337,23 +415,141 @@ export function buildHierarchy(rows: number[][], labels: number[], probabilities
     for (const index of members) { const weight = Math.max(1e-6, probabilities[index]); mass += weight; for (let d = 0; d < center.length; d++) center[d] += rows[index][d] * weight; }
     centers.set(leaf, normalizeVector(center.map((value) => value / mass))); masses.set(leaf, mass);
   }
-  const active = new Set(leaves); const merges: HierarchyMerge[] = []; let next = Math.max(...leaves) + 1;
+  const active = new Set(leaves); const merges: HierarchyMerge[] = []; const heights = new Map(leaves.map((leaf) => [leaf, 0])); let next = Math.max(...leaves) + 1;
+  type Pair = [number, number, number]; const heap: Pair[] = [];
+  const before = (a: Pair, b: Pair): boolean => a[2] < b[2] || (a[2] === b[2] && (a[0] < b[0] || (a[0] === b[0] && a[1] < b[1])));
+  const push = (pair: Pair) => { heap.push(pair); let i = heap.length - 1; while (i) { const p = (i - 1) >> 1; if (!before(heap[i], heap[p])) break; [heap[i], heap[p]] = [heap[p], heap[i]]; i = p; } };
+  const pop = (): Pair => { const first = heap[0]; const last = heap.pop()!; if (heap.length) { heap[0] = last; let i = 0; while (true) { const left = i * 2 + 1; const right = left + 1; let best = i; if (left < heap.length && before(heap[left], heap[best])) best = left; if (right < heap.length && before(heap[right], heap[best])) best = right; if (best === i) break; [heap[i], heap[best]] = [heap[best], heap[i]]; i = best; } } return first; };
+  const addPair = (a: number, b: number) => { const left = Math.min(a, b), right = Math.max(a, b); push([left, right, Math.max(0, 1 - dot(centers.get(left)!, centers.get(right)!))]); };
+  for (let i = 0; i < leaves.length; i++) for (let j = i + 1; j < leaves.length; j++) addPair(leaves[i], leaves[j]);
   while (active.size > 1) {
-    const ids = [...active]; let best: [number, number, number] | null = null;
-    for (let i = 0; i < ids.length; i++) for (let j = i + 1; j < ids.length; j++) {
-      const distance = 1 - dot(centers.get(ids[i])!, centers.get(ids[j])!);
-      if (!best || distance < best[2]) best = [ids[i], ids[j], distance];
-    }
-    const [left, right, distance] = best!; const mass = masses.get(left)! + masses.get(right)!;
+    let best = pop(); while (!active.has(best[0]) || !active.has(best[1])) best = pop();
+    const [left, right, distance] = best; const mass = masses.get(left)! + masses.get(right)!;
     const merged = centers.get(left)!.map((value, i) => (value * masses.get(left)! + centers.get(right)![i] * masses.get(right)!) / mass);
     centers.set(next, normalizeVector(merged)); masses.set(next, mass); active.delete(left); active.delete(right); active.add(next);
-    merges.push({ id: next, left, right, distance, mass }); next++;
+    // Heights in a dendrogram must be monotone even when an upstream provider
+    // returns a non-monotone pairwise distance sequence.
+    const height = Math.max(distance, heights.get(left) || 0, heights.get(right) || 0); heights.set(next, height);
+    merges.push({ id: next, left, right, distance: height, mass }); for (const other of active) if (other !== next) addPair(next, other); next++;
   }
   return { leaves, merges, root: [...active][0] };
 }
 
+function naryNodeMass(id: number, masses: Map<number, number>, merges: ReadonlyMap<number, HierarchyMerge>): number {
+  const existing = masses.get(id); if (existing !== undefined) return existing;
+  const merge = merges.get(id); if (!merge) return 0;
+  const mass = naryNodeMass(merge.left, masses, merges) + naryNodeMass(merge.right, masses, merges); masses.set(id, mass); return mass;
+}
+
+export function chooseNaryFrontier(root: number, merges: ReadonlyMap<number, HierarchyMerge>, masses: Map<number, number>, minMass: number): number[] {
+  const rootMerge = merges.get(root); if (!rootMerge) return [root];
+  const frontier = [rootMerge.left, rootMerge.right];
+  const candidates = new Map<number, number[]>([[2, frontier.slice()]]);
+  const appliedHeights = new Map<number, number>([[2, rootMerge.distance]]);
+  const height = (id: number): number => merges.get(id)?.distance || 0;
+  const nextSplit = (items: readonly number[]): { index: number; id: number; height: number } | null => {
+    let candidate = -1; let candidateHeight = -Infinity;
+    for (let index = 0; index < items.length; index++) {
+      const merge = merges.get(items[index]); if (!merge) continue;
+      // A split that creates a tiny child is not a valid independent child.
+      if (naryNodeMass(merge.left, masses, merges) < minMass || naryNodeMass(merge.right, masses, merges) < minMass) continue;
+      const candidateId = items[index]; const candidateDistance = height(candidateId);
+      if (candidateDistance > candidateHeight || (candidateDistance === candidateHeight && (candidate < 0 || candidateId < items[candidate]))) {
+        candidate = index; candidateHeight = candidateDistance;
+      }
+    }
+    return candidate < 0 ? null : { index: candidate, id: items[candidate], height: candidateHeight };
+  };
+  while (frontier.length < 5) {
+    const split = nextSplit(frontier); if (!split) break;
+    const merge = merges.get(split.id)!; frontier.splice(split.index, 1, merge.left, merge.right);
+    candidates.set(frontier.length, frontier.slice()); appliedHeights.set(frontier.length, split.height);
+  }
+  let bestCount = 2; let bestGap = Number.NEGATIVE_INFINITY;
+  for (const [count, items] of candidates) {
+    const next = nextSplit(items); if (!next) continue;
+    const applied = appliedHeights.get(count)!; const scale = Math.max(Math.abs(applied), Math.abs(next.height), 1e-12);
+    const gap = (applied - next.height) / scale;
+    if (gap > bestGap + 1e-12) { bestGap = gap; bestCount = count; }
+  }
+  // No last/next split pair means no valid knee; the deterministic fallback is binary.
+  return (Number.isFinite(bestGap) ? candidates.get(bestCount) : candidates.get(2))!.slice();
+}
+
+/** Build the user-facing deterministic 2–5-ary hierarchy beside binary merges. */
+export function buildHierarchy(rows: number[][], labels: number[], probabilities: number[], kernel: NumericKernel = jsKernel, minClusterSize = 1): HierarchyTree {
+  const binary = buildBinaryHierarchy(rows, labels, probabilities, kernel);
+  const merges = new Map(binary.merges.map((merge) => [merge.id, merge]));
+  // Promotion is governed by note count (minClusterSize), while the legacy
+  // binary merge mass continues to preserve its probability-weighted value.
+  const massMemo = new Map<number, number>(); labels.forEach((label) => { if (label >= 0) massMemo.set(label, (massMemo.get(label) || 0) + 1); });
+  const nodes = new Map<number, HierarchyNode>();
+  const massOf = (id: number): number => naryNodeMass(id, massMemo, merges);
+  const leavesMemo = new Map<number, number[]>();
+  const leavesOf = (id: number): number[] => {
+    const cached = leavesMemo.get(id); if (cached) return cached;
+    const merge = merges.get(id); if (!merge) return [id];
+    const leaves = [...new Set([...leavesOf(merge.left), ...leavesOf(merge.right)])].sort((a, b) => a - b); leavesMemo.set(id, leaves); return leaves;
+  };
+  const make = (id: number): void => {
+    if (nodes.has(id)) return;
+    const merge = merges.get(id);
+    if (!merge) { nodes.set(id, { id, children: [], descendantLeaves: [id], distance: 0, mass: massOf(id) }); return; }
+    const children = chooseNaryFrontier(id, merges, massMemo, Math.max(1, minClusterSize));
+    children.forEach(make);
+    nodes.set(id, { id, children, descendantLeaves: leavesOf(id), distance: merge.distance, mass: massOf(id) });
+  };
+  if (binary.root !== null) make(binary.root);
+  const rootChildren = binary.root === null ? binary.leaves.slice() : (nodes.get(binary.root)?.children.length ? nodes.get(binary.root)!.children.slice() : [binary.root]);
+  if (binary.root === null) rootChildren.forEach(make);
+  return { ...binary, nodes: [...nodes.values()].sort((a, b) => a.id - b.id), rootChildren, splitMethod: "distance-knee-2-5" };
+}
+
+function hierarchyChildren(result: HierarchyTree): Map<number, number[]> {
+  const map = new Map<number, number[]>(); for (const node of result.nodes || []) map.set(node.id, node.children.slice());
+  if (!map.size) for (const merge of result.merges) map.set(merge.id, [merge.left, merge.right]);
+  return map;
+}
+
+/** Deterministically place every row at one leaf or the residual boundary. */
+export function computeHierarchyPlacements(labels: readonly number[], probabilities: readonly number[], memberships: readonly number[][], hierarchy: HierarchyTree): HierarchyPlacement[] {
+  const ordering = hierarchy.leaves.slice(); const leafColumns = new Map(ordering.map((leaf, index) => [leaf, index])); const children = hierarchyChildren(hierarchy); const nodeMap = new Map((hierarchy.nodes || []).map((node) => [node.id, node])); const rootChildren = hierarchy.rootChildren || (hierarchy.root === null ? hierarchy.leaves : [hierarchy.root]);
+  const hierarchyRoot = hierarchy.root === null ? null : nodeMap.get(hierarchy.root);
+  const startsBelowRoot = !!hierarchyRoot && hierarchyRoot.children.length === rootChildren.length && hierarchyRoot.children.every((child, index) => child === rootChildren[index]);
+  return labels.map((label, index) => {
+    if (label < 0) return { kind: "residual", nodeId: null, confidence: 0 };
+    const row = memberships[index] || []; let currentChildren = rootChildren; let parent: number | null = startsBelowRoot ? hierarchy.root : null; let confidence = Math.max(0, Math.min(1, probabilities[index] || 0));
+    while (currentChildren.length) {
+      const masses = currentChildren.map((child) => {
+        const node = nodeMap.get(child); const descendants = node?.descendantLeaves || [child];
+        return descendants.reduce((sum, leaf) => { const column = leafColumns.get(leaf); return sum + (column === undefined ? 0 : Math.max(0, Number(row[column]) || 0)); }, 0);
+      });
+      const total = masses.reduce((sum, value) => sum + value, 0); let best = 0; for (let i = 1; i < masses.length; i++) if (masses[i] > masses[best] || (masses[i] === masses[best] && currentChildren[i] < currentChildren[best])) best = i;
+      if (total <= 1e-9 || masses[best] <= total * 0.5) return { kind: "residual", nodeId: parent, confidence: total > 0 ? masses[best] / total : 0 };
+      confidence = masses[best] / total; const next = currentChildren[best]; const nextChildren = children.get(next) || [];
+      if (!nextChildren.length) return { kind: "leaf", nodeId: next, confidence };
+      parent = next; currentChildren = nextChildren;
+    }
+    return { kind: "leaf", nodeId: label, confidence };
+  });
+}
+
+/** Recount user-facing node mass from terminal placements, excluding residuals from descendants. */
+export function applyHierarchyPlacementMasses(hierarchy: HierarchyTree, placements: readonly HierarchyPlacement[]): HierarchyTree {
+  if (!hierarchy.nodes) return hierarchy;
+  const parent = new Map<number, number>(); for (const node of hierarchy.nodes) for (const child of node.children) parent.set(child, node.id);
+  const masses = new Map(hierarchy.nodes.map((node) => [node.id, 0]));
+  for (const placement of placements) {
+    if (placement.nodeId === null) continue;
+    let current: number | undefined = placement.nodeId; const seen = new Set<number>();
+    while (current !== undefined && !seen.has(current)) { seen.add(current); masses.set(current, (masses.get(current) || 0) + 1); current = parent.get(current); }
+  }
+  return { ...hierarchy, nodes: hierarchy.nodes.map((node) => ({ ...node, mass: masses.get(node.id) || 0 })) };
+}
+
 function hdbscanFallback(rows: number[][], minClusterSize: number, minSamples: number, kernel: NumericKernel): { labels: number[]; probabilities: number[] } {
   const n = rows.length; if (n < minClusterSize * 2) return { labels: new Array(n).fill(-1), probabilities: new Array(n).fill(0) };
+  if (n >= 512) throw new Error("The exact JavaScript HDBSCAN fallback is limited to fewer than 512 rows; use the packaged WASM kernel.");
   const k = Math.max(2, Math.min(minSamples, n - 1));
   // The production HDBSCAN provider consumes the WASM MST. This deterministic
   // fallback uses its edge weights as a density graph when the asset is absent.
@@ -370,13 +566,30 @@ function hdbscanFallback(rows: number[][], minClusterSize: number, minSamples: n
   return { labels, probabilities };
 }
 
-function normalize(rows: number[][]): number[][] { return rows.map((row) => normalizeVector(row)); }
+function normalize(rows: number[][]): number[][] {
+  const normalized: number[][] = new Array(rows.length);
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) normalized[rowIndex] = normalizeVector(rows[rowIndex]);
+  return normalized;
+}
 function normalizeVector(row: number[]): number[] { const norm = Math.sqrt(row.reduce((sum, value) => sum + value * value, 0)) || 1; return row.map((value) => value / norm); }
 function dot(a: number[], b: number[]): number { return a.reduce((sum, value, i) => sum + value * b[i], 0); }
-function cosineDistances(rows: number[][]): number[][] { const normalized = normalize(rows); return normalized.map((a) => normalized.map((b) => 1 - dot(a, b))); }
-function exactKnn(rows: number[][], k: number): number[][] { return cosineDistances(rows).map((row, i) => row.map((distance, index) => [distance, index]).filter((entry) => entry[1] !== i).sort((a, b) => a[0] - b[0]).slice(0, k).map((entry) => entry[1])); }
+function cosineDistances(rows: number[][]): number[][] { const normalized = normalize(rows); const result = Array.from({ length: normalized.length }, () => new Array(normalized.length).fill(0)); for (let i = 0; i < normalized.length; i++) for (let j = i; j < normalized.length; j++) { const distance = Math.max(0, 1 - dot(normalized[i], normalized[j])); result[i][j] = distance; result[j][i] = distance; } return result; }
+function exactKnnFromDistances(distances: number[][], k: number): number[][] {
+  const result = new Array<number[]>(distances.length); const candidates = new Array<number>(Math.max(0, distances.length - 1));
+  for (let rowIndex = 0; rowIndex < distances.length; rowIndex++) {
+    const row = distances[rowIndex]; let count = 0;
+    for (let index = 0; index < row.length; index++) if (index !== rowIndex) candidates[count++] = index;
+    candidates.length = count;
+    candidates.sort((left, right) => row[left] - row[right] || left - right);
+    const width = Math.min(k, count); const neighbors = new Array<number>(width);
+    for (let index = 0; index < width; index++) neighbors[index] = candidates[index];
+    result[rowIndex] = neighbors;
+  }
+  return result;
+}
+function exactKnn(rows: number[][], k: number): number[][] { return exactKnnFromDistances(cosineDistances(rows), k); }
 function minimumSpanningTree(rows: number[][], k: number): Array<[number, number, number]> {
-  const distances = cosineDistances(rows); const edges: Array<[number, number, number]> = []; for (let i = 0; i < rows.length; i++) exactKnn(rows, k)[i].forEach((j) => edges.push([i, j, distances[i][j]]));
+  const distances = cosineDistances(rows); const neighbors = exactKnnFromDistances(distances, k); const edges: Array<[number, number, number]> = []; for (let i = 0; i < rows.length; i++) neighbors[i].forEach((j) => edges.push([i, j, distances[i][j]]));
   edges.sort((a, b) => a[2] - b[2]); const parent = Array.from({ length: rows.length }, (_, i) => i); const find = (x: number): number => parent[x] === x ? x : (parent[x] = find(parent[x]));
   const result: Array<[number, number, number]> = []; for (const edge of edges) { const a = find(edge[0]); const b = find(edge[1]); if (a !== b) { parent[a] = b; result.push(edge); if (result.length === rows.length - 1) break; } } return result;
 }

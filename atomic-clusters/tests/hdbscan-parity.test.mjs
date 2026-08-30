@@ -19,9 +19,13 @@ test("HDBSCAN parity labels are permutation invariant and preserve membership me
   const candidate = { labels: [1, 1, 0, -1], probabilities: [0.8, 0.9, 0.7, 0], outlierProxy: [0.2, 0.1, 0.3, 1], memberships: [[0, 0.8], [0, 0.9], [0.7, 0], [0, 0]] };
   const metrics = compareHdbscanOutputs(reference, candidate);
   assert.equal(metrics.labelAgreement, 1);
+  assert.equal(metrics.adjustedRandIndex, 1);
   assert.equal(metrics.noiseAgreement, 1);
+  assert.equal(metrics.noiseExact, true);
   assert.equal(metrics.probabilityMae, 0);
+  assert.equal(metrics.probabilityMaxError, 0);
   assert.equal(metrics.outlierMae, 0);
+  assert.equal(metrics.outlierMaxError, 0);
   assert.equal(metrics.membershipMae, 0);
   assert.deepEqual(metrics.mapping, { "0": 1, "1": 0 });
 });
@@ -54,6 +58,20 @@ test("HDBSCAN parity uses optimal assignment beyond eight clusters", async () =>
   // The optimal overlap is 9 + 9 + 7 = 25 of 35 rows. A greedy choice of
   // candidate 0 -> reference 0 would score only 17 rows.
   assert.equal(result.labelAgreement, 25 / 35);
+  assert.ok(result.adjustedRandIndex < 1);
+});
+
+test("HDBSCAN parity distinguishes exact noise and maximum score errors", async () => {
+  const { compareHdbscanOutputs } = await load();
+  const metrics = compareHdbscanOutputs(
+    { labels: [0, -1, 0], probabilities: [1, 0, .8], outlierProxy: [0, 1, .2] },
+    { labels: [4, 4, -1], probabilities: [1, .1, .7], outlierProxy: [0, .9, .4] }
+  );
+  assert.equal(metrics.noiseExact, false);
+  assert.equal(metrics.noiseAgreement, 1 / 3);
+  assert.ok(Math.abs(metrics.probabilityMaxError - .1) < 1e-12);
+  assert.ok(Math.abs(metrics.outlierMaxError - .2) < 1e-12);
+  assert.ok(metrics.adjustedRandIndex < 1);
 });
 
 test("external HDBSCAN provider boundary validates rows and probabilities", async () => {

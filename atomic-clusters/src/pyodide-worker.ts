@@ -1,5 +1,5 @@
 import "atomic-clusters-wasm-bootstrap";
-import { discoverPcaFeatures, NumericKernel, projectVisualization } from "./clustering";
+import { applyHierarchyPlacementMasses, buildHierarchy, computeCentroidSoftMemberships, computeHierarchyPlacements, discoverPcaFeatures, NumericKernel, projectVisualization } from "./clustering";
 import { PYODIDE_CORE_SOURCE } from "./pyodide-core-source";
 import { ClusteringConfig, PyodideClusterResult } from "./types";
 import { loadWasmKernel } from "./wasm-loader";
@@ -82,7 +82,7 @@ function pythonResultToPluginResult(raw: Record<string, any>, ids: string[], fit
   const rawMemberships = Array.isArray(discovery.memberships) ? discovery.memberships.map((row: unknown) => Array.isArray(row) ? row.map(Number) : []) : [];
   const memberships = rawMemberships.length === ids.length && rawMemberships.every((row: number[]) => row.length === leaves.length && row.every((value) => Number.isFinite(value) && value >= 0 && value <= 1) && row.reduce((sum, value) => sum + value, 0) <= 1 + 1e-6) ? rawMemberships : undefined;
   return {
-    schemaVersion: 5,
+    schemaVersion: 6,
     ids: Array.isArray(raw.ids) ? raw.ids.map(String) : ids,
     leafLabels: (discovery.leaf_labels || []).map(Number),
     probabilities: (discovery.probabilities || []).map(Number),
@@ -130,15 +130,15 @@ _atomic_pca = fit_pca(embeddings, **dict(config.get('pca', {})))
     signal: { get cancelled() { return cancelled; } },
     onProgress: (phase, progress) => post({ type: "PROGRESS", jobId: request.jobId, phase, progress })
   });
-  const visualization = await projectVisualization(pcaFeatures, discovery.labels, {
+  const visualization = options.deferVisualization ? undefined : await projectVisualization(pcaFeatures, discovery.labels, {
     seed: options.seed ?? 42,
     signal: { get cancelled() { return cancelled; } },
     onProgress: (phase, progress) => post({ type: "PROGRESS", jobId: request.jobId, phase, progress: 0.86 + progress * 0.1 })
   });
   const clusterCount = Math.max(0, ...discovery.labels) + 1;
-  const memberships = discovery.labels.map((label, row) => Array.from({ length: clusterCount }, (_, column) => column === label ? discovery.probabilities[row] : 0));
+  const runnerMemberships = discovery.memberships || discovery.labels.map((label, row) => Array.from({ length: clusterCount }, (_, column) => column === label ? discovery.probabilities[row] : 0));
   const discoveryOutput = runtime.toPy({
-    umap_features: discovery.umapFeatures, leaf_labels: discovery.labels, memberships,
+    umap_features: discovery.umapFeatures, leaf_labels: discovery.labels, memberships: runnerMemberships,
     probabilities: discovery.probabilities, outlier_scores: discovery.outlierProxy,
     configuration: { runtime: "js-umap-wasm-hdbscan", seed: options.seed ?? 42 }
   });
@@ -158,7 +158,18 @@ cluster_documents(embeddings, ids=ids, config=config, discovery_runner=runner)
   const selected = Number(result.pca?.selected_dimension) || fittedModel.components.length;
   const selectedModel = { ...fittedModel, components: fittedModel.components.slice(0, selected), explainedVariance: fittedModel.explainedVariance.slice(0, selected) };
   const pluginResult = pythonResultToPluginResult(result, request.ids, selectedModel);
-  if (visualization && pluginResult.memberships && pluginResult.leafOrdering) pluginResult.visualization = { ...visualization, leafOrdering: pluginResult.leafOrdering, memberships: pluginResult.memberships };
+  const hierarchy = buildHierarchy(pcaFeatures, pluginResult.leafLabels, pluginResult.probabilities, wasmKernel, options.minClusterSize || 1);
+  const leafOrdering = hierarchy.leaves.slice();
+  const memberships = (discovery.memberships || computeCentroidSoftMemberships(pcaFeatures, pluginResult.leafLabels, pluginResult.probabilities, leafOrdering)).map((row) => row.slice(0, leafOrdering.length));
+  const hierarchyPlacements = computeHierarchyPlacements(pluginResult.leafLabels, pluginResult.probabilities, memberships, hierarchy);
+  pluginResult.schemaVersion = 6;
+  pluginResult.hierarchy = applyHierarchyPlacementMasses(hierarchy, hierarchyPlacements);
+  pluginResult.leafOrder = leafOrdering;
+  pluginResult.leafOrdering = leafOrdering;
+  pluginResult.memberships = memberships;
+  pluginResult.softMemberships = memberships.map((row) => row.slice());
+  pluginResult.hierarchyPlacements = hierarchyPlacements;
+  if (visualization) pluginResult.visualization = { ...visualization, leafOrdering, memberships };
   return pluginResult;
 }
 

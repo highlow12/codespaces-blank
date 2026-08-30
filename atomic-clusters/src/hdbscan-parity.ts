@@ -4,10 +4,14 @@ export interface HdbscanParityMetrics {
   referenceClusters: number;
   candidateClusters: number;
   labelAgreement: number;
+  adjustedRandIndex: number;
   noiseAgreement: number;
+  noiseExact: boolean;
   probabilityMae: number;
   probabilityRmse: number;
+  probabilityMaxError: number;
   outlierMae: number;
+  outlierMaxError: number;
   membershipMae: number;
   membershipMaxError: number;
   mapping: Record<string, number>;
@@ -43,12 +47,32 @@ export function compareHdbscanOutputs(reference: HdbscanOutput, candidate: Hdbsc
     membershipErrors.push(referenceMemberships[row][cluster] - value);
   }
   return {
-    referenceClusters: refClusters, candidateClusters, labelAgreement, noiseAgreement,
+    referenceClusters: refClusters, candidateClusters, labelAgreement,
+    adjustedRandIndex: adjustedRandIndex(refLabels, candidateLabels), noiseAgreement, noiseExact: noiseAgreement === 1,
     probabilityMae: meanAbsolute(probabilityErrors), probabilityRmse: rootMeanSquare(probabilityErrors),
-    outlierMae: meanAbsolute(outlierErrors), membershipMae: meanAbsolute(membershipErrors),
+    probabilityMaxError: maximumAbsolute(probabilityErrors), outlierMae: meanAbsolute(outlierErrors), outlierMaxError: maximumAbsolute(outlierErrors), membershipMae: meanAbsolute(membershipErrors),
     membershipMaxError: membershipErrors.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0),
     mapping: Object.fromEntries([...mapping.entries()].sort((a, b) => a[0] - b[0]).map(([key, value]) => [String(key), value]))
   };
+}
+
+/** Adjusted Rand index over the complete partition, including noise as a category. */
+function adjustedRandIndex(reference: number[], candidate: number[]): number {
+  if (reference.length !== candidate.length) throw new TypeError("ARI label vectors must have equal row counts");
+  if (reference.length < 2) return 1;
+  const refCounts = new Map<number, number>(); const candidateCounts = new Map<number, number>(); const cells = new Map<string, number>();
+  for (let index = 0; index < reference.length; index++) {
+    const ref = reference[index]; const item = candidate[index];
+    refCounts.set(ref, (refCounts.get(ref) || 0) + 1); candidateCounts.set(item, (candidateCounts.get(item) || 0) + 1);
+    const key = `${ref}:${item}`; cells.set(key, (cells.get(key) || 0) + 1);
+  }
+  const pairs = (count: number): number => count * (count - 1) / 2;
+  const cellPairs = [...cells.values()].reduce((sum, count) => sum + pairs(count), 0);
+  const refPairs = [...refCounts.values()].reduce((sum, count) => sum + pairs(count), 0);
+  const candidatePairs = [...candidateCounts.values()].reduce((sum, count) => sum + pairs(count), 0);
+  const totalPairs = pairs(reference.length); const expected = refPairs * candidatePairs / totalPairs; const maximum = (refPairs + candidatePairs) / 2; const denominator = maximum - expected;
+  if (Math.abs(denominator) <= Number.EPSILON) return cellPairs === maximum ? 1 : 0;
+  return (cellPairs - expected) / denominator;
 }
 
 function integerLabels(values: number[], rowCount: number, source: string): number[] {
@@ -111,4 +135,5 @@ function minimumCostAssignment(costs: number[][]): number[] {
 }
 function mean(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 1; }
 function meanAbsolute(values: number[]): number { return values.length ? values.reduce((sum, value) => sum + Math.abs(value), 0) / values.length : 0; }
+function maximumAbsolute(values: number[]): number { return values.reduce((maximum, value) => Math.max(maximum, Math.abs(value)), 0); }
 function rootMeanSquare(values: number[]): number { return values.length ? Math.sqrt(values.reduce((sum, value) => sum + value * value, 0) / values.length) : 0; }
