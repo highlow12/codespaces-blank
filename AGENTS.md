@@ -35,6 +35,11 @@ Example:
   --skip-visualization
 ```
 
+## Local test vault
+
+- Obsidian test vault: `/mnt/d/cluster-test/cluster test`
+- Plugin install directory: `/mnt/d/cluster-test/cluster test/.obsidian/plugins/atomic-clusters`
+
 ## Parallel independent runs
 
 - Decompose implementation, review, and validation into independent workstreams and run them concurrently whenever their file ownership and dependencies do not overlap.
