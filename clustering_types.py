@@ -28,6 +28,9 @@ class PipelineResult:
     metrics: dict[str, Any]
     labels: np.ndarray
     memberships: np.ndarray | None = None
+    # Optional artifact produced by discovery pipelines.  This is separate
+    # from the legacy recursive SFCM HierarchicalResult below.
+    hierarchy: Any | None = None
 
 
 @dataclass

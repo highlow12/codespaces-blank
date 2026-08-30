@@ -1,0 +1,128 @@
+import { build, context } from "esbuild";
+import { cp, mkdir, readFile, readdir } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { verifyWasmAsset } from "./scripts/verify-wasm.mjs";
+
+const common = {
+  bundle: true,
+  platform: "browser",
+  target: "es2020",
+  format: "cjs",
+  sourcemap: false,
+  external: ["obsidian", "electron", "worker_threads", "node:*"],
+  logLevel: "info"
+};
+
+async function run() {
+  await mkdir("dist", { recursive: true });
+  const generatedDir = resolve("wasm-core/pkg");
+  const gluePath = resolve(generatedDir, "atomic_clusters_wasm_core.js");
+  const wasmPath = resolve(generatedDir, "atomic_clusters_wasm_core_bg.wasm");
+  const requireWasm = process.argv.includes("--require-wasm");
+  if (requireWasm && (!existsSync(gluePath) || !existsSync(wasmPath))) {
+    throw new Error("Release build requires wasm-core/pkg. Run npm run build:wasm first.");
+  }
+  if (requireWasm) await verifyWasmAsset(gluePath, wasmPath);
+  const wasmBootstrap = {
+    name: "atomic-clusters-wasm-bootstrap",
+    setup(plugin) {
+      plugin.onResolve({ filter: /^atomic-clusters-wasm-bootstrap$/ }, () => ({ path: "bootstrap", namespace: "atomic-wasm" }));
+      plugin.onLoad({ filter: /.*/, namespace: "atomic-wasm" }, async () => {
+        if (!existsSync(gluePath) || !existsSync(wasmPath)) return { contents: "// Development build: deterministic JS fallback remains enabled." };
+        const encoded = (await readFile(wasmPath)).toString("base64");
+        return { resolveDir: generatedDir, contents: `
+          import { initSync, normalize, matmul, pca, randomized_pca,
+            cosine_distances, exact_knn, exact_knn_cosine_tiled,
+            euclidean_mutual_reachability_mst, mst,
+            mutual_reachability_mst, hdbscan_extract,
+            hdbscan_extract_with_rows, HnswIndex } from ${JSON.stringify(gluePath)};
+          const bytes = Uint8Array.from(Buffer.from(${JSON.stringify(encoded)}, "base64"));
+          initSync({ module: new WebAssembly.Module(bytes) });
+          globalThis.__ATOMIC_CLUSTERS_WASM__ = { normalize, matmul, pca,
+            randomized_pca, cosine_distances, exact_knn,
+            exact_knn_cosine_tiled, euclidean_mutual_reachability_mst,
+            mst, mutual_reachability_mst,
+            hdbscan_extract, hdbscan_extract_with_rows, HnswIndex };
+        ` };
+      });
+    }
+  };
+  const pyodideCoreSource = {};
+  async function collectPythonSources(directory, prefix = "") {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+      const path = resolve(directory, entry.name);
+      if (entry.isDirectory()) await collectPythonSources(path, relative);
+      else if (entry.name.endsWith(".py")) pyodideCoreSource[relative] = await readFile(path, "utf8");
+    }
+  }
+  await collectPythonSources(resolve("..", "pyodide_core"));
+  const pyodideCorePlugin = {
+    name: "embedded-pyodide-core",
+    setup(plugin) {
+      plugin.onResolve({ filter: /^\.\/pyodide-core-source$/ }, () => ({ path: "pyodide-core-source", namespace: "embedded-pyodide-core" }));
+      plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-core" }, () => ({ contents: `export const PYODIDE_CORE_SOURCE = ${JSON.stringify(pyodideCoreSource)};`, loader: "js" }));
+    }
+  };
+  const workerBuild = await build({ ...common, entryPoints: ["src/worker.ts"], platform: "node", plugins: [wasmBootstrap], write: false });
+  const workerSource = new TextDecoder().decode(workerBuild.outputFiles[0].contents);
+  const browserWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/browser-worker.ts"], plugins: [wasmBootstrap], write: false });
+  const browserWorkerSource = new TextDecoder().decode(browserWorkerBuild.outputFiles[0].contents);
+  // The embedding provider resolves the pinned ORT Web package.
+  const sharedOrtVersion = "1.22.0-dev.20250409-89f8206ba4";
+  const sharedOrtWebDist = resolve("node_modules/onnxruntime-web/dist");
+  const sharedOrtWebGpu = resolve(sharedOrtWebDist, "ort.webgpu.mjs");
+  const sharedOrtWasm = resolve(sharedOrtWebDist, "ort-wasm-simd-threaded.jsep.wasm");
+  const sharedOrtPackage = resolve(sharedOrtWebDist, "..", "package.json");
+  const installedOrtVersion = JSON.parse(await readFile(sharedOrtPackage, "utf8")).version;
+  if (installedOrtVersion !== sharedOrtVersion || !existsSync(sharedOrtWebGpu) || !existsSync(sharedOrtWasm)) {
+    throw new Error(`Build requires shared onnxruntime-web ${sharedOrtVersion} JS/WASM assets.`);
+  }
+  const pyodideWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/pyodide-worker.ts"], plugins: [wasmBootstrap, pyodideCorePlugin], write: false });
+  const pyodideWorkerSource = new TextDecoder().decode(pyodideWorkerBuild.outputFiles[0].contents);
+  const workerPlugin = { name: "embedded-worker", setup(plugin) {
+    plugin.onResolve({ filter: /^\.\/worker-source$/ }, () => ({ path: "atomic-clusters-worker-source", namespace: "embedded-worker" }));
+    plugin.onLoad({ filter: /.*/, namespace: "embedded-worker" }, () => ({ contents: `export default ${JSON.stringify(workerSource)};`, loader: "js" }));
+  } };
+  const pyodideWorkerPlugin = { name: "embedded-pyodide-worker", setup(plugin) {
+    plugin.onResolve({ filter: /^\.\/pyodide-worker-source$/ }, () => ({ path: "pyodide-worker-source", namespace: "embedded-pyodide-worker" }));
+    plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-worker" }, () => ({ contents: `export default ${JSON.stringify(pyodideWorkerSource)};`, loader: "js" }));
+  } };
+  const browserWorkerPlugin = { name: "embedded-browser-worker", setup(plugin) {
+    plugin.onResolve({ filter: /^\.\/browser-worker-source$/ }, () => ({ path: "atomic-clusters-browser-worker-source", namespace: "embedded-browser-worker" }));
+    plugin.onLoad({ filter: /.*/, namespace: "embedded-browser-worker" }, () => ({ contents: `export default ${JSON.stringify(browserWorkerSource)};`, loader: "js" }));
+  } };
+  // The package export points at ort.webgpu.bundle.min.mjs, whose embedded
+  // Emscripten factory evaluates new URL(..., import.meta.url) even when
+  // wasmBinary is supplied. Use the non-bundle build so the renderer-safe
+  // JSEP module is loaded through wasmPaths and transformed into a Blob.
+  const ortWebGpuAliasPlugin = { name: "onnxruntime-webgpu-renderer-safe", setup(plugin) {
+    plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: sharedOrtWebGpu }));
+  } };
+  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, browserWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
+  if (process.argv.includes("--watch")) {
+    const buildContext = await context(mainBuild);
+    await buildContext.watch();
+    console.log("watching");
+    return;
+  }
+  await build(mainBuild);
+  await cp("manifest.json", "dist/manifest.json");
+  await cp("styles.css", "dist/styles.css");
+  // onnxruntime-web resolves its worker and binary next to the plugin bundle.
+  // Ship both CPU WASM and the JSEP/WebGPU assets; inference remains local
+  // after the model has been explicitly downloaded.
+  const ortAssets = resolve("node_modules/onnxruntime-web/dist");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.mjs"), "dist/ort-wasm-simd-threaded.mjs");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.wasm"), "dist/ort-wasm-simd-threaded.wasm");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.mjs"), "dist/ort-wasm-simd-threaded.jsep.mjs");
+  await cp(resolve(ortAssets, "ort-wasm-simd-threaded.jsep.wasm"), "dist/ort-wasm-simd-threaded.jsep.wasm");
+  // sql.js loads its SQLite engine separately from the JavaScript bundle.
+  // Keep the pinned wasm asset beside the plugin so vault adapters remain
+  // usable offline after installation.
+  const sqliteWasm = resolve("node_modules/sql.js/dist/sql-wasm.wasm");
+  if (!existsSync(sqliteWasm)) throw new Error("Build requires sql.js/dist/sql-wasm.wasm.");
+  await cp(sqliteWasm, "dist/sql-wasm.wasm");
+}
+run().catch((error) => { console.error(error); process.exitCode = 1; });

@@ -1,0 +1,37 @@
+{
+  "schema_version": "1.0",
+  "status": "pre_release",
+  "release_blocked": true,
+  "reason": "source manifest promoted by explicit user direction; fetch and chunk artifacts are still pending.",
+  "manifest_articles": 720,
+  "source_count": 0,
+  "chunk_count": 0,
+  "errors": [
+    "fetch and chunk artifacts pending"
+  ],
+  "near_duplicates": [],
+  "near_duplicate_method": "tfidf_char_ngram",
+  "article_counts": {
+    "top": {},
+    "parent": {},
+    "leaf": {},
+    "split": {}
+  },
+  "chunk_counts": {
+    "top": {},
+    "parent": {},
+    "leaf": {},
+    "split": {}
+  },
+  "token_distribution": {
+    "min": null,
+    "max": null,
+    "mean": null
+  },
+  "excluded": [],
+  "tokenizer": {
+    "model": "BAAI/bge-base-en-v1.5",
+    "revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
+  },
+  "config_sha256": "d8e1107ff059758db46dab56cd250fe27b267862d50754b54b2351c37f3d8a6c"
+}

@@ -1,0 +1,23 @@
+{
+  "schema_version": "1.0",
+  "language": "en",
+  "tokenizer": {
+    "model": "BAAI/bge-base-en-v1.5",
+    "revision": "a5beb1e3e68b9ab74eb54cfd186867f64f240e1a"
+  },
+  "chunking": {
+    "min_tokens": 100,
+    "max_tokens": 250,
+    "max_chunks_per_article": 3
+  },
+  "manifest": {
+    "articles": 720,
+    "articles_per_leaf": 60,
+    "splits": {"discovery": 36, "calibration": 12, "test": 12}
+  },
+  "near_duplicate": {
+    "method": "tfidf_char_ngram",
+    "ngram": 5,
+    "threshold": 0.92
+  }
+}

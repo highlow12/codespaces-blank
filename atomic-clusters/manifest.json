@@ -1,0 +1,12 @@
+{
+  "id": "atomic-clusters",
+  "name": "Atomic Clusters",
+  "version": "0.1.0",
+  "minAppVersion": "1.5.0",
+  "description": "Build an offline hierarchical map of your notes.",
+  "author": "Atomic Clusters contributors",
+  "isDesktopOnly": true,
+  "fundingUrl": "",
+  "authorUrl": "",
+  "repo": ""
+}

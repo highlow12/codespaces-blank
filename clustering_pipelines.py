@@ -14,9 +14,21 @@ from fcm_hierarchy import (
     fit_clustering_pca,
     spherical_fcm,
 )
+from hdbscan_membership_comparison import (
+    DEFAULT_MIN_CLUSTER_SIZE as DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
+    DEFAULT_MIN_SAMPLES as DEFAULT_HDBSCAN_MIN_SAMPLES,
+    DEFAULT_UMAP_COMPONENTS,
+    DEFAULT_UMAP_N_NEIGHBORS,
+    fit_hdbscan_membership_comparison,
+)
+from hdbscan_bottom_up import build_hdbscan_hierarchy
 
 
+DEFAULT_PIPELINE_NAME = "pca_umap_hdbscan"
+# The first entry is the user-facing default.  The FCM names are retained as
+# explicit compatibility/benchmark paths.
 PIPELINE_NAMES = (
+    DEFAULT_PIPELINE_NAME,
     "2_auto_pca_fcm",
     "2_pca256_fcm",
 )
@@ -86,12 +98,103 @@ def run_pipeline_2(
     )
 
 
+def run_pipeline_pca_umap_hdbscan(
+    X: np.ndarray,
+    y: np.ndarray | None,
+    n_clusters: int | None = None,
+    *,
+    pca_components: int | None = None,
+    pca_max_components: int = 512,
+    pca_min_components: int = 32,
+    pca_component_step: int = 32,
+    umap_components: int = DEFAULT_UMAP_COMPONENTS,
+    umap_n_neighbors: int = DEFAULT_UMAP_N_NEIGHBORS,
+    min_cluster_size: int = DEFAULT_HDBSCAN_MIN_CLUSTER_SIZE,
+    min_samples: int = DEFAULT_HDBSCAN_MIN_SAMPLES,
+    seed: int = 42,
+) -> PipelineResult:
+    """Run the default ``PCA -> UMAP -> HDBSCAN`` discovery path.
+
+    ``n_clusters`` is accepted for API compatibility with the old flat FCM
+    runners.  HDBSCAN determines the number of clusters from the data, so it
+    is intentionally not used as a forced K.
+    """
+
+    del n_clusters
+    start = time.perf_counter()
+    values = np.asarray(X, dtype=np.float64)
+    if values.ndim != 2 or values.shape[0] < 3:
+        raise ValueError("PCA + UMAP + HDBSCAN requires at least 3 samples")
+    # The comparison API also computes independent PCA-space affinities.  It
+    # is useful here because it gives the default route stable soft
+    # assignments, while the actual hard discovery labels come from UMAP.
+    effective_neighbor_count = min(DEFAULT_UMAP_N_NEIGHBORS, values.shape[0] - 1)
+    comparison = fit_hdbscan_membership_comparison(
+        values,
+        pca_components=pca_components,
+        pca_max_components=pca_max_components,
+        pca_min_components=pca_min_components,
+        pca_component_step=pca_component_step,
+        umap_components=umap_components,
+        umap_n_neighbors=umap_n_neighbors,
+        min_cluster_size=min_cluster_size,
+        min_samples=min_samples,
+        neighbor_count=effective_neighbor_count,
+        seed=seed,
+    )
+    assignments = pd.DataFrame({"cluster": comparison.leaf_labels})
+    if y is not None:
+        assignments["class"] = np.asarray(y)
+    memberships = comparison.native_memberships
+    for index in range(memberships.shape[1]):
+        assignments[f"membership_{index}"] = memberships[:, index]
+    extracted_metrics = extract_metrics_from_frame(
+        assignments,
+        source=DEFAULT_PIPELINE_NAME,
+        # HDBSCAN fits on UMAP coordinates, so internal metrics should use the
+        # same space rather than the pre-discovery PCA representation.
+        features=comparison.umap_features,
+        feature_source="umap_features",
+    )
+    elapsed = time.perf_counter() - start
+    metrics: dict[str, Any] = {
+        "pipeline": DEFAULT_PIPELINE_NAME,
+        "pca_components_requested": (
+            "auto" if pca_components is None else int(pca_components)
+        ),
+        "pca_components": int(comparison.pca_features.shape[1]),
+        "pca_selection": comparison.pca_selection.to_dict(),
+        "umap_components": int(comparison.umap_features.shape[1]),
+        "umap_n_neighbors": int(comparison.configuration["umap_n_neighbors"]),
+        "hdbscan_min_cluster_size": int(min_cluster_size),
+        "hdbscan_min_samples": int(min_samples),
+        "runtime_sec": elapsed,
+        "iterations": None,
+        **extracted_metrics,
+    }
+    hierarchy = build_hdbscan_hierarchy(
+        comparison.pca_features,
+        comparison.leaf_labels,
+        memberships,
+        probabilities=getattr(comparison, "probabilities", None),
+        outlier_scores=getattr(comparison, "outlier_scores", None),
+    )
+    return PipelineResult(
+        metrics=metrics,
+        labels=comparison.leaf_labels,
+        memberships=memberships if memberships.shape[1] else None,
+        hierarchy=hierarchy,
+    )
+
+
 def run_pipeline_by_name(
     pipeline_name: str,
     X: np.ndarray,
     y: np.ndarray | None,
     n_clusters: int,
 ) -> PipelineResult:
+    if pipeline_name == DEFAULT_PIPELINE_NAME:
+        return run_pipeline_pca_umap_hdbscan(X, y, n_clusters)
     if pipeline_name == "2_auto_pca_fcm":
         return run_pipeline_2(
             X,

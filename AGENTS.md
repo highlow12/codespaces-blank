@@ -12,6 +12,11 @@
 - Install dependencies with `./.venv/bin/python -m pip install -r requirements.txt`.
 - Run the test suite with `./.venv/bin/python -m unittest discover -s . -p 'test_*.py'`.
 
+## Sub-agent implementation
+
+- When the primary agent is running a Sol model, spawn a `gpt-5.6-luna` sub-agent with `high` reasoning effort and assign it the actual implementation and test execution.
+- Give the Luna sub-agent a concrete, self-contained task, require it to edit the workspace directly, and review its changes and test results before reporting completion.
+
 ## Clustering validation data
 
 - Do not use `dbpedia_label_embeddings.json` for clustering or incremental-clustering validation. It contains only 18 tag-label embeddings and is not the clustering test dataset.
@@ -29,3 +34,17 @@ Example:
   --state-output /tmp/incremental-fast.state.pkl \
   --skip-visualization
 ```
+
+## Local test vault
+
+- Obsidian test vault: `/mnt/d/cluster-test/cluster test`
+- Plugin install directory: `/mnt/d/cluster-test/cluster test/.obsidian/plugins/atomic-clusters`
+
+## Parallel independent runs
+
+- Decompose implementation, review, and validation into independent workstreams and run them concurrently whenever their file ownership and dependencies do not overlap.
+- Use available sub-agents for independent code areas, read-only review, and test analysis; assign explicit file or responsibility boundaries to prevent conflicting edits.
+- Start independent checks as soon as their prerequisites are available instead of waiting for the entire implementation to finish.
+- Run independent benchmarks, seeds, or dataset slices in parallel whenever practical to reduce elapsed time.
+- Limit concurrency based on available CPU and memory; clustering runs may be resource-intensive, so avoid oversubscribing the machine.
+- Keep each run's output in a separate directory and aggregate results only after all parallel jobs complete.

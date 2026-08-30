@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "language": "en",
+  "tops": ["computer-science", "natural-science"],
+  "nodes": {
+    "computer-science": {"display_name": "Computer Science", "parent": null, "level": "top"},
+    "natural-science": {"display_name": "Natural Science", "parent": null, "level": "top"},
+    "intelligent-systems": {"display_name": "Intelligent Systems", "parent": "computer-science", "level": "parent"},
+    "visual-computing": {"display_name": "Visual Computing", "parent": "computer-science", "level": "parent"},
+    "networked-systems": {"display_name": "Networked Systems", "parent": "computer-science", "level": "parent"},
+    "physical-science": {"display_name": "Physical Science", "parent": "natural-science", "level": "parent"},
+    "earth-and-space-science": {"display_name": "Earth and Space Science", "parent": "natural-science", "level": "parent"},
+    "life-science": {"display_name": "Life Science", "parent": "natural-science", "level": "parent"},
+    "machine-learning": {"display_name": "Machine Learning", "parent": "intelligent-systems", "level": "leaf"},
+    "natural-language-processing": {"display_name": "Natural Language Processing", "parent": "intelligent-systems", "level": "leaf"},
+    "computer-graphics": {"display_name": "Computer Graphics", "parent": "visual-computing", "level": "leaf"},
+    "computer-vision": {"display_name": "Computer Vision", "parent": "visual-computing", "level": "leaf"},
+    "computer-networks": {"display_name": "Computer Networks", "parent": "networked-systems", "level": "leaf"},
+    "distributed-computing": {"display_name": "Distributed Computing", "parent": "networked-systems", "level": "leaf"},
+    "physics": {"display_name": "Physics", "parent": "physical-science", "level": "leaf"},
+    "chemistry": {"display_name": "Chemistry", "parent": "physical-science", "level": "leaf"},
+    "astronomy": {"display_name": "Astronomy", "parent": "earth-and-space-science", "level": "leaf"},
+    "geology": {"display_name": "Geology", "parent": "earth-and-space-science", "level": "leaf"},
+    "molecular-biology": {"display_name": "Molecular Biology", "parent": "life-science", "level": "leaf"},
+    "ecology": {"display_name": "Ecology", "parent": "life-science", "level": "leaf"}
+  },
+  "near_leaf_pairs": [
+    ["machine-learning", "natural-language-processing"],
+    ["computer-graphics", "computer-vision"],
+    ["computer-networks", "distributed-computing"],
+    ["physics", "chemistry"],
+    ["astronomy", "geology"],
+    ["molecular-biology", "ecology"]
+  ],
+  "far_leaf_pairs": [
+    ["machine-learning", "geology"],
+    ["computer-graphics", "ecology"],
+    ["computer-networks", "chemistry"],
+    ["physics", "natural-language-processing"]
+  ]
+}

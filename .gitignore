@@ -9,3 +9,11 @@ embed_notes_gemini.py
 notes.zip
 /notes/
 /results/
+
+# Wikipedia benchmark generated artifacts and checkpoints.
+/wikipedia_artifacts/
+/wikipedia_sources/
+/wikipedia_packages/
+/wikipedia_embeddings/
+*.jsonl.gz
+fetch_checkpoint.json

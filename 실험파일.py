@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn.preprocessing import normalize
 
 from clustering_pipelines import (
+    DEFAULT_PIPELINE_NAME,
     PIPELINE_NAMES,
     build_soft_assignments,
     choose_best_pipeline,
@@ -53,7 +54,10 @@ def main() -> None:
     parser.add_argument(
         "--hierarchical",
         action="store_true",
-        help="Also run recursive PCA+FCM and save hierarchical assignments/tree outputs.",
+        help=(
+            "Also run the legacy recursive PCA+FCM hierarchy. The default "
+            "PCA+UMAP+HDBSCAN hierarchy is always written separately."
+        ),
     )
     parser.add_argument("--hierarchical-max-depth", type=int, default=4)
     parser.add_argument("--hierarchical-min-node-size", type=int, default=60)
@@ -143,11 +147,23 @@ def main() -> None:
         default=Path("hierarchical_auto_pca_fcm_tree.json"),
     )
     parser.add_argument(
+        "--hdbscan-hierarchy-assignments-output",
+        type=Path,
+        default=Path("hdbscan_hierarchy_assignments.csv"),
+        help="CSV artifact for the default HDBSCAN-leaf hierarchy.",
+    )
+    parser.add_argument(
+        "--hdbscan-hierarchy-tree-output",
+        type=Path,
+        default=Path("hdbscan_hierarchy_tree.json"),
+        help="JSON dendrogram artifact for the default HDBSCAN-leaf hierarchy.",
+    )
+    parser.add_argument(
         "--pipeline",
         nargs="+",
         choices=PIPELINE_NAMES,
-        default=["2_auto_pca_fcm"],
-        help="Clustering pipeline to run (default: automatic PCA + spherical FCM).",
+        default=[DEFAULT_PIPELINE_NAME],
+        help="Clustering pipeline to run (default: PCA + UMAP + HDBSCAN).",
     )
     args = parser.parse_args()
 
@@ -183,12 +199,44 @@ def main() -> None:
         args.clusters,
     )
 
+    # The default discovery pipeline always emits its own unsupervised
+    # bottom-up hierarchy.  Keep this independent from --hierarchical, which
+    # is the explicit legacy recursive PCA+FCM compatibility path below.
+    hdbscan_hierarchy_result = None
+    if DEFAULT_PIPELINE_NAME in pipeline_runs:
+        hdbscan_hierarchy_result = pipeline_runs[DEFAULT_PIPELINE_NAME].hierarchy
+        if hdbscan_hierarchy_result is not None:
+            hierarchy_assignments = metadata.copy()
+            for column in hdbscan_hierarchy_result.assignments.columns:
+                hierarchy_assignments[column] = hdbscan_hierarchy_result.assignments[
+                    column
+                ].to_numpy()
+            hdbscan_hierarchy_assignments_path = (
+                args.output_dir / args.hdbscan_hierarchy_assignments_output
+            )
+            hdbscan_hierarchy_tree_path = (
+                args.output_dir / args.hdbscan_hierarchy_tree_output
+            )
+            hierarchy_assignments.to_csv(
+                hdbscan_hierarchy_assignments_path,
+                index=False,
+            )
+            hdbscan_hierarchy_tree_path.write_text(
+                json.dumps(
+                    hdbscan_hierarchy_result.tree,
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
     results = [run.metrics for run in pipeline_runs.values()]
     frame = pd.DataFrame(results)
     benchmark_columns = [
         "pipeline",
         "pca_components_requested",
         "pca_components",
+        "umap_components",
         "umap_preset",
         "umap_n_neighbors",
         "umap_min_dist",
@@ -338,6 +386,18 @@ def main() -> None:
     print(f"Benchmark saved to: {benchmark_csv}")
     print(f"Benchmark summary saved to: {benchmark_json}")
     print(f"Cluster assignments saved to: {args.output_dir / args.assignments_output}")
+    if hdbscan_hierarchy_result is not None:
+        print(
+            "HDBSCAN leaf hierarchy: "
+            f"{hdbscan_hierarchy_result.summary['leaf_cluster_count']} leaf clusters, "
+            f"{hdbscan_hierarchy_result.summary['merge_count']} merges, "
+            f"{hdbscan_hierarchy_result.summary['noise_count']} noise points"
+        )
+        print(
+            "HDBSCAN hierarchy assignments saved to: "
+            f"{hdbscan_hierarchy_assignments_path}"
+        )
+        print(f"HDBSCAN hierarchy tree saved to: {hdbscan_hierarchy_tree_path}")
     for soft_path in soft_assignment_paths:
         print(f"Soft assignments saved to: {soft_path}")
     if hierarchical_result is not None:

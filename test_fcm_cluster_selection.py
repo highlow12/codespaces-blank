@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import numpy as np
 
 from clustering_types import FCMResult
-from clustering_pipelines import run_pipeline_by_name
+from clustering_pipelines import DEFAULT_PIPELINE_NAME, run_pipeline_by_name
 from fcm_core import spherical_fcm
 from fcm_hierarchy import (
     modified_partition_coefficient,
@@ -532,6 +533,36 @@ class XieBeniClusterSelectionTest(unittest.TestCase):
         self.assertEqual(result.metrics["pca_components_requested"], "auto")
         self.assertEqual(result.metrics["pca_components"], 3)
         self.assertIsNotNone(result.metrics["pca_selection"])
+
+    def test_default_pipeline_is_pca_umap_hdbscan(self) -> None:
+        labels = np.asarray([0, 0, 1, 1])
+        memberships = np.asarray(
+            [[0.95, 0.05], [0.90, 0.10], [0.10, 0.90], [0.05, 0.95]]
+        )
+        fake = SimpleNamespace(
+            leaf_labels=labels,
+            native_memberships=memberships,
+            pca_features=np.asarray([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]]),
+            umap_features=np.asarray([[1.0, 0.0], [0.9, 0.1], [0.0, 1.0], [0.1, 0.9]]),
+            pca_selection=SimpleNamespace(to_dict=lambda: {"selected_dimension": 2}),
+            configuration={"umap_n_neighbors": 3},
+        )
+        with patch(
+            "clustering_pipelines.fit_hdbscan_membership_comparison",
+            return_value=fake,
+        ) as fit:
+            result = run_pipeline_by_name(
+                DEFAULT_PIPELINE_NAME,
+                fake.pca_features,
+                np.asarray([0, 0, 1, 1]),
+                2,
+            )
+
+        self.assertEqual(result.metrics["pipeline"], DEFAULT_PIPELINE_NAME)
+        self.assertEqual(result.metrics["umap_components"], 2)
+        self.assertEqual(result.metrics["clusters"], 2)
+        self.assertEqual(result.memberships.shape, (4, 2))
+        self.assertEqual(fit.call_args.kwargs["neighbor_count"], 3)
 
 
 if __name__ == "__main__":
