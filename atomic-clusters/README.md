@@ -136,6 +136,17 @@ them without document-relative URL assumptions.
 The repository intentionally keeps the model weights out of the plugin; local
 model download must be explicit and is disclosed in Settings.
 
+### Current visualization issues
+
+The following explorer behaviors are recorded for a future follow-up and are
+not addressed by the current release:
+
+- During viewport panning, notes can move farther than the viewport/cloud
+  before snapping back into place.
+- Content at the viewport edges can still be clipped.
+- Hover feedback is ambiguous and can remain active while the pointer is over
+  empty space instead of clearing.
+
 ## Scope and known gaps
 
 This MVP implements the complete vault → embedding → worker → hierarchy →
