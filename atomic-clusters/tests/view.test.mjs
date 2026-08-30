@@ -159,6 +159,15 @@ test("resize observer ignores unchanged notifications and waits for a valid cont
   assert.match(view, /callback\(animationNow\(\)\)/);
 });
 
+test("gesture raster keeps an overscan margin when the affine layer moves", async () => {
+  const view = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
+  assert.match(view, /VISUALIZATION_GESTURE_OVERSCAN = 128/);
+  assert.match(view, /const rasterWidth = width \+ gestureOverscan \* 2/);
+  assert.match(view, /const rasterPoints = points\.map\(\(\[x, y\]\) => \[x \+ gestureOverscan, y \+ gestureOverscan\]/);
+  assert.match(view, /gestureOverscan \* \(1 - ratio\)/);
+  assert.match(view, /pickVisualizationCloud\(cachedClouds, x \+ gestureOverscan, y \+ gestureOverscan\)/);
+});
+
 test("gesture camera pans without opening a note, debounces density, and cleans up listeners", async () => {
   const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
   let imageDataCalls = 0; let prevented = false;
