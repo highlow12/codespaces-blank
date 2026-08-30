@@ -212,5 +212,7 @@ test("clicking a rendered cluster cloud advances the global depth", async () => 
     layer.dispatchEvent({ type: "click", clientX: 80, clientY: 150, bubbles: true });
     const breadcrumb = view.contentEl.querySelector(".atomic-clusters-breadcrumb");
     assert.equal(breadcrumb.children.at(-1).textContent, "Cluster 3");
+    assert.equal(view.visualizationCameraState.centerX, 5);
+    assert.ok(view.visualizationCameraState.fitScale > 20);
   } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
 });
