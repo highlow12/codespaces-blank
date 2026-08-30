@@ -12,6 +12,17 @@ const EPSILON = 1e-9;
 export interface VisualizationNode { id: string; sourceId: number | null; children: VisualizationNode[]; leafLabels: number[]; pointIndices: number[]; depth: number; nary?: boolean; }
 export interface NaryVisualizationHierarchy { leaves: number[]; root: number | null; children?: Record<string, number[]>; nodes?: Array<{ id: number; children: number[]; descendantLeaves?: number[] }>; rootChildren?: number[]; merges?: HierarchyMerge[]; }
 export interface VisualizationFrontierEntry { node: VisualizationNode; depth: number; remainingDepth: number; pointIndices: number[]; residualIndices: number[]; directResidualIndices?: number[]; descendantResidualIndices?: number[]; /** true when a leaf was explicitly selected and its actual notes should be shown. */ actualPoints: boolean; }
+/** An entry in the global depth cut used by the explorer.  Unlike the legacy
+ * frontier, entries from every branch are returned at the same depth. */
+export interface VisualizationDepthEntry extends VisualizationFrontierEntry {
+  /** True when this entry lies on the currently selected path. */
+  active: boolean;
+  /** Opacity to use for this entry's cloud and label. */
+  opacity: number;
+  /** Root-to-entry ids, useful for assigning note emphasis without rescanning. */
+  pathIds: string[];
+}
+export interface VisualizationCameraState { centerX: number; centerY: number; zoom: number; fitScale: number; width: number; height: number; padding: number; }
 export interface VisualizationCamera { scale: number; offsetX: number; offsetY: number; width: number; height: number; worldRegion: { minX: number; maxX: number; minY: number; maxY: number }; }
 export interface VisualizationCameraLayerTransform { scale: number; translateX: number; translateY: number; }
 export interface VisualizationSplat { x: number; y: number; sigma: number; color: [number, number, number]; amplitude: number; }
@@ -179,6 +190,141 @@ export function visualizationFrontier(root: VisualizationNode, expandedIds: Iter
     actualPoints: false,
   }));
 }
+
+/** Return the real hierarchy roots (the adapter's synthetic root is omitted). */
+export function visualizationHierarchyRoots(root: VisualizationNode): VisualizationNode[] {
+  return root.children.length === 1 && root.children[0].children.length ? root.children[0].children : root.children;
+}
+
+function visualizationDescendsFrom(node: VisualizationNode, ancestorId: string): boolean {
+  if (node.id === ancestorId) return true;
+  return node.children.some((child) => visualizationDescendsFrom(child, ancestorId));
+}
+
+function visualizationPathIds(root: VisualizationNode, targetId: string): string[] {
+  return visualizationPath(root, targetId).map((node) => node.id);
+}
+
+/**
+ * Build a cut through every hierarchy branch at one global depth.  A leaf
+ * reached before the requested depth remains in the cut, so an unbalanced
+ * hierarchy never makes a note cloud disappear while another branch expands.
+ * `depth` is relative to the real hierarchy roots (zero is the first split).
+ */
+export function visualizationGlobalDepthFrontier(
+  root: VisualizationNode,
+  depth = 0,
+  selectedNodeId: string | null = null,
+  memberships?: readonly number[][],
+  leafOrdering?: readonly number[],
+  placements?: readonly HierarchyPlacement[],
+): VisualizationDepthEntry[] {
+  const roots = visualizationHierarchyRoots(root);
+  const requestedDepth = Math.max(0, Number.isFinite(depth) ? Math.floor(depth) : 0);
+  const selectedPath = selectedNodeId ? visualizationPath(root, selectedNodeId) : [];
+  const selected = selectedNodeId && visualizationPath(root, selectedNodeId).some((node) => node.id === selectedNodeId)
+    ? selectedNodeId : null;
+  const selectedNode = selected ? selectedPath[selectedPath.length - 1] : null;
+  const placedResiduals = placements ? new Set(placements.map((placement, index) => placement.kind === "residual" ? index : -1).filter((index) => index >= 0)) : new Set<number>();
+  const entries: VisualizationDepthEntry[] = [];
+  const walk = (node: VisualizationNode, relativeDepth: number, parentPath: string[]): void => {
+    const pathIds = [...parentPath, node.id];
+    if (!node.children.length || relativeDepth >= requestedDepth) {
+      const active = !selected || (visualizationDescendsFrom(node, selected) || (!!selectedNode && visualizationDescendsFrom(selectedNode, node.id)));
+      const residualIndices = placements
+        ? placements.map((placement, index) => placement.kind === "residual" && visualizationNoteTerminalPath(root, index, undefined, placements).includes(node.id) ? index : -1).filter((index) => index >= 0)
+        : memberships && leafOrdering ? residualPointIndices(node, [], memberships, leafOrdering) : [];
+      // Leaves are still clouds in the global cut.  Their note dots are
+      // rendered at every depth, so selecting a leaf changes emphasis only;
+      // it must not remove its title/cloud from the stage.
+      const excluded = new Set([...placedResiduals, ...residualIndices]);
+      entries.push({ node, depth: relativeDepth, remainingDepth: Math.max(0, visualizationTreeDepth(root) - node.depth), pointIndices: node.pointIndices.filter((index) => !excluded.has(index)), residualIndices, directResidualIndices: residualIndices, descendantResidualIndices: [], actualPoints: false, active, opacity: active ? 1 : 0.2, pathIds });
+      return;
+    }
+    node.children.forEach((child) => walk(child, relativeDepth + 1, pathIds));
+  };
+  roots.forEach((node) => walk(node, 0, ["root"]));
+  return entries;
+}
+export const globalVisualizationDepthFrontier = visualizationGlobalDepthFrontier;
+export const visualizationDepthCut = visualizationGlobalDepthFrontier;
+export const visualizationGlobalDepthEntries = visualizationGlobalDepthFrontier;
+
+/** Return the hierarchy path containing a note, including residual locations. */
+export function visualizationNoteTerminalPath(
+  root: VisualizationNode,
+  pointIndex: number,
+  labels?: readonly number[],
+  placements?: readonly HierarchyPlacement[],
+): string[] {
+  const placement = placements?.[pointIndex];
+  if (placement) {
+    if (placement.nodeId === null) return ["root"];
+    return visualizationPathIds(root, `node:${placement.nodeId}`);
+  }
+  const label = labels?.[pointIndex];
+  if (typeof label !== "number" || !Number.isSafeInteger(label) || label < 0) return ["root"];
+  const leaf = visualizationPath(root, `node:${label}`);
+  return leaf.length && leaf.at(-1)?.id === `node:${label}` ? leaf.map((node) => node.id) : ["root"];
+}
+export const visualizationTerminalPath = visualizationNoteTerminalPath;
+
+/** Return the terminal node id for a note (root denotes root noise). */
+export function visualizationNoteTerminalNode(root: VisualizationNode, pointIndex: number, labels?: readonly number[], placements?: readonly HierarchyPlacement[]): string {
+  const path = visualizationNoteTerminalPath(root, pointIndex, labels, placements);
+  return path[path.length - 1] || "root";
+}
+
+export function clampVisualizationZoom(value: number): number {
+  if (Number.isNaN(value)) return 1;
+  if (value === Number.POSITIVE_INFINITY) return 16;
+  if (value === Number.NEGATIVE_INFINITY) return 0.5;
+  return Math.max(0.5, Math.min(16, Number.isFinite(value) ? value : 1));
+}
+export const VISUALIZATION_ZOOM_MIN = 0.5;
+export const VISUALIZATION_ZOOM_MAX = 16;
+
+/** Fit all world coordinates and return a pan/zoom state centered on them. */
+export function visualizationFitCameraState(coordinates: readonly VisualizationCoordinate[], width: number, height: number, padding = VISUALIZATION_POINT_PADDING): VisualizationCameraState {
+  const region = visualizationRegion({ pointIndices: coordinates.map((_point, index) => index) } as VisualizationNode, coordinates);
+  const safeWidth = Math.max(1, Number.isFinite(width) ? width : 1), safeHeight = Math.max(1, Number.isFinite(height) ? height : 1);
+  const safePadding = Math.max(0, Math.min(Number.isFinite(padding) ? padding : VISUALIZATION_POINT_PADDING, Math.min(safeWidth, safeHeight) / 2));
+  const fitScale = Math.min((safeWidth - safePadding * 2) / Math.max(EPSILON, region.maxX - region.minX), (safeHeight - safePadding * 2) / Math.max(EPSILON, region.maxY - region.minY));
+  return { centerX: (region.minX + region.maxX) / 2, centerY: (region.minY + region.maxY) / 2, zoom: 1, fitScale: Math.max(EPSILON, fitScale), width: safeWidth, height: safeHeight, padding: safePadding };
+}
+export const fitVisualizationCamera = visualizationFitCameraState;
+export const createVisualizationCameraState = visualizationFitCameraState;
+/** Resize a camera while preserving its world center and user zoom. */
+export function resizeVisualizationCameraState(state: VisualizationCameraState, coordinates: readonly VisualizationCoordinate[], width: number, height: number): VisualizationCameraState {
+  const fitted = visualizationFitCameraState(coordinates, width, height, state.padding);
+  return { ...fitted, centerX: state.centerX, centerY: state.centerY, zoom: clampVisualizationZoom(state.zoom) };
+}
+export const resizeVisualizationCamera = resizeVisualizationCameraState;
+
+/** Convert a pan/zoom state into the camera consumed by world/screen helpers. */
+export function visualizationCameraFromState(state: VisualizationCameraState): VisualizationCamera {
+  const scale = Math.max(EPSILON, state.fitScale * clampVisualizationZoom(state.zoom));
+  return { scale, offsetX: state.width / 2 - state.centerX * scale, offsetY: state.height / 2 + state.centerY * scale, width: state.width, height: state.height, worldRegion: { minX: state.centerX - state.width / (2 * scale), maxX: state.centerX + state.width / (2 * scale), minY: state.centerY - state.height / (2 * scale), maxY: state.centerY + state.height / (2 * scale) } };
+}
+export const cameraFromVisualizationState = visualizationCameraFromState;
+export const visualizationPanZoomCamera = visualizationCameraFromState;
+
+/** Pan by screen pixels (dragging right moves the world right). */
+export function panVisualizationCamera(state: VisualizationCameraState, deltaX: number, deltaY: number): VisualizationCameraState {
+  const camera = visualizationCameraFromState(state); const dx = Number.isFinite(deltaX) ? deltaX : 0; const dy = Number.isFinite(deltaY) ? deltaY : 0;
+  return { ...state, centerX: state.centerX - dx / camera.scale, centerY: state.centerY + dy / camera.scale };
+}
+export const panCamera = panVisualizationCamera;
+
+/** Zoom around a screen point while preserving the world coordinate beneath it. */
+export function zoomVisualizationCameraAt(state: VisualizationCameraState, screenX: number, screenY: number, factor: number): VisualizationCameraState {
+  const before = visualizationCameraFromState(state); const world = visualizationScreenToWorld(before, [screenX, screenY]);
+  const zoom = clampVisualizationZoom(state.zoom * (Number.isFinite(factor) && factor > 0 ? factor : 1));
+  const next = visualizationCameraFromState({ ...state, zoom }); const centerX = world[0] - (screenX - next.width / 2) / next.scale; const centerY = world[1] + (screenY - next.height / 2) / next.scale;
+  return { ...state, zoom, centerX, centerY };
+}
+export const zoomVisualizationCamera = zoomVisualizationCameraAt;
+export const zoomCameraAt = zoomVisualizationCameraAt;
 export function collapseVisualizationBranch(expandedIds: Iterable<string>, targetId: string): string[] { return [...expandedIds].filter((id) => id !== targetId && !id.startsWith(`${targetId}/`)); }
 export function visualizationTreeDepth(root: VisualizationNode): number { return root.children.reduce((depth, child) => Math.max(depth, visualizationTreeDepth(child)), root.depth); }
 export function visualizationRemainingDepth(node: VisualizationNode, root: VisualizationNode): number { return Math.max(0, visualizationTreeDepth(root) - node.depth); }

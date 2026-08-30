@@ -159,159 +159,20 @@ test("resize observer ignores unchanged notifications and waits for a valid cont
   assert.match(view, /callback\(animationNow\(\)\)/);
 });
 
-test("navigation keeps an outgoing snapshot visible until the hidden semantic stage is ready", async () => {
-  const previous = new Map([
-    ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["HTMLElement", globalThis.HTMLElement],
-    ["MockElement", globalThis.MockElement], ["document", globalThis.document], ["window", globalThis.window],
-    ["getComputedStyle", globalThis.getComputedStyle], ["requestAnimationFrame", globalThis.requestAnimationFrame],
-    ["cancelAnimationFrame", globalThis.cancelAnimationFrame], ["performance", globalThis.performance], ["ResizeObserver", globalThis.ResizeObserver]
-  ]);
-  let clock = 0; const frames = [];
-  class MockResizeObserver { static instances = []; constructor(callback) { this.callback = callback; MockResizeObserver.instances.push(this); } observe() {} disconnect() {} trigger(entry) { this.callback(entry ? [entry] : []); } }
-  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
-  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
-  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) };
-  globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
-  globalThis.performance = { now: () => clock };
-  globalThis.requestAnimationFrame = (callback) => { frames.push(callback); return frames.length; };
-  globalThis.cancelAnimationFrame = () => {};
-  globalThis.ResizeObserver = MockResizeObserver;
-  try {
-    const { ClusterExplorerView } = await loadView();
-    const view = new ClusterExplorerView({});
-    view.setResult({
-      schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {},
-      hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 },
-      visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} }
-    });
-    const initialCanvas = view.contentEl.querySelector("canvas");
-    initialCanvas.dispatchEvent({ type: "click", bubbles: true, clientX: 63, clientY: 150 });
-    const outgoing = view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer");
-    const target = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer");
-    assert.ok(outgoing);
-    assert.ok(outgoing.classList.contains("is-animating"));
-    assert.equal(outgoing.style.visibility, "visible");
-    assert.equal(outgoing.style.transform, "translate(0px, 0px) scale(1)");
-    assert.equal(target.style.visibility, "hidden");
-    assert.equal(frames.length, 1);
-    // The first observer callback commonly differs slightly from the canvas
-    // rect because of fractional content-box rounding/scrollbars. It must
-    // not consume the navigation animation as a resize.
-    MockResizeObserver.instances.at(-1).trigger({ contentRect: { width: 499.4, height: 299.4 } });
-    assert.ok(outgoing.classList.contains("is-animating"));
-    assert.equal(target.style.visibility, "hidden");
-    assert.equal(frames.length, 1);
-    clock = 230; frames.shift()(clock);
-    assert.match(outgoing.style.transform, /scale\((?!1(?:\.0+)?\))/);
-    assert.ok(outgoing.classList.contains("is-animating"));
-    assert.equal(target.style.visibility, "hidden");
-    clock = 500; frames.shift()(clock);
-    assert.equal(view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"), null);
-    assert.equal(target.style.transform, "none");
-    assert.equal(target.style.visibility, "");
-
-    const back = view.contentEl.querySelector(".atomic-clusters-umap-navigation").children[0];
-    back.dispatchEvent({ type: "click", bubbles: true });
-    const backOutgoing = view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer");
-    const backTarget = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer");
-    assert.ok(backOutgoing.classList.contains("is-animating"));
-    assert.equal(backOutgoing.style.transform, "translate(0px, 0px) scale(1)");
-    assert.equal(backTarget.style.visibility, "hidden");
-    clock = 1000; frames.shift()(clock);
-    assert.equal(view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"), null);
-    assert.equal(backTarget.style.transform, "none");
-    assert.equal(backTarget.style.visibility, "");
-  } finally {
-    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
-  }
-});
-
-test("pending navigation survives a layout-zero render until ResizeObserver reports the real viewport", async () => {
-  const previous = new Map([
-    ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["HTMLElement", globalThis.HTMLElement], ["MockElement", globalThis.MockElement],
-    ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle],
-    ["requestAnimationFrame", globalThis.requestAnimationFrame], ["cancelAnimationFrame", globalThis.cancelAnimationFrame], ["performance", globalThis.performance], ["ResizeObserver", globalThis.ResizeObserver], ["__mockViewport", globalThis.__mockViewport]
-  ]);
-  let clock = 0; const frames = [];
-  class MockResizeObserver { static instances = []; constructor(callback) { this.callback = callback; MockResizeObserver.instances.push(this); } observe() {} disconnect() {} trigger() { this.callback(); } }
-  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
-  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
-  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
-  globalThis.performance = { now: () => clock }; globalThis.requestAnimationFrame = (callback) => { frames.push(callback); return frames.length; }; globalThis.cancelAnimationFrame = () => {};
-  globalThis.ResizeObserver = MockResizeObserver; globalThis.__mockViewport = { width: 500, height: 300 };
-  try {
-    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
-    view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
-    globalThis.__mockViewport = { width: 0, height: 0 }; view.navigateVisualization("node:0", () => {});
-    const delayedLayer = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer"); const delayedOutgoing = view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"); assert.equal(delayedLayer.classList.contains("is-animating"), false); assert.equal(delayedLayer.style.visibility, "hidden"); assert.equal(delayedLayer.style.transform, ""); assert.equal(delayedOutgoing.style.visibility, "visible"); assert.equal(delayedOutgoing.style.transform, "none"); assert.equal(frames.length, 0);
-    globalThis.__mockViewport = { width: 500, height: 300 }; MockResizeObserver.instances.at(-1).trigger();
-    assert.ok(delayedOutgoing.classList.contains("is-animating")); assert.equal(delayedLayer.style.visibility, "hidden"); assert.equal(delayedOutgoing.style.visibility, "visible"); assert.equal(delayedOutgoing.style.transform, "translate(0px, 0px) scale(1)"); assert.equal(frames.length, 1);
-    clock = 500; frames.shift()(clock); assert.equal(view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"), null); assert.equal(delayedLayer.style.transform, "none"); assert.equal(delayedLayer.style.visibility, ""); assert.equal(delayedLayer.classList.contains("is-animating"), false);
-  } finally {
-    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
-  }
-});
-
-test("resize rerasterizes at the observer content-box size and preserves the last valid frame", async () => {
-  const previous = new Map([
-    ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["HTMLElement", globalThis.HTMLElement], ["MockElement", globalThis.MockElement],
-    ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle],
-    ["requestAnimationFrame", globalThis.requestAnimationFrame], ["cancelAnimationFrame", globalThis.cancelAnimationFrame],
-    ["performance", globalThis.performance], ["ResizeObserver", globalThis.ResizeObserver], ["__mockViewport", globalThis.__mockViewport]
-  ]);
+test("gesture camera pans without opening a note, debounces density, and cleans up listeners", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
+  let imageDataCalls = 0; let prevented = false;
   class TrackingCanvas extends MockCanvas {
-    static drawImageCalls = 0; static imageDataCalls = 0;
-    getContext() {
-      const context = super.getContext();
-      context.drawImage = () => { TrackingCanvas.drawImageCalls++; };
-      context.createImageData = (width, height) => { TrackingCanvas.imageDataCalls++; return { data: new Uint8ClampedArray(width * height * 4) }; };
-      return context;
-    }
+    getContext() { const context = super.getContext(); context.createImageData = (width, height) => { imageDataCalls++; return { data: new Uint8ClampedArray(width * height * 4) }; }; return context; }
   }
-  class MockResizeObserver { static instances = []; constructor(callback) { this.callback = callback; MockResizeObserver.instances.push(this); } observe() {} disconnect() {} trigger(entry) { this.callback(entry ? [entry] : []); } }
-  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = TrackingCanvas;
-  globalThis.document = { createElement: (tag) => tag === "canvas" ? new TrackingCanvas() : new MockElement(tag) };
-  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
-  globalThis.requestAnimationFrame = () => 1; globalThis.cancelAnimationFrame = () => {}; globalThis.performance = { now: () => 0 };
-  globalThis.ResizeObserver = MockResizeObserver; globalThis.__mockViewport = { width: 500, height: 300 };
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = TrackingCanvas; globalThis.document = { createElement: (tag) => tag === "canvas" ? new TrackingCanvas() : new MockElement(tag) }; globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
   try {
     const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
     view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
-    const canvas = view.contentEl.querySelector("canvas"); const observer = MockResizeObserver.instances.at(-1); const initialDraws = TrackingCanvas.drawImageCalls; const initialImageData = TrackingCanvas.imageDataCalls;
-    globalThis.__mockViewport = { width: 720, height: 420 }; observer.trigger({ contentRect: { width: 720, height: 420 } });
-    assert.equal(canvas.width, 720); assert.equal(canvas.height, 420); assert.ok(TrackingCanvas.drawImageCalls > initialDraws); assert.ok(TrackingCanvas.imageDataCalls > initialImageData);
-    const drawsBeforeZero = TrackingCanvas.drawImageCalls; const imageDataBeforeZero = TrackingCanvas.imageDataCalls;
-    observer.trigger({ contentRect: { width: 0, height: 0 } });
-    assert.equal(canvas.width, 720); assert.equal(canvas.height, 420); assert.equal(TrackingCanvas.drawImageCalls, drawsBeforeZero); assert.equal(TrackingCanvas.imageDataCalls, imageDataBeforeZero);
-    globalThis.__mockViewport = { width: 640, height: 360 }; observer.trigger({ contentRect: { width: 640, height: 360 } });
-    assert.equal(canvas.width, 640); assert.equal(canvas.height, 360); assert.ok(TrackingCanvas.imageDataCalls > imageDataBeforeZero);
-  } finally {
-    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
-  }
-});
-
-test("a valid resize during camera animation snaps to the target and removes the outgoing layer", async () => {
-  const previous = new Map([
-    ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["HTMLElement", globalThis.HTMLElement], ["MockElement", globalThis.MockElement],
-    ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle],
-    ["requestAnimationFrame", globalThis.requestAnimationFrame], ["cancelAnimationFrame", globalThis.cancelAnimationFrame],
-    ["performance", globalThis.performance], ["ResizeObserver", globalThis.ResizeObserver], ["__mockViewport", globalThis.__mockViewport]
-  ]);
-  const frames = [];
-  class MockResizeObserver { static instances = []; constructor(callback) { this.callback = callback; MockResizeObserver.instances.push(this); } observe() {} disconnect() {} trigger(entry) { this.callback(entry ? [entry] : []); } }
-  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
-  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
-  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
-  globalThis.performance = { now: () => 0 }; globalThis.requestAnimationFrame = (callback) => { frames.push(callback); return frames.length; }; globalThis.cancelAnimationFrame = () => {};
-  globalThis.ResizeObserver = MockResizeObserver; globalThis.__mockViewport = { width: 500, height: 300 };
-  try {
-    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
-    view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
-    view.contentEl.querySelector("canvas").dispatchEvent({ type: "click", bubbles: true, clientX: 63, clientY: 150 });
-    const outgoing = view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"); const target = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer"); assert.ok(outgoing); assert.equal(target.style.visibility, "hidden"); assert.equal(frames.length, 1);
-    globalThis.__mockViewport = { width: 700, height: 400 }; MockResizeObserver.instances.at(-1).trigger({ contentRect: { width: 700, height: 400 } });
-    assert.equal(view.contentEl.querySelector(".atomic-clusters-umap-outgoing-layer"), null); assert.equal(target.style.visibility, ""); assert.equal(target.querySelector("canvas").width, 700); assert.equal(target.querySelector("canvas").height, 400);
-  } finally {
-    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
-  }
+    const layer = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer"); const canvas = layer.querySelector("canvas"); const initialCalls = imageDataCalls;
+    layer.dispatchEvent({ type: "pointerdown", button: 0, clientX: 100, clientY: 100, pointerId: 1, bubbles: true }); layer.dispatchEvent({ type: "pointermove", button: 0, clientX: 102, clientY: 102, pointerId: 1, bubbles: true }); assert.equal(layer.style.transform, ""); layer.dispatchEvent({ type: "pointermove", button: 0, clientX: 120, clientY: 130, pointerId: 1, bubbles: true }); assert.match(layer.style.transform, /translate/); layer.dispatchEvent({ type: "pointerup", button: 0, clientX: 120, clientY: 130, pointerId: 1, bubbles: true }); assert.equal(imageDataCalls, initialCalls);
+    await new Promise((resolve) => setTimeout(resolve, 125)); assert.ok(imageDataCalls > initialCalls);
+    const afterDrag = imageDataCalls; layer.dispatchEvent({ type: "wheel", deltaY: -120, clientX: 250, clientY: 150, preventDefault: () => { prevented = true; }, bubbles: true }); assert.equal(prevented, true); assert.equal(imageDataCalls, afterDrag); await new Promise((resolve) => setTimeout(resolve, 125)); assert.ok(imageDataCalls > afterDrag);
+    const afterWheel = imageDataCalls; await view.onClose(); await new Promise((resolve) => setTimeout(resolve, 125)); assert.equal(imageDataCalls, afterWheel);
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
 });

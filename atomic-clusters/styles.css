@@ -19,7 +19,8 @@
 .atomic-clusters-umap-navigation { position: absolute; z-index: 2; inset: 6px 8px auto; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .atomic-clusters-breadcrumb { color: var(--text-muted); }
 .atomic-clusters-breadcrumb button { margin: 0 2px; }
-.atomic-clusters-umap-visual-layer { position: absolute; inset: 0; z-index: 1; transform-origin: 0 0; will-change: transform; }
+.atomic-clusters-umap-visual-layer { position: absolute; inset: 0; z-index: 1; transform-origin: 0 0; will-change: transform; cursor: grab; touch-action: none; }
+.atomic-clusters-umap-visual-layer:active { cursor: grabbing; }
 .atomic-clusters-umap-outgoing-layer { position: absolute; left: 0; top: 0; z-index: 1; pointer-events: none; transform-origin: 0 0; will-change: transform; overflow: visible; }
 .atomic-clusters-umap-outgoing-layer.is-animating { pointer-events: none; }
 .atomic-clusters-umap-visual-layer.is-animating { pointer-events: none; }
