@@ -168,6 +168,18 @@ test("gesture raster keeps an overscan margin when the affine layer moves", asyn
   assert.match(view, /pickVisualizationCloud\(cachedClouds, x \+ gestureOverscan, y \+ gestureOverscan\)/);
 });
 
+test("resize observer defers expensive density work until resize settles", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["ResizeObserver", globalThis.ResizeObserver], ["__mockViewport", globalThis.__mockViewport]]);
+  let imageDataCalls = 0; let observerCallback = null;
+  class TrackingCanvas extends MockCanvas { getContext() { const context = super.getContext(); context.createImageData = (width, height) => { imageDataCalls++; return { data: new Uint8ClampedArray(width * height * 4) }; }; return context; } }
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = TrackingCanvas; globalThis.document = { createElement: (tag) => tag === "canvas" ? new TrackingCanvas() : new MockElement(tag) }; globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" }); globalThis.__mockViewport = { width: 500, height: 300 }; globalThis.ResizeObserver = class { constructor(callback) { observerCallback = callback; } observe() {} disconnect() {} };
+  try {
+    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
+    view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
+    const beforeResize = imageDataCalls; globalThis.__mockViewport = { width: 700, height: 360 }; observerCallback([{ contentRect: { width: 700, height: 360 } }]); assert.equal(imageDataCalls, beforeResize); await new Promise((resolve) => setTimeout(resolve, 125)); assert.ok(imageDataCalls > beforeResize); await view.onClose();
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
+});
+
 test("gesture camera pans without opening a note, debounces density, and cleans up listeners", async () => {
   const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
   let imageDataCalls = 0; let prevented = false;
