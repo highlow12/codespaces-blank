@@ -31,6 +31,12 @@
 .atomic-clusters-umap-point-hit:hover, .atomic-clusters-umap-point-hit:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 1px; background: transparent !important; background-color: transparent !important; }
 .atomic-clusters-note-list { display: grid; gap: 4px; max-height: 18rem; overflow-y: auto; overscroll-behavior: contain; padding: 4px; }
 .atomic-clusters-note-list > button { min-width: 0; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.atomic-clusters-hover-membership-summary { padding: 8px 10px; border-bottom: 1px solid var(--background-modifier-border); background: var(--background-secondary); font-size: var(--font-ui-small); }
+.atomic-clusters-hover-membership-heading { font-weight: 600; margin-bottom: 4px; }
+.atomic-clusters-hover-membership-list { margin: 0; padding-left: 22px; }
+.atomic-clusters-hover-membership-list li { font-variant-numeric: tabular-nums; }
+.atomic-clusters-hover-membership-empty, .atomic-clusters-hover-membership-status { color: var(--text-muted); }
+.atomic-clusters-hover-membership-status { margin-top: 5px; }
 .atomic-clusters-umap-controls { flex: 0 0 190px; align-self: stretch; border-left: 1px solid var(--background-modifier-border); background: var(--background-secondary); padding: 8px; z-index: 3; }
 .atomic-clusters-umap-controls-toggle { width: 100%; margin: 0 0 8px; font-size: var(--font-ui-small); }
 .atomic-clusters-umap-controls-body { display: flex; flex-direction: column; gap: 6px; font-size: var(--font-ui-small); }

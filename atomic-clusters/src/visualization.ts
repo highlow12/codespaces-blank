@@ -20,6 +20,7 @@ export interface VisualizationHslColor { hue: number; saturation: number; lightn
 export interface VisualizationColorScheme { nodeColors: Map<string, string>; leafColors: Map<number, string>; nodeHsl: Map<string, VisualizationHslColor>; }
 export interface VisualizationLabelContrast { foreground: "#000000" | "#ffffff"; background: "#000000" | "#ffffff"; }
 export interface VisualizationLabelPlacement { id: string; text: string; x: number; y: number; width: number; height: number; contrast: VisualizationLabelContrast; }
+export interface VisualizationMembershipSummary { leafId: number; title: string; value: number; }
 
 /**
  * A deterministic uniform-grid index for screen-space note picking.
@@ -94,6 +95,16 @@ export function buildVisualizationTree(hierarchy: HierarchyTree | NaryVisualizat
 }
 
 export function childMembershipMass(node: VisualizationNode, row: readonly number[], leafOrdering: readonly number[]): number { const leaves = new Set(node.leafLabels); let mass = 0; for (let column = 0; column < Math.min(leafOrdering.length, row.length); column++) if (leaves.has(leafOrdering[column])) mass += Math.max(0, Number(row[column]) || 0); return mass; }
+/** Return the highest soft-membership values for one note in display order. */
+export function visualizationTopMemberships(result: Pick<ClusterResult, "memberships" | "softMemberships" | "leafOrder" | "leafOrdering" | "hierarchy" | "titles">, pointIndex: number, limit = 3): VisualizationMembershipSummary[] {
+  const memberships = result.memberships ?? result.softMemberships; const ordering = result.leafOrdering ?? result.leafOrder ?? result.hierarchy.leaves; const row = memberships?.[pointIndex];
+  if (!row || !Number.isSafeInteger(pointIndex) || pointIndex < 0) return [];
+  const count = Number.isSafeInteger(limit) && limit > 0 ? limit : 3;
+  return ordering.map((leafId, column) => ({ leafId, title: result.titles?.[String(leafId)]?.trim() || `Cluster ${leafId}`, value: Number(row[column]) }))
+    .filter((item) => Number.isFinite(item.value) && item.value >= 0)
+    .sort((left, right) => right.value - left.value || left.leafId - right.leafId)
+    .slice(0, count);
+}
 /** Identify notes below 0.5 conditional membership as residual. */
 export function residualPointIndices(node: VisualizationNode, _labels: readonly number[], memberships: readonly number[][], leafOrdering: readonly number[]): number[] { if (!node.children.length) return []; return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total <= 0.5; }); }
 function visualizationResidualIndices(node: VisualizationNode, memberships: readonly number[][], leafOrdering: readonly number[], strictLegacy = false): number[] { if (!strictLegacy) return residualPointIndices(node, [], memberships, leafOrdering); if (!node.children.length) return []; return node.pointIndices.filter((index) => { const row = memberships[index] || []; const masses = node.children.map((child) => childMembershipMass(child, row, leafOrdering)); const total = masses.reduce((sum, mass) => sum + mass, 0); return total <= EPSILON || Math.max(...masses) / total < 0.5; }); }

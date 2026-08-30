@@ -444,7 +444,23 @@ export class SqliteClusterStore {
     const bytes = this.db.export();
     const durableBytes = bytes.slice().buffer as ArrayBuffer;
     await this.adapter.writeBinary(`${this.path}.tmp`, durableBytes);
-    if (this.adapter.rename) await this.adapter.rename(`${this.path}.tmp`, this.path);
+    if (this.adapter.rename) {
+      const temporaryPath = `${this.path}.tmp`;
+      try {
+        await this.adapter.rename(temporaryPath, this.path);
+      } catch (error) {
+        // Obsidian's desktop adapter can reject rename-over-existing on some
+        // mounted filesystems. The complete database is already durable at
+        // temporaryPath, so remove only the old destination and retry the
+        // replacement when the adapter exposes the required operation.
+        const errorCode = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        const destinationExistsError = errorCode === "EEXIST" || /already exists|file exists/i.test(errorMessage);
+        if (!destinationExistsError || !this.adapter.remove || !(await this.adapter.exists(this.path))) throw error;
+        await this.adapter.remove(this.path);
+        await this.adapter.rename(temporaryPath, this.path);
+      }
+    }
     else {
       await this.adapter.writeBinary(this.path, durableBytes);
       await this.adapter.remove?.(`${this.path}.tmp`);

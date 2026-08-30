@@ -30,6 +30,21 @@ test("visualization colors are stable and noise is neutral", async () => {
   assert.equal(visualizationColor(Number.NaN), VISUALIZATION_NOISE_COLOR);
 });
 
+test("top membership summaries rank named clusters for regular and noise points", async () => {
+  const { visualizationTopMemberships } = await loadVisualization();
+  const result = { hierarchy: { leaves: [2, 0, 1, 3] }, leafOrdering: [2, 0, 1, 3], memberships: [[.1, .8, .3, .05]], titles: { "0": "Alpha", "1": "Beta" } };
+  assert.deepEqual(visualizationTopMemberships(result, 0), [
+    { leafId: 0, title: "Alpha", value: .8 },
+    { leafId: 1, title: "Beta", value: .3 },
+    { leafId: 2, title: "Cluster 2", value: .1 }
+  ]);
+  const noise = { ...result, memberships: [[.2, 0, .4, .1]] };
+  assert.deepEqual(visualizationTopMemberships(noise, 0, 2), [
+    { leafId: 1, title: "Beta", value: .4 },
+    { leafId: 2, title: "Cluster 2", value: .2 }
+  ]);
+});
+
 test("cluster label helpers choose titles, contrast, bounds, and non-overlapping placements", async () => {
   const { buildVisualizationTree, visualizationFrontier, visualizationClusterLabelText, visualizationLabelContrast, layoutVisualizationClusterLabels } = await loadVisualization();
   const tree = buildVisualizationTree({ leaves: [0, 1], merges: [{ id: 2, left: 0, right: 1, distance: 1, mass: 2 }], root: 2 }, [0, 1]);

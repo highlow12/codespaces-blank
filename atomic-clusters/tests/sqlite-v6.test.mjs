@@ -29,6 +29,7 @@ class MemoryAdapter {
   maxActiveWrites = 0;
   yieldWrites = false;
   failWrites = false;
+  rejectExistingRename = false;
 
   async exists(path) { return this.files.has(path); }
   async readBinary(path) { return this.files.get(path); }
@@ -43,6 +44,7 @@ class MemoryAdapter {
   }
   async mkdir() {}
   async rename(from, to) {
+    if (this.rejectExistingRename && this.files.has(to)) { const error = new Error("file already exists"); error.code = "EEXIST"; throw error; }
     this.files.set(to, this.files.get(from));
     this.files.delete(from);
   }
@@ -172,6 +174,20 @@ test("putEmbeddings persists 100 rows with one durable flush", async () => {
   assert.equal(adapter.flushes, 1);
   assert.equal(store.query("SELECT COUNT(*) AS count FROM embeddings")[0].count, 100);
   store.close();
+});
+
+test("flush replaces an existing database when rename rejects overwrite", async () => {
+  const Storage = await loadStorage();
+  const { store, adapter, SQL } = await openStore(Storage);
+  await store.upsertNote({ path: "first.md", title: "First", mtime: 0, content: "first", hash: "first" });
+  adapter.rejectExistingRename = true;
+  await store.upsertNote({ path: "second.md", title: "Second", mtime: 1, content: "second", hash: "second" });
+  assert.equal(store.query("SELECT COUNT(*) AS count FROM notes")[0].count, 2);
+  assert.equal(adapter.files.has(`${Storage.SQLITE_PATH}.tmp`), false);
+  store.close();
+  const reopened = await new Storage.SqliteClusterStore(adapter, SQL).open();
+  assert.equal(reopened.query("SELECT COUNT(*) AS count FROM notes")[0].count, 2);
+  reopened.close();
 });
 
 test("projectMany persists 100 rows with one durable flush", async () => {

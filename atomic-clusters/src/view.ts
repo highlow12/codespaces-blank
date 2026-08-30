@@ -1,6 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import { ClusterResult } from "./types";
-import { accumulateVisualizationDensity, blendVisualizationColor, buildVisualizationPointSpatialIndex, buildVisualizationTree, clampVisualizationKernelScale, layoutVisualizationClusterLabels, pickVisualizationCloud, validateVisualizationData, visualizationBaseBandwidth, visualizationOutgoingLayerTransform, visualizationCameraTransform, visualizationCloudColor, visualizationColorScheme, visualizationColorVector, visualizationDensityAlpha, visualizationFrontier, visualizationLeafOrdering, visualizationMembershipAmplitude, visualizationPath, visualizationP95RowSum, visualizationRegion, visualizationScaledStageSigma, visualizationWorldToScreen, VisualizationCamera, VisualizationNode, VisualizationPointSpatialIndex, VisualizationSplat, VISUALIZATION_KERNEL_SCALE_DEFAULT, VISUALIZATION_KERNEL_SCALE_MAX, VISUALIZATION_KERNEL_SCALE_MIN, VISUALIZATION_KERNEL_SCALE_STEP, VISUALIZATION_NOISE_COLOR } from "./visualization";
+import { accumulateVisualizationDensity, blendVisualizationColor, buildVisualizationPointSpatialIndex, buildVisualizationTree, clampVisualizationKernelScale, layoutVisualizationClusterLabels, pickVisualizationCloud, validateVisualizationData, visualizationBaseBandwidth, visualizationOutgoingLayerTransform, visualizationCameraTransform, visualizationCloudColor, visualizationColorScheme, visualizationColorVector, visualizationDensityAlpha, visualizationFrontier, visualizationLeafOrdering, visualizationMembershipAmplitude, visualizationPath, visualizationP95RowSum, visualizationRegion, visualizationScaledStageSigma, visualizationTopMemberships, visualizationWorldToScreen, VisualizationCamera, VisualizationNode, VisualizationPointSpatialIndex, VisualizationSplat, VISUALIZATION_KERNEL_SCALE_DEFAULT, VISUALIZATION_KERNEL_SCALE_MAX, VISUALIZATION_KERNEL_SCALE_MIN, VISUALIZATION_KERNEL_SCALE_STEP, VISUALIZATION_NOISE_COLOR } from "./visualization";
 
 export const VIEW_TYPE_CLUSTER_EXPLORER = "atomic-clusters-explorer";
 // Keep navigation long enough for the hierarchy change to read as a camera
@@ -10,6 +10,28 @@ const VISUALIZATION_CAMERA_TRANSITION_MS = 460;
 // fractional CSS pixels (or a one-pixel scrollbar/control breakpoint shift)
 // without treating the first post-render notification as a real resize.
 const VISUALIZATION_VIEWPORT_TOLERANCE = 1.25;
+
+function visualizationMembershipPercent(value: number): string { return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(1)}%`; }
+
+function createVisualizationHoverSummary(document: Document, result: ClusterResult, point: number): HTMLElement {
+  const summary = document.createElement("div"); summary.className = "atomic-clusters-hover-membership-summary"; summary.dataset.pointIndex = String(point);
+  const heading = document.createElement("div"); heading.className = "atomic-clusters-hover-membership-heading"; heading.textContent = "Top 3 cluster memberships"; summary.appendChild(heading);
+  const memberships = visualizationTopMemberships(result, point, 3);
+  if (memberships.length) {
+    const list = document.createElement("ol"); list.className = "atomic-clusters-hover-membership-list";
+    memberships.forEach((item) => { const entry = document.createElement("li"); entry.textContent = `${item.title} · ${visualizationMembershipPercent(item.value)}`; list.appendChild(entry); });
+    summary.appendChild(list);
+  } else {
+    const empty = document.createElement("div"); empty.className = "atomic-clusters-hover-membership-empty"; empty.textContent = "No cluster membership data"; summary.appendChild(empty);
+  }
+  const placement = result.hierarchyPlacements?.[point]; const noise = result.leafLabels[point] < 0; const residual = placement?.kind === "residual" && !noise;
+  if (noise || residual) {
+    const status = document.createElement("div"); status.className = "atomic-clusters-hover-membership-status";
+    const kind = noise ? "Noise" : "Residual"; const location = placement?.nodeId === null || placement?.nodeId === undefined ? "root" : `node ${placement.nodeId}`; const confidence = placement ? ` · hierarchy confidence ${visualizationMembershipPercent(placement.confidence)}` : "";
+    status.textContent = `${kind} · ${location}${confidence}`; summary.appendChild(status);
+  }
+  return summary;
+}
 
 /** Returned by the lazy projection hook: either a complete result or just its visualization. */
 export type EnsureVisualizationResult = ClusterResult | ClusterResult["visualization"] | null | undefined;
@@ -28,6 +50,8 @@ export class ClusterExplorerView extends ItemView {
   private visualizationCleanup: (() => void) | null = null;
   private hoveredVisualizationPoint: number | null = null;
   private hoveredVisualizationTarget: HTMLElement | null = null;
+  private visualizationHoverSummaryToken = 0;
+  private visualizationHoverSummaryTimer: number | null = null;
   private visualizationNodeId = "root";
   private visualizationRoot: VisualizationNode | null = null;
   private visualizationKernelScale = VISUALIZATION_KERNEL_SCALE_DEFAULT;
@@ -357,6 +381,27 @@ export class ClusterExplorerView extends ItemView {
     if (snap && this.visualizationAnimationTarget) this.visualizationDisplayedCamera = this.visualizationAnimationTarget;
     this.visualizationAnimationTarget = null; this.visualizationAnimating = false; const cleanup = this.visualizationAnimationCleanup; this.visualizationAnimationCleanup = null; cleanup?.();
   }
-  private setHoveredVisualizationPoint(point: number | null, event: MouseEvent | null, target: HTMLElement | null, draw: () => void): void { if (this.visualizationAnimating) return; if (point === this.hoveredVisualizationPoint && target === this.hoveredVisualizationTarget) return; this.hoveredVisualizationPoint = point; this.hoveredVisualizationTarget = target; draw(); if (point !== null && event && this.result?.ids[point]) { const pointButton = this.visualizationHitElements.find((hit) => Number(hit.dataset.pointIndex) === point); this.app.workspace.trigger("hover-link", { event, source: VIEW_TYPE_CLUSTER_EXPLORER, hoverParent: this.leaf, targetEl: target || pointButton || this.visualizationHitElements[0], linktext: this.result.ids[point], sourcePath: "" }); } }
-  private disposeVisualization(): void { this.cancelVisualizationAnimation(false); this.visualizationCleanup?.(); this.visualizationCleanup = null; this.visualizationResizeObserver?.disconnect(); this.visualizationResizeObserver = null; this.visualizationPoints = []; this.visualizationHitElements = []; this.hoveredVisualizationPoint = null; this.hoveredVisualizationTarget = null; }
+  private clearVisualizationHoverSummary(): void {
+    this.visualizationHoverSummaryToken++;
+    if (this.visualizationHoverSummaryTimer !== null) { globalThis.clearTimeout(this.visualizationHoverSummaryTimer); this.visualizationHoverSummaryTimer = null; }
+    this.leaf.hoverPopover?.hoverEl.querySelectorAll(".atomic-clusters-hover-membership-summary").forEach((element) => element.remove());
+  }
+  private scheduleVisualizationHoverSummary(point: number): void {
+    const token = this.visualizationHoverSummaryToken; const result = this.result; if (!result) return;
+    let summary: HTMLElement | null = null;
+    const apply = (attempt: number): void => {
+      if (token !== this.visualizationHoverSummaryToken || this.hoveredVisualizationPoint !== point || this.result !== result) return;
+      this.visualizationHoverSummaryTimer = null;
+      const hoverEl = this.leaf.hoverPopover?.hoverEl;
+      if (!hoverEl) { if (attempt < 20) this.visualizationHoverSummaryTimer = globalThis.setTimeout(() => apply(attempt + 1), 50) as unknown as number; return; }
+      const content = hoverEl.querySelector(".markdown-preview-view") || hoverEl;
+      if (!summary) summary = createVisualizationHoverSummary(hoverEl.ownerDocument || document, result, point);
+      const existing = Array.from(hoverEl.querySelectorAll(".atomic-clusters-hover-membership-summary")); existing.filter((element) => element !== summary).forEach((element) => element.remove());
+      if (summary.parentElement !== content) content.insertBefore(summary, content.firstChild);
+      if (attempt < 20) this.visualizationHoverSummaryTimer = globalThis.setTimeout(() => apply(attempt + 1), 50) as unknown as number;
+    };
+    this.visualizationHoverSummaryTimer = globalThis.setTimeout(() => apply(0), 0) as unknown as number;
+  }
+  private setHoveredVisualizationPoint(point: number | null, event: MouseEvent | null, target: HTMLElement | null, draw: () => void): void { if (this.visualizationAnimating) return; if (point === this.hoveredVisualizationPoint && target === this.hoveredVisualizationTarget) return; this.clearVisualizationHoverSummary(); this.hoveredVisualizationPoint = point; this.hoveredVisualizationTarget = target; draw(); if (point !== null && event && this.result?.ids[point]) { const pointButton = this.visualizationHitElements.find((hit) => Number(hit.dataset.pointIndex) === point); this.app.workspace.trigger("hover-link", { event, source: VIEW_TYPE_CLUSTER_EXPLORER, hoverParent: this.leaf, targetEl: target || pointButton || this.visualizationHitElements[0], linktext: this.result.ids[point], sourcePath: "" }); this.scheduleVisualizationHoverSummary(point); } }
+  private disposeVisualization(): void { this.cancelVisualizationAnimation(false); this.visualizationCleanup?.(); this.visualizationCleanup = null; this.visualizationResizeObserver?.disconnect(); this.visualizationResizeObserver = null; this.clearVisualizationHoverSummary(); this.visualizationPoints = []; this.visualizationHitElements = []; this.hoveredVisualizationPoint = null; this.hoveredVisualizationTarget = null; }
 }

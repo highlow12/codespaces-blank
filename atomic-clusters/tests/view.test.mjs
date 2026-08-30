@@ -81,7 +81,11 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(view, /const chunkSize = 80/);
   assert.match(view, /viewport\.addEventListener\("scroll", onScroll\)/);
   assert.doesNotMatch(view, /\.slice\(0, 3\)/);
+  assert.match(view, /atomic-clusters-hover-membership-summary/);
+  assert.match(view, /visualizationTopMemberships\(result, point, 3\)/);
+  assert.match(view, /hoverPopover/);
   assert.match(css, /\.atomic-clusters-note-list \{[^}]*overflow-y: auto/s);
+  assert.match(css, /\.atomic-clusters-hover-membership-summary \{/);
   assert.match(css, /atomic-clusters-umap-controls/);
   assert.match(css, /@media \(max-width: 640px\)/);
 });
