@@ -176,3 +176,20 @@ test("gesture camera pans without opening a note, debounces density, and cleans 
     const afterWheel = imageDataCalls; await view.onClose(); await new Promise((resolve) => setTimeout(resolve, 125)); assert.equal(imageDataCalls, afterWheel);
   } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
 });
+
+test("clicking a rendered cluster cloud advances the global depth", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  try {
+    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
+    view.setResult({ schemaVersion: 4, ids: ["a.md", "b.md", "c.md"], leafLabels: [0, 1, 2], leafOrdering: [0, 1, 2], memberships: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], probabilities: [1, 1, 1], titles: {}, hierarchy: { leaves: [0, 1, 2], merges: [{ id: 3, left: 0, right: 1, distance: 1, mass: 2 }], root: 9, children: { "9": [3, 2] } }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0], [100, 0]], labels: [0, 1, 2], leafOrdering: [0, 1, 2], memberships: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], configuration: {} } });
+    const layer = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer");
+    // A click following pointer capture may be retargeted to the gesture
+    // layer instead of its canvas child. It must still pick the cloud.
+    layer.dispatchEvent({ type: "click", clientX: 80, clientY: 150, bubbles: true });
+    const breadcrumb = view.contentEl.querySelector(".atomic-clusters-breadcrumb");
+    assert.equal(breadcrumb.children.at(-1).textContent, "Cluster 3");
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
+});
