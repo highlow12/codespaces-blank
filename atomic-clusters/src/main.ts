@@ -28,6 +28,7 @@ interface PreparedIncrementalChanges {
   notes: NoteRecord[];
   result: ClusterResult | null;
   provider: EmbeddingProvider;
+  noteHashes: Map<string, string>;
   changedPaths: Set<string>;
   deletedPaths: Set<string>;
   renames: Map<string, string>;
@@ -35,7 +36,7 @@ interface PreparedIncrementalChanges {
   pathOnly: boolean;
 }
 
-interface StoredNoteMetadata { path: string; hash: string; mtime: number; active: boolean; }
+interface StoredNoteMetadata { path: string; hash: string; mtime: number; active: boolean; content?: string; }
 
 export default class AtomicClustersPlugin extends Plugin {
   settings!: PluginSettings;
@@ -49,6 +50,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private runAbortController: AbortController | null = null;
   private sqliteStore: SqliteClusterStore | null = null;
   private latestResultId: string | null = null;
+  private resultRevision = 0;
   private readonly visualizationPromises = new WeakMap<readonly string[], Promise<ClusterVisualization>>();
   private pendingVaultChanges: VaultChangeQueue | null = null;
   private incrementalProcessing = false;
@@ -206,25 +208,26 @@ export default class AtomicClustersPlugin extends Plugin {
       const worker = await this.getWorker();
       progress.update({ phase: "clustering", progress: 0.84, detail: `${worker instanceof InProcessClusteringWorker ? "Worker APIs unavailable; clustering in process" : worker instanceof BrowserClusteringWorker ? "Using Chromium worker fallback" : "Clustering"} · ${activeNotes.length} notes` });
       const config: ClusteringConfig = { minClusterSize: this.settings.minClusterSize, minSamples: this.settings.minSamples, umapNeighbors: this.settings.umapNeighbors, umapMinDist: this.settings.umapMinDist, pcaVarianceTarget: this.settings.pcaVarianceTarget, seed: 42, deferVisualization: true };
-      this.latestResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
-      this.latestResult = markFullRebuildResult(this.latestResult, provider.id, provider.model);
-      if (this.latestResult.pca.model) {
-        await sqlite.savePcaModel(this.latestResult.pca.model);
-        await sqlite.projectMany(activeNotes.map((note, index) => ({ path: note.path, vector: vectors[index] as number[] })), this.latestResult.pca.model);
+      const workerResult = await worker.run(ids, vectors as number[][], config, (phase, value) => { this.updateProgress(phase, value); progress.update({ phase, progress: 0.84 + value * 0.15, detail: `Clustering ${Math.round(value * 100)}%` }); });
+      const fullResult = markFullRebuildResult(workerResult, provider.id, provider.model);
+      if (fullResult.pca.model) {
+        await sqlite.savePcaModel(fullResult.pca.model);
+        await sqlite.projectMany(activeNotes.map((note, index) => ({ path: note.path, vector: vectors[index] as number[] })), fullResult.pca.model);
       }
       // Persist the structural result before computing optional keyword titles.
-      this.latestResult = { ...this.latestResult, titles: undefined, titleGeneration: undefined };
-      const structuralResultId = await sqlite.saveResult(this.latestResult); this.latestResultId = structuralResultId; await this.publishResult(this.latestResult);
+      const structuralResult = { ...fullResult, titles: undefined, titleGeneration: undefined };
+      this.setLatestResult(structuralResult);
+      const structuralResultId = await sqlite.saveResult(structuralResult, { noteHashes: new Map(notes.map((note) => [note.path, note.hash])) }); this.latestResultId = structuralResultId; await this.publishResult(structuralResult);
       completed = true;
       if (this.settings.clusterTitlesEnabled !== false) {
         try {
-          this.latestResult = await this.generateTitlesForResult(this.latestResult, notes, runSignal, progress, false, structuralResultId);
+          await this.generateTitlesForResult(structuralResult, notes, runSignal, progress, false, structuralResultId);
         } catch (titleError) {
           if (runSignal.aborted || (titleError instanceof Error && titleError.message.toLowerCase().includes("cancel"))) throw titleError;
           progress.update({ phase: "cluster titles", progress: 1, detail: `Titles skipped: ${safeRunError(titleError)}` });
         }
       }
-      progress.complete(`Built ${this.latestResult.hierarchy.leaves.length} clusters`);
+      progress.complete(`Built ${structuralResult.hierarchy.leaves.length} clusters`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = message === "Clustering cancelled" || message.includes("cancelled");
@@ -262,8 +265,8 @@ export default class AtomicClustersPlugin extends Plugin {
       const orderedNotes = result.ids.map((path) => byPath.get(path)!);
       progress.update({ phase: "result load", progress: 0.1, detail: `${orderedNotes.length} current notes · ${result.hierarchy.leaves.length + result.hierarchy.merges.length} hierarchy nodes` });
       const resultId = await sqlite.getLatestResultId(); if (!resultId) throw new Error("Saved cluster result metadata is unavailable; build clusters again.");
-      this.latestResult = await this.generateTitlesForResult(result, orderedNotes, runSignal, progress, true, resultId);
-      progress.complete(`Regenerated ${Object.keys(this.latestResult.titles || {}).length} keyword titles`);
+      const titledResult = await this.generateTitlesForResult(result, orderedNotes, runSignal, progress, true, resultId);
+      progress.complete(`Regenerated ${Object.keys(titledResult.titles || {}).length} keyword titles`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       const cancelled = message.toLowerCase().includes("cancel");
@@ -285,7 +288,7 @@ export default class AtomicClustersPlugin extends Plugin {
     const sqlite = await this.getSqliteStore(); const targetResultId = resultId || await sqlite.getLatestResultId();
     if (!targetResultId) throw new Error("Saved cluster result metadata is unavailable; build clusters again.");
     await sqlite.patchResultTitles(targetResultId, titled.titles || {}, titled.titleGeneration);
-    this.latestResult = titled; await this.publishResult(titled);
+    this.setLatestResult(titled); await this.publishResult(titled);
     // The diagnostic log is auxiliary. Once the atomic SQLite patch succeeds,
     // a legacy JSON-log write failure must not report title regeneration as
     // failed or leave the in-memory result behind the durable result.
@@ -332,7 +335,7 @@ export default class AtomicClustersPlugin extends Plugin {
     const hinted = new Set([...snapshot.created, ...snapshot.modified, ...snapshot.renamed.values()]);
     const notes = await Promise.all(this.currentMarkdownFiles().map(async (file) => {
       const old = previous.get(file.path);
-      if (old && !hinted.has(file.path) && old.mtime === file.stat.mtime) return { path: file.path, title: file.basename, content: "", mtime: file.stat.mtime, hash: old.hash };
+      if (old && !hinted.has(file.path) && old.mtime === file.stat.mtime && old.content !== undefined && old.content !== "") return { path: file.path, title: file.basename, content: old.content, mtime: file.stat.mtime, hash: old.hash };
       const content = await this.app.vault.cachedRead(file);
       return { path: file.path, title: file.basename, content, mtime: file.stat.mtime, hash: await contentHash(content) };
     }));
@@ -353,9 +356,30 @@ export default class AtomicClustersPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       const nextPath = this.markdownPath(file); const previousPath = String(oldPath || "");
       if (!this.pendingVaultChanges || this.settings.automaticRefresh === false) return;
-      if (nextPath && this.isMarkdownPath(previousPath) && !this.isExcludedPath(nextPath) && !this.isExcludedPath(previousPath)) { this.pendingVaultChanges.enqueueRenamed(previousPath, nextPath); this.publishPendingChangeCount(); }
-      else if (this.isMarkdownPath(previousPath)) queuePath("deleted", previousPath);
-      else if (nextPath) queuePath("created", nextPath);
+      const enqueueRename = (from: string, to: string): void => {
+        const previousIncluded = this.isMarkdownPath(from) && !this.isExcludedPath(from);
+        const nextIncluded = this.isMarkdownPath(to) && !this.isExcludedPath(to);
+        if (previousIncluded && nextIncluded) this.pendingVaultChanges!.enqueueRenamed(from, to);
+        else if (previousIncluded) this.pendingVaultChanges!.enqueueDeleted(from);
+        else if (nextIncluded) this.pendingVaultChanges!.enqueueCreated(to);
+      };
+      if (nextPath) { enqueueRename(previousPath, nextPath); this.publishPendingChangeCount(); return; }
+      // Obsidian can emit one rename event for a folder rather than one per
+      // child. Reconstruct each Markdown child path so folder moves across an
+      // excluded boundary retain the same delete/create semantics as files.
+      const folder = file as { path?: string; children?: unknown[] };
+      const currentFolderPath = String(folder.path || "");
+      const markdownChildren = (node: { path?: string; children?: unknown[] }): string[] => {
+        const path = String(node.path || ""); const children = node.children || [];
+        if (children.length) return children.flatMap((child) => markdownChildren(child as { path?: string; children?: unknown[] }));
+        return this.isMarkdownPath(path) ? [path] : [];
+      };
+      const childPaths = markdownChildren(folder);
+      for (const childPath of childPaths) {
+        const suffix = currentFolderPath && childPath.startsWith(`${currentFolderPath}/`) ? childPath.slice(currentFolderPath.length + 1) : childPath;
+        enqueueRename(previousPath + (suffix ? `/${suffix}` : ""), childPath);
+      }
+      if (childPaths.length) this.publishPendingChangeCount();
     }));
   }
 
@@ -377,11 +401,18 @@ export default class AtomicClustersPlugin extends Plugin {
     if ((!force && this.settings.automaticRefresh === false) || this.startupDiffRunning || !this.latestResult || !this.pendingVaultChanges) return;
     this.startupDiffRunning = true;
     try {
-      const { notes, stored } = await this.collectIncrementalNotes(await this.getSqliteStore(), createPendingVaultChanges());
+      const sqlite = await this.getSqliteStore();
+      const { notes, stored } = await this.collectIncrementalNotes(sqlite, createPendingVaultChanges());
       const current = new Map(notes.map((note) => [note.path, note]));
       const previous = new Map(stored.map((note) => [note.path, note]));
+      const resultId = this.latestResultId || await sqlite.getLatestResultId();
+      const savedHashes = resultId ? await sqlite.getResultNoteHashes(resultId) : new Map<string, string>();
+      for (const [path, hash] of savedHashes) {
+        const old = previous.get(path);
+        previous.set(path, old ? { ...old, hash } : { path, hash, mtime: 0, active: true });
+      }
       const unknownCurrent = notes.filter((note) => !previous.has(note.path));
-      const missingPrevious = stored.filter((note) => !current.has(note.path));
+      const missingPrevious = [...previous.values()].filter((note) => !current.has(note.path));
       const previousByHash = new Map<string, string[]>();
       const currentByHash = new Map<string, string[]>();
       for (const note of missingPrevious) previousByHash.set(note.hash, [...(previousByHash.get(note.hash) || []), note.path]);
@@ -401,7 +432,7 @@ export default class AtomicClustersPlugin extends Plugin {
         if (!old) this.pendingVaultChanges.enqueueCreated(note.path);
         else if (old.hash !== note.hash) this.pendingVaultChanges.enqueueModified(note.path);
       }
-      for (const note of stored) if (!current.has(note.path) && !inferredRenames.has(note.path)) this.pendingVaultChanges.enqueueDeleted(note.path);
+      for (const note of previous.values()) if (!current.has(note.path) && !inferredRenames.has(note.path)) this.pendingVaultChanges.enqueueDeleted(note.path);
       for (const path of this.latestResult.ids) if (!current.has(path) && !previous.has(path) && !inferredRenames.has(path)) this.pendingVaultChanges.enqueueDeleted(path);
       this.publishPendingChangeCount();
     } catch (error) {
@@ -463,7 +494,13 @@ export default class AtomicClustersPlugin extends Plugin {
     if (!notes.length) throw new Error("No Markdown notes found in the selected vault folders.");
     const result = this.latestResult || await sqlite.getResult();
     const provider = this.createEmbeddingProvider();
+    const resultId = result ? (this.latestResultId || await sqlite.getLatestResultId()) : null;
+    const savedHashes = resultId ? await sqlite.getResultNoteHashes(resultId) : new Map<string, string>();
     const previous = new Map(stored.map((note) => [note.path, note]));
+    for (const [path, hash] of savedHashes) {
+      const old = previous.get(path);
+      previous.set(path, old ? { ...old, hash } : { path, hash, mtime: 0, active: true });
+    }
     const current = new Map(notes.map((note) => [note.path, note]));
     const renames = new Map<string, string>();
     const resultPaths = new Set(result?.ids || []);
@@ -477,9 +514,10 @@ export default class AtomicClustersPlugin extends Plugin {
     for (const note of notes) {
       const source = [...renames.entries()].find(([, target]) => target === note.path)?.[0];
       const old = source ? previous.get(source) || previous.get(note.path) : previous.get(note.path);
-      if (source ? !old || old.hash !== note.hash : !old || old.hash !== note.hash) changedPaths.add(note.path);
+      const eventForcesContentCheck = snapshot.created.has(note.path) || snapshot.modified.has(note.path);
+      if (!old || old.hash !== note.hash || eventForcesContentCheck && !savedHashes.has(note.path)) changedPaths.add(note.path);
     }
-    for (const old of stored) if (!current.has(old.path) && !renamedOld.has(old.path)) deletedPaths.add(old.path);
+    for (const old of previous.values()) if (!current.has(old.path) && !renamedOld.has(old.path)) deletedPaths.add(old.path);
     for (const path of snapshot.deleted) if (!current.has(path) && !renamedOld.has(path) && result?.ids.includes(path)) deletedPaths.add(path);
     // A cache miss is itself a content needing embedding. This prevents a
     // soft refresh from silently retaining an old vector for a current note.
@@ -495,7 +533,7 @@ export default class AtomicClustersPlugin extends Plugin {
       const coordinates = await sqlite.getPcaCoordinatesMany(result.ids, modelHash);
       result.ids.forEach((path, index) => { const coordinate = coordinates[index]; if (coordinate) existingCoordinates.set(path, coordinate); });
     }
-    return { notes, result, provider, changedPaths, deletedPaths, renames, existingCoordinates, pathOnly: changedPaths.size === 0 && deletedPaths.size === 0 && renames.size > 0 };
+    return { notes, result, provider, noteHashes: new Map(notes.map((note) => [note.path, note.hash])), changedPaths, deletedPaths, renames, existingCoordinates, pathOnly: changedPaths.size === 0 && deletedPaths.size === 0 && renames.size > 0 };
   }
 
   private async applyIncrementalRefresh(prepared: PreparedIncrementalChanges): Promise<void> {
@@ -518,7 +556,7 @@ export default class AtomicClustersPlugin extends Plugin {
       if (!prepared.changedPaths.size && !prepared.deletedPaths.size) {
         // Persist the compact metadata too: path-keyed relation rows were
         // moved above, and a restart must not restore the old rename paths.
-        const resultId = await sqlite.saveResult(currentResult); this.latestResultId = resultId; this.latestResult = currentResult; await this.publishResult(currentResult); progress.complete("No embedding changes"); return;
+        const resultId = await sqlite.saveResult(currentResult, { noteHashes: prepared.noteHashes }); this.latestResultId = resultId; this.setLatestResult(currentResult); await this.publishResult(currentResult); progress.complete("No embedding changes"); return;
       }
       const entries = await sqlite.loadEmbeddings(prepared.provider.id, prepared.provider.model);
       const cached = (note: NoteRecord): CachedEmbedding | undefined => {
@@ -558,7 +596,7 @@ export default class AtomicClustersPlugin extends Plugin {
       if (currentResult.pca.model) currentResult = { ...currentResult, pca: { ...currentResult.pca, model: { ...currentResult.pca.model, provider: prepared.provider.id, model: prepared.provider.model } } };
       const soft = buildSoftRefresh({ result: currentResult, notes: prepared.notes, vectorsByPath, existingCoordinates, changedPaths, deletedPaths, provider: prepared.provider.id, model: prepared.provider.model });
       if (soft.projectedPaths.length && soft.result.pca.model) await sqlite.projectMany(soft.projectedPaths.map((path) => ({ path, vector: vectorsByPath.get(path)! })), soft.result.pca.model);
-      const resultId = await sqlite.saveResult(soft.result); this.latestResultId = resultId; this.latestResult = soft.result; await this.publishResult(soft.result);
+      const resultId = await sqlite.saveResult(soft.result, { noteHashes: prepared.noteHashes }); this.latestResultId = resultId; this.setLatestResult(soft.result); await this.publishResult(soft.result);
       persistedRunLog = { ...persistedRunLog, completedAt: new Date().toISOString(), stage: "clustering" }; await sqlite.saveEmbeddingLog(persistedRunLog);
       if (soft.result.incremental?.fullRebuildRecommended) this.scheduleFullRebuild();
       progress.complete(`Refreshed ${changedPaths.size} notes`);
@@ -606,6 +644,8 @@ export default class AtomicClustersPlugin extends Plugin {
     if (result.visualization) return result;
     const modelHash = result.pca.model?.modelHash;
     if (!modelHash) throw new Error("Saved PCA model is unavailable; rebuild clusters to create the Explorer projection.");
+    const requestedRevision = this.resultRevision;
+    const requestedResult = this.latestResult;
     let pending = this.visualizationPromises.get(result.ids);
     if (!pending) {
       pending = (async () => {
@@ -621,17 +661,25 @@ export default class AtomicClustersPlugin extends Plugin {
     }
     const visualization = await pending;
     const current = this.latestResult;
-    const sameStructure = !!current && current.pca.model?.modelHash === modelHash && current.ids.length === result.ids.length && current.ids.every((path, index) => path === result.ids[index]);
-    const completed = { ...(sameStructure ? current : result), visualization };
-    if (sameStructure) {
+    const sameResult = requestedResult === result && current === result && this.resultRevision === requestedRevision;
+    const completed = { ...(sameResult && current ? current : result), visualization };
+    if (sameResult) {
       const sqlite = await this.getSqliteStore();
       const resultId = this.latestResultId || await sqlite.getLatestResultId();
-      if (resultId) { await sqlite.patchResultVisualization(resultId, visualization); this.latestResultId = resultId; }
-      this.latestResult = completed;
+      // The structural result may have changed while the lazy projection was
+      // running. Capture and re-check both the object revision and result id;
+      // otherwise an old projection can be written onto a newer hierarchy.
+      if (this.latestResult !== result || this.resultRevision !== requestedRevision) return completed;
+      if (resultId) {
+        await sqlite.patchResultVisualization(resultId, visualization);
+        if (this.latestResult !== result || this.resultRevision !== requestedRevision) return completed;
+        this.latestResultId = resultId;
+      }
+      this.setLatestResult(completed);
     }
     return completed;
   }
-  private async openExplorer(): Promise<void> { const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false); if (!leaf) return; await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true }); this.app.workspace.revealLeaf(leaf); if (!this.latestResult) this.latestResult = await (await this.getSqliteStore()).getResult(); if (this.latestResult) (leaf.view as ClusterExplorerView).setResult(this.latestResult); }
+  private async openExplorer(): Promise<void> { const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false); if (!leaf) return; await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true }); this.app.workspace.revealLeaf(leaf); if (!this.latestResult) { const loaded = await (await this.getSqliteStore()).getResult(); if (loaded) this.setLatestResult(loaded); } if (this.latestResult) (leaf.view as ClusterExplorerView).setResult(this.latestResult); }
   private async openEmbeddingLog(): Promise<void> {
     // The old JSON export (embedding-log.json) and shell.openPath/getBasePath
     // route remain documented for older vaults; current UI reads SQLite.
@@ -644,6 +692,7 @@ export default class AtomicClustersPlugin extends Plugin {
       new Notice(`Could not open embedding log: ${safeRunError(error instanceof Error ? error.message : String(error))}`);
     }
   }
+  private setLatestResult(result: ClusterResult): void { this.latestResult = result; this.resultRevision++; }
   private async publishResult(result: ClusterResult): Promise<void> { for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setResult(result); }
   private publishPendingChangeCount(): void { const count = this.pendingVaultChanges?.size || 0; for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setPendingChangeCount(count); }
   private updateProgress(phase: string, progress: number): void { this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER).forEach((leaf) => { const view = leaf.view as ClusterExplorerView; view.contentEl.setAttribute("aria-label", `${phase} ${Math.round(progress * 100)}%`); view.setProgress(phase, progress); }); }

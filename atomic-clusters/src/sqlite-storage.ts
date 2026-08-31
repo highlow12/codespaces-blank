@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS results (
   result_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS result_note_hashes (
+  result_id TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL,
+  PRIMARY KEY(result_id, path),
+  FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE,
+  FOREIGN KEY(path) REFERENCES notes(path) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS assignments (
   result_id TEXT NOT NULL, path TEXT NOT NULL, leaf_label INTEGER NOT NULL,
   probability REAL NOT NULL, outlier_score REAL NOT NULL, provisional INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(result_id, path),
@@ -337,7 +343,7 @@ function persistMigratedResult(db: SqlDatabase, result: ClusterResult, resultId:
   validateClusterResultAlignment(result);
   const pcaModel = result.pca.model;
   if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, pcaModel.provider || null, pcaModel.model || null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), now]);
-  db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
+  db.run("DELETE FROM result_note_hashes WHERE result_id=?", [resultId]); db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
   result.ids.forEach((path, index) => {
     db.run("INSERT OR IGNORE INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?)", [path, path.split("/").pop() || path, 0, "legacy", null]);
     const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []);
@@ -383,6 +389,7 @@ export class SqliteClusterStore {
     // note-content column. Keep opening them safe and let the next write
     // populate the richer immutable embedding records.
     for (const statement of [
+      "ALTER TABLE notes ADD COLUMN content TEXT",
       "ALTER TABLE notes ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
       "ALTER TABLE assignments ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE embeddings ADD COLUMN note_content_hash TEXT NOT NULL DEFAULT ''",
@@ -508,10 +515,10 @@ export class SqliteClusterStore {
       for (const note of notes) db.run("INSERT INTO notes(path,title,mtime,content_hash,content,active) VALUES(?,?,?,?,?,1) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content,active=1", [note.path, note.title, note.mtime, note.hash, note.content]);
     });
   }
-  async listNoteMetadata(activeOnly = false): Promise<Array<{ path: string; hash: string; mtime: number; active: boolean }>> {
+  async listNoteMetadata(activeOnly = false): Promise<Array<{ path: string; hash: string; mtime: number; active: boolean; content?: string }>> {
     this.requireOpen();
-    const rows = this.query(`SELECT path,content_hash AS hash,mtime,active FROM notes${activeOnly ? " WHERE active=1" : ""} ORDER BY path`);
-    return rows.map((row) => ({ path: String(row.path), hash: String(row.hash), mtime: Number(row.mtime), active: Number(row.active) !== 0 }));
+    const rows = this.query(`SELECT path,content_hash AS hash,mtime,active,content FROM notes${activeOnly ? " WHERE active=1" : ""} ORDER BY path`);
+    return rows.map((row) => ({ path: String(row.path), hash: String(row.hash), mtime: Number(row.mtime), active: Number(row.active) !== 0, content: row.content == null ? undefined : String(row.content) }));
   }
   async listNotes(activeOnly = false): Promise<NoteRecord[]> {
     this.requireOpen();
@@ -532,7 +539,7 @@ export class SqliteClusterStore {
       // Child rows must move before the referenced parent row while foreign
       // keys are enabled. The target was checked above, so each update keeps
       // its table's primary key unique.
-      for (const table of ["embeddings", "pca_coordinates", "assignments", "visualization_points", "soft_memberships", "membership_rows", "hierarchy_placements"]) db.run(`UPDATE ${table} SET path=? WHERE path=?`, [newPath, oldPath]);
+      for (const table of ["embeddings", "pca_coordinates", "result_note_hashes", "assignments", "visualization_points", "soft_memberships", "membership_rows", "hierarchy_placements"]) db.run(`UPDATE ${table} SET path=? WHERE path=?`, [newPath, oldPath]);
       db.run("UPDATE notes SET path=? WHERE path=?", [newPath, oldPath]);
       return true;
     });
@@ -591,7 +598,7 @@ export class SqliteClusterStore {
     await this.transaction((db) => rows.forEach((row, index) => db.run("INSERT OR REPLACE INTO pca_coordinates(path,model_hash,coordinates_json,coordinate_blob) VALUES(?,?,?,?)", [row.path, model.modelHash, this.coordinateJsonRequired ? JSON.stringify(coordinates[index]) : null, float32Blob(coordinates[index])] )));
     return coordinates;
   }
-  async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>> } = {}): Promise<string> {
+  async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>>; noteHashes?: ReadonlyMap<string, string> } = {}): Promise<string> {
     validateClusterResultAlignment(result);
     for (const [path, point] of Object.entries(options.coordinates || {})) if (!result.ids.includes(path) || point.length !== 2 || point.some((value) => !Number.isFinite(value))) throw new Error(`Visualization coordinate for ${path} is invalid or unaligned`);
     const resultId = options.resultId || await contentHash(JSON.stringify(result));
@@ -599,9 +606,13 @@ export class SqliteClusterStore {
       const pcaModel = result.pca.model;
       if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, pcaModel.provider || null, pcaModel.model || null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, this.pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), this.now()]);
       db.run("INSERT OR REPLACE INTO results(result_id,schema_version,created_at,result_json) VALUES(?,?,?,?)", [resultId, result.schemaVersion, this.now(), result.schemaVersion === 6 ? compactV6Result(result) : JSON.stringify(result)]);
-      db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
+      db.run("DELETE FROM result_note_hashes WHERE result_id=?", [resultId]); db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
       const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []);
       result.ids.forEach((path, i) => db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score,provisional) VALUES(?,?,?,?,?,?)", [resultId, path, result.leafLabels[i], result.probabilities[i], result.outlierProxy[i], provisional.has(path) ? 1 : 0]));
+      if (options.noteHashes) for (const path of result.ids) {
+        const hash = options.noteHashes.get(path);
+        if (hash !== undefined) db.run("INSERT INTO result_note_hashes(result_id,path,content_hash) VALUES(?,?,?)", [resultId, path, hash]);
+      }
       result.hierarchy.leaves.forEach((leaf, ordinal) => db.run("INSERT INTO hierarchy_leaves(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       (result.leafOrder || result.leafOrdering || result.hierarchy.leaves).forEach((leaf, ordinal) => db.run("INSERT INTO leaf_order(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       result.hierarchy.merges.forEach((merge) => db.run("INSERT INTO hierarchy_merges(result_id,id,left_id,right_id,distance,mass) VALUES(?,?,?,?,?,?)", [resultId, merge.id, merge.left, merge.right, merge.distance, merge.mass]));
@@ -667,6 +678,13 @@ export class SqliteClusterStore {
       ...(stored.incremental ? { incremental: { ...stored.incremental, provisionalPaths } } : {}),
       timings: stored.timings || {}
     };
+  }
+  /** Return the note hashes captured by the last successfully saved result. */
+  async getResultNoteHashes(resultId?: string): Promise<Map<string, string>> {
+    this.requireOpen();
+    const id = resultId || await this.getLatestResultId();
+    if (!id) return new Map();
+    return new Map(this.query("SELECT path,content_hash AS hash FROM result_note_hashes WHERE result_id=? ORDER BY path", [id]).map((row) => [String(row.path), String(row.hash)]));
   }
   async getNote(path: string): Promise<NoteRecord | undefined> {
     this.requireOpen(); const rows = this.db.exec(`SELECT path,title,mtime,content_hash,content FROM notes WHERE path=${sqlQuote(path)}`); const row = rows[0]?.values[0];

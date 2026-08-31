@@ -113,3 +113,12 @@ test("the plugin build keeps the Python reference outside the shipped bundle", a
   const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
   assert.doesNotMatch(main, /PyodideClusteringWorker|pyodide-worker-client/i);
 });
+
+test("vault rename handling preserves excluded-boundary and folder child changes", async () => {
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /const enqueueRename = \(from: string, to: string\)/);
+  assert.match(main, /pendingVaultChanges!\.enqueueDeleted\(from\)/);
+  assert.match(main, /pendingVaultChanges!\.enqueueCreated\(to\)/);
+  assert.match(main, /const markdownChildren =/);
+  assert.match(main, /childPaths = markdownChildren\(folder\)/);
+});

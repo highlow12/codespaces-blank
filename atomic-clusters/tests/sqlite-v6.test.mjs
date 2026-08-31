@@ -468,8 +468,12 @@ test("incremental storage moves rename state and persists provisional assignment
     provisionalPaths: ["b.md"],
     incremental: { mode: "soft", generatedAt: "2026-08-31T00:00:00.000Z", changedPaths: ["b.md"], provisionalPaths: ["b.md"], fullRebuildRecommended: false, cumulativeChangedCount: 1, lastFullRebuildAt: "2026-08-31T00:00:00.000Z" }
   };
-  const resultId = await store.saveResult(result, { resultId: "incremental" });
+  const noteHashes = new Map([["a.md", "hash-0"], ["b.md", "hash-1"], ["c.md", "hash-2"]]);
+  const resultId = await store.saveResult(result, { resultId: "incremental", noteHashes });
+  assert.deepEqual([...await store.getResultNoteHashes(resultId)], [...noteHashes]);
+  assert.equal((await store.listNoteMetadata(true)).find((note) => note.path === "a.md").content, "content 0");
   assert.equal(await store.renameNote("a.md", "renamed.md"), true);
+  assert.deepEqual([...await store.getResultNoteHashes(resultId)], [["b.md", "hash-1"], ["c.md", "hash-2"], ["renamed.md", "hash-0"]]);
   assert.deepEqual((await store.getEmbedding("renamed.md", "local", "m", "hash-0")).vector, [1, 0]);
   assert.deepEqual(await store.getPcaCoordinates("renamed.md", "pca-incremental"), [1, 0]);
   assert.equal(await store.getEmbedding("a.md", "local", "m", "hash-0"), undefined);
@@ -485,4 +489,22 @@ test("incremental storage moves rename state and persists provisional assignment
   assert.deepEqual((await store.listNoteMetadata(true)).map((note) => note.path), ["b.md", "renamed.md"]);
   assert.equal(store.query("SELECT active FROM notes WHERE path='c.md'")[0].active, 0);
   store.close();
+});
+
+test("result hash baseline survives note metadata writes until a new result commits", async () => {
+  const Storage = await loadStorage();
+  const { store, adapter, SQL } = await openStore(Storage);
+  await seedNotes(store, 3, "");
+  const baseline = new Map([["a.md", "hash-0"], ["b.md", "hash-1"], ["c.md", "hash-2"]]);
+  await store.saveResult(v6Result(), { resultId: "baseline", noteHashes: baseline });
+  await store.syncActiveNotes([
+    { path: "a.md", title: "a", mtime: 2, content: "changed 0", hash: "hash-new-0" },
+    { path: "b.md", title: "b", mtime: 2, content: "changed 1", hash: "hash-new-1" },
+    { path: "c.md", title: "c", mtime: 2, content: "changed 2", hash: "hash-new-2" }
+  ]);
+  assert.deepEqual([...await store.getResultNoteHashes("baseline")], [...baseline]);
+  store.close();
+  const reopened = await new Storage.SqliteClusterStore(adapter, SQL).open();
+  assert.deepEqual([...await reopened.getResultNoteHashes("baseline")], [...baseline]);
+  reopened.close();
 });
