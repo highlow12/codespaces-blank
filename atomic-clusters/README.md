@@ -2,7 +2,8 @@
 
 Atomic Clusters is an Obsidian desktop-only plugin that builds an offline,
 hierarchical map of Markdown notes. It provides the commands **Build note
-clusters**, **Open cluster explorer**, and **Cancel clustering**.
+clusters**, **Refresh changed notes**, **Rebuild all clusters**, **Pause automatic
+refresh**, **Open cluster explorer**, and **Cancel clustering**.
 
 한국어 개발 현황, 아키텍처, 현재 기본값, PCA 보정 이력, Python/WASM 정렬 기준,
 검증 수치와 다음 단계는 [개발 현황 문서](docs/development-status.md)에 정리되어
@@ -18,10 +19,10 @@ directory. Clustering is lazy and runs in a Node `worker_thread`:
 normalized embeddings → sampled automatic PCA → umap-js → HDBSCAN provider → bottom-up hierarchy
 ```
 
-The default plugin runtime has no runtime package installer and uses the bundled
-WASM worker. An optional Pyodide worker runs the Python reference
-`cluster_documents` API and loads the pinned Pyodide runtime only when selected
-in Settings. Gemini is
+The plugin runtime has no runtime package installer and uses the bundled WASM
+worker (with the existing Node/Chromium/in-process fallbacks). The Python
+reference remains in the sibling `pyodide_core/` package for algorithm parity
+and audits; it is not loaded or bundled into the Obsidian plugin. Gemini is
 an explicit network provider using Obsidian `requestUrl`; the API key is
 resolved by a SecretStorage reference, never persisted in plugin settings.
 The local `multilingual-e5-small` provider is opt-in. Settings provides an
@@ -33,12 +34,6 @@ made by `embed()`. The local backend setting defaults to Auto: it tries WebGPU
 first and falls back to the WASM CPU backend when WebGPU is unavailable or
 session creation fails. The selected backend or fallback reason appears in
 preflight progress and the run log.
-
-The Pyodide worker embeds the `pyodide_core` source package in the release
-bundle, loads NumPy and scikit-learn, fits the authoritative Python PCA, and
-injects the browser UMAP/WASM-HDBSCAN discovery result through the documented
-`discovery_runner` seam. This preserves the Python membership-weighted
-hierarchy while keeping UMAP/HDBSCAN native-extension packages out of Pyodide.
 
 The numerical boundary is `wasm-core/`. Its Rust/wasm-bindgen kernels own
 normalization, matrix multiplication, PCA/power iteration, tiled cosine
@@ -100,6 +95,15 @@ The Settings tab also provides **Build clusters** and **Cancel** controls for
 the same command-palette pipeline; while running, the build control is
 disabled and progress remains in the persistent Notice.
 
+When **Automatic refresh** is enabled, Markdown create/modify/delete/rename
+events are debounced (5 seconds by default, with a 60-second cap). Only notes
+whose content hash changed are embedded. Same-content renames move the cached
+path and PCA row, while small edits reuse the saved PCA and hierarchy as
+provisional placements. The Explorer labels those placements and the refresh
+policy schedules a full rebuild when its change, deletion, cumulative, or
+provisional thresholds are exceeded. **Refresh changed notes** runs the same
+path manually; **Rebuild all clusters** always uses the complete WASM pipeline.
+
 When the local provider is selected, **Test local runtime** verifies the
 installed model, bundled renderer-safe ORT assets, ONNX session initialization,
 and one safe probe before a bulk embedding run. The preflight result and any
@@ -130,8 +134,8 @@ Gemini dataset and deliberately refuses `dbpedia_label_embeddings.json`.
 
 Copy `dist/main.js`, `dist/manifest.json`, `dist/styles.css`, and the bundled
 `dist/ort-wasm-simd-threaded.*` assets to `.obsidian/plugins/atomic-clusters/`
-for a local install. The worker source and Python core are embedded in
-`main.js`; the ORT assets stay adjacent so the bundled local provider can load
+for a local install. The worker source is embedded in `main.js`; the Python
+reference stays outside the plugin bundle. The ORT assets stay adjacent so the bundled local provider can load
 them without document-relative URL assumptions.
 The repository intentionally keeps the model weights out of the plugin; local
 model download must be explicit and is disclosed in Settings.

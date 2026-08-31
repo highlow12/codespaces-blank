@@ -451,3 +451,38 @@ test("legacy JSON imports are normalized to v6 and embedding vectors get a Float
   assert.deepEqual(store.query("SELECT schema_version AS schemaVersion FROM results"), [{ schemaVersion: 6 }]);
   store.close();
 });
+
+test("incremental storage moves rename state and persists provisional assignments", async () => {
+  const Storage = await loadStorage();
+  const { store } = await openStore(Storage);
+  await seedNotes(store, 3, "");
+  const model = { modelHash: "pca-incremental", inputDimension: 2, outputDimension: 2, normalization: "none", mean: [0, 0], components: [[1, 0], [0, 1]], explainedVariance: [1, 1], provider: "local", model: "m" };
+  await store.putEmbedding({ path: "a.md", provider: "local", model: "m", hash: "hash-0", vector: [1, 0] });
+  await store.savePcaModel(model);
+  await store.project("a.md", [1, 0], model);
+  const result = {
+    ...v6Result(),
+    pca: { selected: 2, model },
+    embeddingProvider: "local",
+    embeddingModel: "m",
+    provisionalPaths: ["b.md"],
+    incremental: { mode: "soft", generatedAt: "2026-08-31T00:00:00.000Z", changedPaths: ["b.md"], provisionalPaths: ["b.md"], fullRebuildRecommended: false, cumulativeChangedCount: 1, lastFullRebuildAt: "2026-08-31T00:00:00.000Z" }
+  };
+  const resultId = await store.saveResult(result, { resultId: "incremental" });
+  assert.equal(await store.renameNote("a.md", "renamed.md"), true);
+  assert.deepEqual((await store.getEmbedding("renamed.md", "local", "m", "hash-0")).vector, [1, 0]);
+  assert.deepEqual(await store.getPcaCoordinates("renamed.md", "pca-incremental"), [1, 0]);
+  assert.equal(await store.getEmbedding("a.md", "local", "m", "hash-0"), undefined);
+  const hydrated = await store.getResult(resultId);
+  assert.deepEqual(hydrated.ids, ["renamed.md", "b.md", "c.md"]);
+  assert.deepEqual(hydrated.provisionalPaths, ["b.md"]);
+  assert.deepEqual(hydrated.incremental.provisionalPaths, ["b.md"]);
+  assert.equal(hydrated.embeddingProvider, "local");
+  await store.syncActiveNotes([
+    { path: "renamed.md", title: "renamed", mtime: 2, content: "content 0", hash: "hash-0" },
+    { path: "b.md", title: "b", mtime: 1, content: "content 1", hash: "hash-1" }
+  ]);
+  assert.deepEqual((await store.listNoteMetadata(true)).map((note) => note.path), ["b.md", "renamed.md"]);
+  assert.equal(store.query("SELECT active FROM notes WHERE path='c.md'")[0].active, 0);
+  store.close();
+});

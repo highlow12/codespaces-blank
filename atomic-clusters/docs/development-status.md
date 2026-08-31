@@ -40,7 +40,8 @@ Obsidian Vault API
                            └─ cluster-result.json → Cluster Explorer view
 ```
 
-`main.ts`는 `Build note clusters`, `Open cluster explorer`, `Cancel clustering`
+`main.ts`는 `Build note clusters`, `Refresh changed notes`, `Rebuild all clusters`,
+`Pause automatic refresh`, `Open cluster explorer`, `Cancel clustering`
 명령과 설정 화면의 `Build clusters`/`Cancel` 제어를 제공한다. 설정 버튼은
 별도 orchestration을 만들지 않고 같은 `buildClusters` 흐름을 호출하며, 실행 중
 build 버튼을 비활성화하고 persistent Notice의 진행 상태를 사용한다. `NoteStore`가
@@ -51,12 +52,11 @@ mtime, (지원 runtime에서는 SHA-256, test fallback에서는 stable FNV) cont
 재임베딩한다. `NodeClusteringWorker`에는 `INIT/CLUSTER/CANCEL` 요청과
 `READY/PROGRESS/RESULT/ERROR` 응답 계약이 있다.
 
-설정에서 `Pyodide Python reference` runtime을 선택하면 같은 worker 계약을
-유지하는 `PyodideClusteringWorker`를 사용한다. worker는 release bundle에
-포함된 `pyodide_core`를 Pyodide 가상 filesystem에 설치하고 Python
-`cluster_documents`를 호출한다. Pyodide가 PCA를 fit한 뒤 JS UMAP/WASM-HDBSCAN
-결과를 `discovery_runner`로 주입하므로 Python membership-weighted hierarchy를
-실제 worker에서 검증할 수 있다. 기본 WASM runtime은 변경되지 않는다.
+Python의 authoritative 기준은 sibling `pyodide_core/`와 audit scripts에
+그대로 보존한다. 다만 Obsidian plugin release에는 Pyodide runtime이나 Python
+소스가 포함되지 않으며, 실제 plugin worker는 WASM/기존 JS fallback 경로만
+사용한다. 이 분리는 Python 수치 기준을 유지하면서 plugin 설치 크기와
+runtime 의존성을 늘리지 않게 한다.
 
 worker가 생성된 WASM asset을 발견하면 `WasmNumericKernel`을 사용한다. asset이
 없는 개발/fixture 빌드에서는 같은 orchestration이 deterministic TypeScript
@@ -80,6 +80,14 @@ Local provider를 사용할 때 설정의 `Test local runtime`은 설치된 mode
 renderer용 ORT asset, ONNX session과 안전한 1회 probe를 먼저 확인한다. bulk embedding도
 같은 provider runtime의 초기화된 session을 재사용하며, preflight 단계와 제한된 원인만
 run-level log에 기록한다.
+
+Automatic refresh는 `create/modify/delete/rename` Vault 이벤트를 5초 debounce
+queue에 모으고 최대 60초까지만 지연한다. hash가 달라진 노트만 재임베딩하며,
+동일 내용 rename은 SQLite의 path-keyed embedding/PCA/result rows를 이동한다.
+작은 변경은 저장된 PCA와 hierarchy를 재사용해 `provisional placement`로
+표시하고, 변경·삭제·누적·provisional 비율이 기준을 넘으면 전체 WASM rebuild로
+전환한다. Refresh 중 새 이벤트는 다음 한 번의 refresh에 포함되고, 실패하면
+직전 structural result pointer를 유지한다.
 
 ## 현재 기본값과 파이프라인 의미
 

@@ -1,5 +1,5 @@
 import { build, context } from "esbuild";
-import { cp, mkdir, readFile, readdir } from "node:fs/promises";
+import { cp, mkdir, readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import { verifyWasmAsset } from "./scripts/verify-wasm.mjs";
@@ -48,23 +48,6 @@ async function run() {
       });
     }
   };
-  const pyodideCoreSource = {};
-  async function collectPythonSources(directory, prefix = "") {
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
-      const path = resolve(directory, entry.name);
-      if (entry.isDirectory()) await collectPythonSources(path, relative);
-      else if (entry.name.endsWith(".py")) pyodideCoreSource[relative] = await readFile(path, "utf8");
-    }
-  }
-  await collectPythonSources(resolve("..", "pyodide_core"));
-  const pyodideCorePlugin = {
-    name: "embedded-pyodide-core",
-    setup(plugin) {
-      plugin.onResolve({ filter: /^\.\/pyodide-core-source$/ }, () => ({ path: "pyodide-core-source", namespace: "embedded-pyodide-core" }));
-      plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-core" }, () => ({ contents: `export const PYODIDE_CORE_SOURCE = ${JSON.stringify(pyodideCoreSource)};`, loader: "js" }));
-    }
-  };
   const workerBuild = await build({ ...common, entryPoints: ["src/worker.ts"], platform: "node", plugins: [wasmBootstrap], write: false });
   const workerSource = new TextDecoder().decode(workerBuild.outputFiles[0].contents);
   const browserWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/browser-worker.ts"], plugins: [wasmBootstrap], write: false });
@@ -79,15 +62,9 @@ async function run() {
   if (installedOrtVersion !== sharedOrtVersion || !existsSync(sharedOrtWebGpu) || !existsSync(sharedOrtWasm)) {
     throw new Error(`Build requires shared onnxruntime-web ${sharedOrtVersion} JS/WASM assets.`);
   }
-  const pyodideWorkerBuild = await build({ ...common, format: "iife", platform: "browser", entryPoints: ["src/pyodide-worker.ts"], plugins: [wasmBootstrap, pyodideCorePlugin], write: false });
-  const pyodideWorkerSource = new TextDecoder().decode(pyodideWorkerBuild.outputFiles[0].contents);
   const workerPlugin = { name: "embedded-worker", setup(plugin) {
     plugin.onResolve({ filter: /^\.\/worker-source$/ }, () => ({ path: "atomic-clusters-worker-source", namespace: "embedded-worker" }));
     plugin.onLoad({ filter: /.*/, namespace: "embedded-worker" }, () => ({ contents: `export default ${JSON.stringify(workerSource)};`, loader: "js" }));
-  } };
-  const pyodideWorkerPlugin = { name: "embedded-pyodide-worker", setup(plugin) {
-    plugin.onResolve({ filter: /^\.\/pyodide-worker-source$/ }, () => ({ path: "pyodide-worker-source", namespace: "embedded-pyodide-worker" }));
-    plugin.onLoad({ filter: /.*/, namespace: "embedded-pyodide-worker" }, () => ({ contents: `export default ${JSON.stringify(pyodideWorkerSource)};`, loader: "js" }));
   } };
   const browserWorkerPlugin = { name: "embedded-browser-worker", setup(plugin) {
     plugin.onResolve({ filter: /^\.\/browser-worker-source$/ }, () => ({ path: "atomic-clusters-browser-worker-source", namespace: "embedded-browser-worker" }));
@@ -100,7 +77,7 @@ async function run() {
   const ortWebGpuAliasPlugin = { name: "onnxruntime-webgpu-renderer-safe", setup(plugin) {
     plugin.onResolve({ filter: /^onnxruntime-web\/webgpu$/ }, () => ({ path: sharedOrtWebGpu }));
   } };
-  const mainBuild = { ...common, plugins: [workerPlugin, pyodideWorkerPlugin, browserWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
+  const mainBuild = { ...common, plugins: [workerPlugin, browserWorkerPlugin, ortWebGpuAliasPlugin], entryPoints: ["src/main.ts"], outfile: "dist/main.js" };
   if (process.argv.includes("--watch")) {
     const buildContext = await context(mainBuild);
     await buildContext.watch();

@@ -209,7 +209,7 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   progress("umap", 0.2);
   const discovery = await discoverPcaFeatures(pca.projected, config, { ...options, onProgress: progress });
   const hdbscan = discovery;
-  /* The Python/Pyodide worker uses this same boundary after fitting its
+  /* The external Python reference uses this same boundary after fitting its
    * authoritative PCA. Keeping discovery separate makes the JS callback a
    * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
   progress("hdbscan", 0.78);
