@@ -1,0 +1,7 @@
+{
+  "embedding_dimension": 3072,
+  "metadata_sha256": "32a5d22f11eec6e4fd656004a55ad9ed9480a5216b25bd96ccbfb1c1773be877",
+  "normalized_embeddings_sha256": "4af4d27d2cf7b2bfc8b4325a67883deee07e3bfa8b57b74cffab52a82e7ef8e8",
+  "rows": 720,
+  "sample_indices_sha256": "49def14e57c1d4edf4d3c7d0881dfe281f8a69a15cc5321a7b98b50db20c00c2"
+}

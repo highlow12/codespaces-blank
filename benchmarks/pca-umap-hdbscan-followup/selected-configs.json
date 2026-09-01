@@ -1,0 +1,69 @@
+[
+  {
+    "min_dist": 0.1,
+    "n_components": 20,
+    "n_neighbors": 15,
+    "phase1_mean_pca_umap": 0.5899925925925925,
+    "phase1_mean_raw_umap": 0.5724818518518519,
+    "phase1_mean_umap_additional_loss": 0.28433851851851855,
+    "roles": [
+      "production_baseline"
+    ]
+  },
+  {
+    "min_dist": 0.5,
+    "n_components": 20,
+    "n_neighbors": 100,
+    "phase1_mean_pca_umap": 0.6219748148148149,
+    "phase1_mean_raw_umap": 0.6032029629629629,
+    "phase1_mean_umap_additional_loss": 0.2536174074074074,
+    "roles": [
+      "best_raw_preservation",
+      "best_pca_preservation"
+    ]
+  },
+  {
+    "min_dist": 0.1,
+    "n_components": 20,
+    "n_neighbors": 100,
+    "phase1_mean_pca_umap": 0.5865314814814815,
+    "phase1_mean_raw_umap": 0.5708040740740741,
+    "phase1_mean_umap_additional_loss": 0.28601629629629627,
+    "roles": [
+      "n_neighbors_ablation"
+    ]
+  },
+  {
+    "min_dist": 0.1,
+    "n_components": 5,
+    "n_neighbors": 15,
+    "phase1_mean_pca_umap": 0.5899437037037036,
+    "phase1_mean_raw_umap": 0.5716488888888889,
+    "phase1_mean_umap_additional_loss": 0.28517148148148147,
+    "roles": [
+      "n_components_ablation"
+    ]
+  },
+  {
+    "min_dist": 0.5,
+    "n_components": 20,
+    "n_neighbors": 15,
+    "phase1_mean_pca_umap": 0.6216170370370371,
+    "phase1_mean_raw_umap": 0.6021433333333334,
+    "phase1_mean_umap_additional_loss": 0.25467703703703704,
+    "roles": [
+      "min_dist_ablation"
+    ]
+  },
+  {
+    "min_dist": 0.0,
+    "n_components": 50,
+    "n_neighbors": 5,
+    "phase1_mean_pca_umap": 0.5533792592592592,
+    "phase1_mean_raw_umap": 0.537504074074074,
+    "phase1_mean_umap_additional_loss": 0.3193162962962963,
+    "roles": [
+      "negative_control"
+    ]
+  }
+]
