@@ -1,0 +1,201 @@
+{
+  "candidates": [
+    {
+      "cumulative_explained_variance": 0.3244289755821228,
+      "dimension": 32,
+      "explained_variance_gain": null,
+      "knn_preservation_by_k": {
+        "15": 0.6807407407407408,
+        "30": 0.7333796296296297
+      },
+      "knn_preservation_gain": null,
+      "mean_knn_preservation": 0.7070601851851852
+    },
+    {
+      "cumulative_explained_variance": 0.4576413929462433,
+      "dimension": 64,
+      "explained_variance_gain": 0.13321241736412048,
+      "knn_preservation_by_k": {
+        "15": 0.7617592592592592,
+        "30": 0.7927314814814815
+      },
+      "knn_preservation_gain": 0.07018518518518513,
+      "mean_knn_preservation": 0.7772453703703703
+    },
+    {
+      "cumulative_explained_variance": 0.5568803548812866,
+      "dimension": 96,
+      "explained_variance_gain": 0.09923896193504333,
+      "knn_preservation_by_k": {
+        "15": 0.8131481481481482,
+        "30": 0.830324074074074
+      },
+      "knn_preservation_gain": 0.044490740740740775,
+      "mean_knn_preservation": 0.8217361111111111
+    },
+    {
+      "cumulative_explained_variance": 0.6352819204330444,
+      "dimension": 128,
+      "explained_variance_gain": 0.07840156555175781,
+      "knn_preservation_by_k": {
+        "15": 0.8438888888888889,
+        "30": 0.8540277777777778
+      },
+      "knn_preservation_gain": 0.02722222222222226,
+      "mean_knn_preservation": 0.8489583333333334
+    },
+    {
+      "cumulative_explained_variance": 0.6987389326095581,
+      "dimension": 160,
+      "explained_variance_gain": 0.06345701217651367,
+      "knn_preservation_by_k": {
+        "15": 0.8602777777777778,
+        "30": 0.8679629629629629
+      },
+      "knn_preservation_gain": 0.015162037037037002,
+      "mean_knn_preservation": 0.8641203703703704
+    },
+    {
+      "cumulative_explained_variance": 0.7511523962020874,
+      "dimension": 192,
+      "explained_variance_gain": 0.0524134635925293,
+      "knn_preservation_by_k": {
+        "15": 0.8703703703703703,
+        "30": 0.8764351851851852
+      },
+      "knn_preservation_gain": 0.009282407407407378,
+      "mean_knn_preservation": 0.8734027777777778
+    },
+    {
+      "cumulative_explained_variance": 0.7947896718978882,
+      "dimension": 224,
+      "explained_variance_gain": 0.04363727569580078,
+      "knn_preservation_by_k": {
+        "15": 0.8813888888888889,
+        "30": 0.8822222222222222
+      },
+      "knn_preservation_gain": 0.008402777777777759,
+      "mean_knn_preservation": 0.8818055555555555
+    },
+    {
+      "cumulative_explained_variance": 0.8313460350036621,
+      "dimension": 256,
+      "explained_variance_gain": 0.036556363105773926,
+      "knn_preservation_by_k": {
+        "15": 0.8896296296296297,
+        "30": 0.8868981481481482
+      },
+      "knn_preservation_gain": 0.006458333333333455,
+      "mean_knn_preservation": 0.888263888888889
+    },
+    {
+      "cumulative_explained_variance": 0.8620375394821167,
+      "dimension": 288,
+      "explained_variance_gain": 0.03069150447845459,
+      "knn_preservation_by_k": {
+        "15": 0.8928703703703704,
+        "30": 0.8889351851851852
+      },
+      "knn_preservation_gain": 0.0026388888888888573,
+      "mean_knn_preservation": 0.8909027777777778
+    },
+    {
+      "cumulative_explained_variance": 0.8878027200698853,
+      "dimension": 320,
+      "explained_variance_gain": 0.025765180587768555,
+      "knn_preservation_by_k": {
+        "15": 0.8948148148148148,
+        "30": 0.8923611111111112
+      },
+      "knn_preservation_gain": 0.002685185185185235,
+      "mean_knn_preservation": 0.8935879629629631
+    },
+    {
+      "cumulative_explained_variance": 0.9094541072845459,
+      "dimension": 352,
+      "explained_variance_gain": 0.021651387214660645,
+      "knn_preservation_by_k": {
+        "15": 0.895462962962963,
+        "30": 0.8932407407407408
+      },
+      "knn_preservation_gain": 0.0007638888888887863,
+      "mean_knn_preservation": 0.8943518518518518
+    },
+    {
+      "cumulative_explained_variance": 0.9277180433273315,
+      "dimension": 384,
+      "explained_variance_gain": 0.018263936042785645,
+      "knn_preservation_by_k": {
+        "15": 0.8957407407407407,
+        "30": 0.8950462962962963
+      },
+      "knn_preservation_gain": 0.0010416666666666075,
+      "mean_knn_preservation": 0.8953935185185184
+    },
+    {
+      "cumulative_explained_variance": 0.9429436922073364,
+      "dimension": 416,
+      "explained_variance_gain": 0.015225648880004883,
+      "knn_preservation_by_k": {
+        "15": 0.8974074074074074,
+        "30": 0.8943981481481481
+      },
+      "knn_preservation_gain": 0.0005092592592592649,
+      "mean_knn_preservation": 0.8959027777777777
+    },
+    {
+      "cumulative_explained_variance": 0.9556955099105835,
+      "dimension": 448,
+      "explained_variance_gain": 0.01275181770324707,
+      "knn_preservation_by_k": {
+        "15": 0.8969444444444444,
+        "30": 0.8943981481481481
+      },
+      "knn_preservation_gain": -0.00023148148148144365,
+      "mean_knn_preservation": 0.8956712962962963
+    },
+    {
+      "cumulative_explained_variance": 0.966208815574646,
+      "dimension": 480,
+      "explained_variance_gain": 0.0105133056640625,
+      "knn_preservation_by_k": {
+        "15": 0.8975925925925926,
+        "30": 0.8951851851851852
+      },
+      "knn_preservation_gain": 0.0007175925925926308,
+      "mean_knn_preservation": 0.8963888888888889
+    },
+    {
+      "cumulative_explained_variance": 0.9748016595840454,
+      "dimension": 512,
+      "explained_variance_gain": 0.008592844009399414,
+      "knn_preservation_by_k": {
+        "15": 0.8963888888888889,
+        "30": 0.8964814814814814
+      },
+      "knn_preservation_gain": 4.6296296296266526e-05,
+      "mean_knn_preservation": 0.8964351851851852
+    }
+  ],
+  "configuration": {
+    "component_step": 32,
+    "input_normalized": true,
+    "k_values": [
+      15,
+      30
+    ],
+    "min_components": 32,
+    "minimum_preservation_gain": 0.05
+  },
+  "fitted_dimension": 512,
+  "selected_cumulative_explained_variance": 0.6987389326095581,
+  "selected_dimension": 160,
+  "selected_dimension_knn_preservation": {
+    "k10": 0.8556944444444444,
+    "k15": 0.8602777777777778,
+    "k30": 0.8679629629629629,
+    "k5": 0.8458333333333333,
+    "k50": 0.8543333333333333
+  },
+  "selection_reason": "global_preservation_knee_after_local_plateau"
+}
