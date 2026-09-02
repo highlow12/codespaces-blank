@@ -2,6 +2,20 @@
 .atomic-clusters-view-header { flex: 0 0 auto; }
 .atomic-clusters-view h3 { margin: 0 0 8px; }
 .atomic-clusters-status { color: var(--text-muted); margin-bottom: 12px; }
+.atomic-clusters-search-panel { flex: 0 0 auto; display: grid; gap: 6px; margin: 0 0 8px; padding: 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
+.atomic-clusters-search-row { display: flex; gap: 6px; align-items: center; }
+.atomic-clusters-search-input { flex: 1 1 auto; min-width: 0; }
+.atomic-clusters-search-filters { display: flex; flex-wrap: wrap; gap: 4px; }
+.atomic-clusters-search-filters button.is-active { color: var(--text-on-accent); background: var(--interactive-accent); }
+.atomic-clusters-search-summary { color: var(--text-muted); font-size: var(--font-ui-small); }
+.atomic-clusters-search-results { display: flex; flex-wrap: wrap; gap: 4px; max-height: 8rem; overflow-y: auto; }
+.atomic-clusters-search-results button { min-width: 0; max-width: 100%; overflow: hidden; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+.atomic-clusters-search-result-note.is-active { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.atomic-clusters-focus-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; color: var(--text-muted); font-size: var(--font-ui-small); }
+.atomic-clusters-search-match { --atomic-search-opacity: 1; }
+.atomic-clusters-search-dimmed { --atomic-search-opacity: .28; opacity: var(--atomic-search-opacity); transition: opacity 100ms ease; }
+.atomic-clusters-search-neutral { --atomic-search-opacity: 1; }
+.atomic-clusters-search-match > strong, .atomic-clusters-search-result-cluster { color: var(--text-accent); }
 .atomic-clusters-node { border: 1px solid var(--background-modifier-border); border-left: 4px solid var(--atomic-cluster-color, var(--background-modifier-border)); border-radius: 6px; padding: 8px; margin: 6px 0; }
 .atomic-clusters-node button { margin: 2px 4px 2px 0; }
 .atomic-clusters-tree-panel { order: 2; flex: 0 1 auto; max-height: 38%; min-height: 0; margin-top: 4px; overflow: auto; }

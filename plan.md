@@ -766,6 +766,8 @@ viewport 경계의 note와 label이 잘리는 문제를 수정한다.
 
 ## Milestone B — Search & Focus
 
+Implementation plan: [`atomic-clusters/docs/search-focus-plan.md`](atomic-clusters/docs/search-focus-plan.md)
+
 - search bar
 - title/path/tag/cluster 검색
 - filter chips
