@@ -84,10 +84,14 @@ run-level log에 기록한다.
 Automatic refresh는 `create/modify/delete/rename` Vault 이벤트를 5초 debounce
 queue에 모으고 최대 60초까지만 지연한다. hash가 달라진 노트만 재임베딩하며,
 동일 내용 rename은 SQLite의 path-keyed embedding/PCA/result rows를 이동한다.
-작은 변경은 저장된 PCA와 hierarchy를 재사용해 `provisional placement`로
-표시하고, 변경·삭제·누적·provisional 비율이 기준을 넘으면 전체 WASM rebuild로
-전환한다. Refresh 중 새 이벤트는 다음 한 번의 refresh에 포함되고, 실패하면
-직전 structural result pointer를 유지한다.
+작은 변경은 저장된 PCA transform과 full-build UMAP 20D coordinates를 재사용한다.
+변경 노트는 저장된 PCA row를 기준으로 bounded kNN barycentric UMAP transform을
+거친 뒤, 기존 UMAP 공간의 probability/distance-weighted kNN vote로 leaf를
+정한다. 각 leaf의 저장된 p95 kNN-distance, vote support, distance-adjusted
+probability를 모두 통과하지 못한 노트는 억지로 배치하지 않고 `provisional`
+noise로 남긴다. provisional/OOD 누적, 변경·삭제·누적 비율이 기준을 넘으면
+전체 WASM rebuild로 전환한다. Refresh 중 새 이벤트는 다음 한 번의 refresh에
+포함되고, 실패하면 직전 structural result pointer를 유지한다.
 
 ## 현재 기본값과 파이프라인 의미
 

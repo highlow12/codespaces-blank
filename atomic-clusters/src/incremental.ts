@@ -181,6 +181,7 @@ export interface IncrementalRefreshPolicy {
   softChangedFloor?: number;
   maxDeletedFraction?: number;
   maxProvisionalFraction?: number;
+  maxOutOfDistributionFraction?: number;
   maxCumulativeChangedFraction?: number;
   fullRebuildAfterMs?: number;
 }
@@ -208,6 +209,7 @@ const DEFAULT_POLICY: Required<IncrementalRefreshPolicy> = {
   softChangedFloor: 20,
   maxDeletedFraction: 0.01,
   maxProvisionalFraction: 0.05,
+  maxOutOfDistributionFraction: 0.05,
   maxCumulativeChangedFraction: 0.10,
   fullRebuildAfterMs: 7 * 24 * 60 * 60 * 1000,
 };
@@ -237,12 +239,15 @@ export function decideIncrementalRefresh(input: IncrementalRefreshDecisionInput)
     return { mode: "no-op", reason: input.pathOnly ? "path_only_change" : "metadata_unchanged" };
   }
 
+  if (!result.umap || result.umap.coordinates.length !== result.ids.length) return { mode: "full", reason: "umap_coordinates_unavailable" };
   if (!result.pca.model) return { mode: "full", reason: "pca_model_unavailable" };
   if (!embeddingSpaceKnown) return { mode: "full", reason: "embedding_space_metadata_unavailable" };
   if (result.incremental?.fullRebuildRecommended) return { mode: "full", reason: "previous_refresh_recommended_rebuild" };
 
   const provisionalCount = resultProvisionalPaths(result).length;
   if (active > 0 && provisionalCount > active * policy.maxProvisionalFraction) return { mode: "full", reason: "provisional_ratio_exceeded" };
+  const outOfDistributionCount = result.incremental?.outOfDistributionPaths?.length || 0;
+  if (active > 0 && outOfDistributionCount > active * policy.maxOutOfDistributionFraction) return { mode: "full", reason: "umap_ood_ratio_exceeded" };
 
   const changedLimit = Math.max(policy.softChangedFloor, Math.ceil(active * policy.softChangedFraction));
   if (input.changedNoteCount > changedLimit) return { mode: "full", reason: "changed_note_threshold_exceeded" };
@@ -261,12 +266,22 @@ export interface SoftRefreshInput {
   result: ClusterResult;
   notes: NoteRecord[];
   vectorsByPath: ReadonlyMap<string, number[]>;
+  /** Saved PCA coordinates keyed by note path. */
   existingCoordinates: ReadonlyMap<string, number[]>;
+  /** Saved full-build UMAP coordinates keyed by note path. */
+  existingUmapCoordinates: ReadonlyMap<string, number[]>;
   changedPaths: ReadonlySet<string>;
   deletedPaths?: ReadonlySet<string>;
   now?: string;
   provider: string;
   model: string;
+  /** Minimum weighted UMAP-neighbour support required to admit a leaf. */
+  minSupport?: number;
+  /** Minimum distance-adjusted probability required to admit a leaf. */
+  minProbability?: number;
+  /** Multiplier applied to the saved per-leaf p95 kNN-distance gate. */
+  maxDistanceFactor?: number;
+  /** @deprecated retained only for callers compiled against PR #3. */
   minSimilarity?: number;
 }
 
@@ -278,15 +293,114 @@ export interface SoftRefreshOutput {
 
 function clamp(value: number, min = 0, max = 1): number { return Math.max(min, Math.min(max, value)); }
 
-function normalizeVector(values: readonly number[]): number[] {
-  const norm = Math.sqrt(values.reduce((sum, value) => sum + value * value, 0));
-  return norm > 1e-12 ? values.map((value) => value / norm) : values.map(() => 0);
+function euclideanDistance(left: readonly number[], right: readonly number[]): number {
+  if (left.length !== right.length) return Number.POSITIVE_INFINITY;
+  let squared = 0;
+  for (let index = 0; index < left.length; index++) { const delta = left[index] - right[index]; squared += delta * delta; }
+  return Math.sqrt(squared);
 }
 
-function cosineSimilarity(left: readonly number[], right: readonly number[]): number {
-  if (left.length !== right.length) return -1;
-  const a = normalizeVector(left); const b = normalizeVector(right);
-  return a.reduce((sum, value, index) => sum + value * b[index], 0);
+interface NearestPoint { path: string; distance: number; }
+
+function nearestPoints(point: readonly number[], paths: readonly string[], coordinates: ReadonlyMap<string, number[]>, limit: number): NearestPoint[] {
+  const nearest = paths.map((path) => ({ path, distance: euclideanDistance(point, coordinates.get(path) || []) }));
+  nearest.sort((left, right) => left.distance - right.distance || left.path.localeCompare(right.path));
+  return nearest.slice(0, Math.max(1, Math.min(limit, nearest.length)));
+}
+
+/** Apply the saved PCA-to-UMAP transform seam without fitting UMAP again. */
+function transformWithSavedUmap(
+  pcaCoordinate: readonly number[],
+  sourcePaths: readonly string[],
+  pcaCoordinates: ReadonlyMap<string, number[]>,
+  umapCoordinates: ReadonlyMap<string, number[]>,
+  neighbors: number,
+): number[] {
+  const nearest = nearestPoints(pcaCoordinate, sourcePaths, pcaCoordinates, neighbors);
+  const dimensions = umapCoordinates.get(nearest[0]?.path || "")?.length || 0;
+  if (!dimensions) throw new Error("Saved UMAP coordinates are empty");
+  const weights = nearest.map(({ distance }) => 1 / Math.max(1e-6, distance));
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const transformed = new Array(dimensions).fill(0);
+  nearest.forEach(({ path }, index) => {
+    const coordinate = umapCoordinates.get(path);
+    if (!coordinate || coordinate.length !== dimensions) throw new Error("Saved UMAP coordinates are not rectangular");
+    const weight = weights[index] / total;
+    for (let dimension = 0; dimension < dimensions; dimension++) transformed[dimension] += coordinate[dimension] * weight;
+  });
+  return transformed;
+}
+
+interface UmapVoteResult {
+  label: number;
+  probability: number;
+  outlier: number;
+  memberships: number[];
+  support: number;
+  distance: number;
+  outOfDistribution: boolean;
+}
+
+/**
+ * Assign a transformed point against the saved UMAP neighbourhood. Votes are
+ * weighted by both HDBSCAN probability and UMAP distance. A candidate must
+ * have majority support, useful distance-adjusted probability, and remain
+ * within the saved per-leaf p95 kNN-distance envelope; otherwise it remains
+ * provisional noise instead of being forced into a leaf.
+ */
+function assignInSavedUmap(
+  coordinate: readonly number[],
+  sourcePaths: readonly string[],
+  umapCoordinates: ReadonlyMap<string, number[]>,
+  result: ClusterResult,
+  leafOrder: readonly number[],
+  leafIndex: ReadonlyMap<number, number>,
+  neighbors: number,
+  p95ByLeaf: Readonly<Record<string, number>>,
+  minSupport: number,
+  minProbability: number,
+  maxDistanceFactor: number,
+): UmapVoteResult {
+  const nearest = nearestPoints(coordinate, sourcePaths, umapCoordinates, neighbors);
+  const oldIndex = new Map(result.ids.map((path, index) => [path, index] as const));
+  const votes = new Map<number, { weight: number; weightedDistance: number }>();
+  let totalWeight = 0;
+  for (const candidate of nearest) {
+    const index = oldIndex.get(candidate.path);
+    if (index === undefined) continue;
+    const probability = clamp(Number(result.probabilities[index]) || 0);
+    const weight = (1 / (1 + candidate.distance)) * Math.max(0.05, probability);
+    totalWeight += weight;
+    const label = result.leafLabels[index];
+    if (label >= 0) {
+      const current = votes.get(label) || { weight: 0, weightedDistance: 0 };
+      current.weight += weight; current.weightedDistance += weight * candidate.distance; votes.set(label, current);
+    }
+  }
+  const best = [...votes.entries()].sort((left, right) => right[1].weight - left[1].weight || left[0] - right[0])[0];
+  const bestLabel = best?.[0] ?? -1;
+  const bestVote = best?.[1];
+  const support = bestVote && totalWeight > 0 ? bestVote.weight / totalWeight : 0;
+  const distance = bestVote && bestVote.weight > 0 ? bestVote.weightedDistance / bestVote.weight : Number.POSITIVE_INFINITY;
+  const p95 = bestLabel >= 0 ? Number(p95ByLeaf[String(bestLabel)]) : Number.POSITIVE_INFINITY;
+  const finiteP95 = Number.isFinite(p95);
+  const distanceLimit = finiteP95 ? Math.max(1e-6, p95 * maxDistanceFactor) : Number.POSITIVE_INFINITY;
+  const distanceConfidence = !Number.isFinite(distance) ? 0 : finiteP95 ? clamp(1 - distance / distanceLimit) : clamp(1 / (1 + distance));
+  const probability = clamp(support * distanceConfidence);
+  const accepted = bestLabel >= 0 && support >= minSupport && probability >= minProbability && distance <= distanceLimit;
+  const memberships = new Array(leafOrder.length).fill(0);
+  if (totalWeight > 0) for (const [label, vote] of votes) {
+    const column = leafIndex.get(label); if (column !== undefined) memberships[column] = probability * vote.weight / totalWeight;
+  }
+  return {
+    label: accepted ? bestLabel : -1,
+    probability: accepted ? probability : 0,
+    outlier: accepted ? 1 - probability : 1,
+    memberships,
+    support,
+    distance,
+    outOfDistribution: !accepted,
+  };
 }
 
 export function projectPcaVector(vector: readonly number[], model: PcaModelArtifact): number[] {
@@ -328,20 +442,27 @@ function recountHierarchyMasses(result: ClusterResult, placements: readonly Hier
 }
 
 /**
- * Reuse a fitted PCA and the existing hierarchy for a small change set.
- * This is intentionally a placement refresh, not an online HDBSCAN update.
+ * Reuse the fitted PCA and saved UMAP coordinates for a small change set.
+ * This is a placement refresh, not an online HDBSCAN update: changed points
+ * are first projected with the saved PCA-to-UMAP kNN transform, then voted
+ * into the existing UMAP space. The structural hierarchy is never refit.
  */
 export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
-  const { result, notes, vectorsByPath, existingCoordinates, changedPaths } = input;
+  const { result, notes, vectorsByPath, existingCoordinates, existingUmapCoordinates, changedPaths } = input;
   const deletedPaths = input.deletedPaths || new Set<string>();
   const model = result.pca.model;
   if (!model) throw new Error("Soft refresh requires a saved PCA model");
+  const savedUmap = result.umap;
+  if (!savedUmap || savedUmap.coordinates.length !== result.ids.length) throw new Error("Soft refresh requires saved full-build UMAP coordinates");
+  if (savedUmap.sourcePcaModelHash && savedUmap.sourcePcaModelHash !== model.modelHash) throw new Error("Saved UMAP transform does not match the PCA model");
   const leafOrder = (result.leafOrder || result.leafOrdering || result.hierarchy.leaves).slice();
   const leafIndex = new Map(leafOrder.map((leaf, index) => [leaf, index] as const));
   const oldIndex = new Map(result.ids.map((path, index) => [path, index] as const));
   const memberships = result.memberships || result.softMemberships;
   const previousProvisional = new Set(resultProvisionalPaths(result));
+  const previousOutOfDistribution = new Set(result.incremental?.outOfDistributionPaths || []);
   const projected = new Map<string, number[]>();
+  const projectedUmap = new Map<string, number[]>();
   const projectedPaths: string[] = [];
   const activePaths = new Set(notes.map((note) => note.path));
   const isChanged = (path: string): boolean => changedPaths.has(path) || !oldIndex.has(path);
@@ -349,7 +470,10 @@ export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
   for (const note of notes) {
     if (!isChanged(note.path)) {
       const coordinate = existingCoordinates.get(note.path);
-      if (coordinate) projected.set(note.path, coordinate.slice());
+      const umapCoordinate = existingUmapCoordinates.get(note.path);
+      if (!coordinate || !umapCoordinate) throw new Error(`Saved PCA/UMAP coordinates are incomplete for ${note.path}`);
+      projected.set(note.path, coordinate.slice());
+      projectedUmap.set(note.path, umapCoordinate.slice());
     } else {
       const vector = vectorsByPath.get(note.path);
       if (!vector) throw new Error(`Missing embedding for changed note ${note.path}`);
@@ -359,44 +483,21 @@ export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
     }
   }
 
-  const centers = leafOrder.map(() => [] as number[]);
-  const masses = leafOrder.map(() => 0);
-  const addToCenters = (allowProvisional: boolean): void => {
-    for (const [path, index] of oldIndex) {
-      if (!activePaths.has(path) || deletedPaths.has(path) || isChanged(path)) continue;
-      if (!allowProvisional && previousProvisional.has(path)) continue;
-      const coordinate = projected.get(path) || existingCoordinates.get(path);
-      if (!coordinate) continue;
-      const row = memberships?.[index];
-      if (row && row.length === leafOrder.length) {
-        row.forEach((weight, column) => {
-          const value = Math.max(0, Number(weight) || 0);
-          if (!value) return;
-          if (!centers[column].length) centers[column] = new Array(coordinate.length).fill(0);
-          for (let dimension = 0; dimension < coordinate.length; dimension++) centers[column][dimension] += coordinate[dimension] * value;
-          masses[column] += value;
-        });
-      } else {
-        const label = result.leafLabels[index]; const column = leafIndex.get(label);
-        if (column === undefined) return;
-        if (!centers[column].length) centers[column] = new Array(coordinate.length).fill(0);
-        for (let dimension = 0; dimension < coordinate.length; dimension++) centers[column][dimension] += coordinate[dimension];
-        masses[column] += 1;
-      }
-    }
-  };
-  addToCenters(false);
-  // A leaf with only provisional historical members is still better served by
-  // its last known center than by treating every new note as root noise.
-  if (masses.some((mass) => mass <= 1e-12)) {
-    centers.forEach((center) => { center.length = 0; });
-    masses.fill(0);
-    addToCenters(true);
-  }
-  const normalizedCenters = centers.map((center, index) => masses[index] > 1e-12 ? center.map((value) => value / masses[index]) : center);
+  // Only stable, unchanged rows may vote. This prevents a stream of
+  // provisional placements from drifting the saved structure before a full
+  // rebuild is scheduled.
+  const sourcePaths = result.ids.filter((path) => activePaths.has(path) && !deletedPaths.has(path) && !isChanged(path) && !previousProvisional.has(path) && existingCoordinates.has(path) && existingUmapCoordinates.has(path));
+  if (sourcePaths.length < 2) throw new Error("Soft refresh requires at least two unchanged UMAP anchor notes");
+  const transformNeighbors = Math.max(1, Math.min(savedUmap.transform?.neighbors || savedUmap.nNeighbors || 15, sourcePaths.length));
+  const voteNeighbors = Math.max(1, Math.min(savedUmap.nNeighbors || 15, sourcePaths.length));
 
   const labels: number[] = []; const probabilities: number[] = []; const outliers: number[] = [];
   const nextMemberships: number[][] = []; const placements: HierarchyPlacement[] = []; const provisionalPaths = new Set<string>();
+  // Carry forward unresolved OOD notes that are still active. A subsequent
+  // refresh must measure growth across refreshes, rather than forgetting an
+  // earlier OOD row when no new note is changed in the current batch.
+  const outOfDistributionPaths = new Set([...previousOutOfDistribution].filter((path) => activePaths.has(path) && !deletedPaths.has(path) && !isChanged(path)));
+  const knnSupport: Record<string, number> = {}; const knnDistance: Record<string, number> = {};
   for (const note of notes) {
     const index = oldIndex.get(note.path);
     const changed = isChanged(note.path);
@@ -409,24 +510,23 @@ export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
       continue;
     }
 
-    const coordinate = projected.get(note.path);
-    if (!coordinate) throw new Error(`Missing PCA projection for changed note ${note.path}`);
-    let bestColumn = -1; let bestSimilarity = -1;
-    normalizedCenters.forEach((center, column) => {
-      if (!center.length || masses[column] <= 1e-12) return;
-      const similarity = cosineSimilarity(coordinate, center);
-      if (similarity > bestSimilarity || similarity === bestSimilarity && leafOrder[column] < leafOrder[bestColumn]) { bestSimilarity = similarity; bestColumn = column; }
-    });
-    const confidence = clamp(bestSimilarity);
-    const accepted = bestColumn >= 0 && bestSimilarity >= (input.minSimilarity ?? 0.55);
-    const label = accepted ? leafOrder[bestColumn] : -1;
-    labels.push(label); probabilities.push(accepted ? confidence : 0); outliers.push(accepted ? 1 - confidence : 1);
-    const row = new Array(leafOrder.length).fill(0); if (accepted) row[bestColumn] = confidence; nextMemberships.push(row);
-    placements.push(accepted ? { kind: "leaf", nodeId: label, confidence } : { kind: "residual", nodeId: null, confidence: 0 });
+    const pcaCoordinate = projected.get(note.path);
+    if (!pcaCoordinate) throw new Error(`Missing PCA projection for changed note ${note.path}`);
+    const umapCoordinate = transformWithSavedUmap(pcaCoordinate, sourcePaths, existingCoordinates, existingUmapCoordinates, transformNeighbors);
+    projectedUmap.set(note.path, umapCoordinate);
+    const vote = assignInSavedUmap(
+      umapCoordinate, sourcePaths, existingUmapCoordinates, result, leafOrder, leafIndex, voteNeighbors,
+      savedUmap.leafKnnDistanceP95, input.minSupport ?? 0.55, input.minProbability ?? 0.35, input.maxDistanceFactor ?? 1.5
+    );
+    labels.push(vote.label); probabilities.push(vote.probability); outliers.push(vote.outlier); nextMemberships.push(vote.memberships);
+    placements.push(vote.label >= 0 ? { kind: "leaf", nodeId: vote.label, confidence: vote.probability } : { kind: "residual", nodeId: null, confidence: 0 });
     provisionalPaths.add(note.path);
+    knnSupport[note.path] = vote.support; knnDistance[note.path] = vote.distance;
+    if (vote.outOfDistribution) outOfDistributionPaths.add(note.path);
   }
 
   const sortedProvisionalPaths = [...provisionalPaths].sort();
+  const sortedOutOfDistributionPaths = [...outOfDistributionPaths].sort();
   const previousIncremental = result.incremental;
   const generatedAt = input.now || new Date().toISOString();
   const cumulativeChangedCount = (previousIncremental?.cumulativeChangedCount || 0) + changedPaths.size + deletedPaths.size;
@@ -440,18 +540,23 @@ export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
     return before > 0 && Math.abs(after - before) / before > 0.30;
   });
   const provisionalRatioExceeded = notes.length > 0 && sortedProvisionalPaths.length > notes.length * DEFAULT_POLICY.maxProvisionalFraction;
+  const oodRatioExceeded = notes.length > 0 && sortedOutOfDistributionPaths.length > notes.length * DEFAULT_POLICY.maxOutOfDistributionFraction;
   const cumulativeThresholdExceeded = cumulativeChangedCount > notes.length * DEFAULT_POLICY.maxCumulativeChangedFraction;
-  const fullRebuildRecommended = provisionalRatioExceeded || cumulativeThresholdExceeded || leafOccupancyDrift;
+  const fullRebuildRecommended = provisionalRatioExceeded || oodRatioExceeded || cumulativeThresholdExceeded || leafOccupancyDrift;
   const incremental: IncrementalRefreshMetadata = {
     mode: "soft",
     generatedAt,
     changedPaths: [...changedPaths].filter((path) => activePaths.has(path)).sort(),
     provisionalPaths: sortedProvisionalPaths,
     fullRebuildRecommended,
-    reason: fullRebuildRecommended ? (provisionalRatioExceeded ? "provisional_ratio_reached" : cumulativeThresholdExceeded ? "cumulative_change_threshold_reached" : "leaf_occupancy_drift") : "small_change_reuse_saved_structure",
+    reason: fullRebuildRecommended ? (oodRatioExceeded ? "umap_ood_growth" : provisionalRatioExceeded ? "provisional_ratio_reached" : cumulativeThresholdExceeded ? "cumulative_change_threshold_reached" : "leaf_occupancy_drift") : "small_change_reuse_saved_structure",
     cumulativeChangedCount,
+    ...(sortedOutOfDistributionPaths.length ? { outOfDistributionPaths: sortedOutOfDistributionPaths } : {}),
+    ...(Object.keys(knnSupport).length ? { knnSupport, knnDistance } : {}),
     ...(previousIncremental?.lastFullRebuildAt ? { lastFullRebuildAt: previousIncremental.lastFullRebuildAt } : {}),
   };
+  const umapCoordinates = notes.map((note) => projectedUmap.get(note.path));
+  if (umapCoordinates.some((coordinate) => !coordinate)) throw new Error("Incremental UMAP coordinates are incomplete");
   const next: ClusterResult = {
     ...result,
     embeddingProvider: input.provider,
@@ -465,6 +570,7 @@ export function buildSoftRefresh(input: SoftRefreshInput): SoftRefreshOutput {
     memberships: nextMemberships,
     hierarchyPlacements: placements,
     hierarchy: recountHierarchyMasses({ ...result, hierarchyPlacements: placements }, placements),
+    umap: { ...savedUmap, coordinates: umapCoordinates as number[][] },
     visualization: undefined,
     provisionalPaths: sortedProvisionalPaths,
     incremental,
@@ -485,6 +591,9 @@ export function renameClusterResultPaths(result: ClusterResult, renames: Readonl
     ...result.incremental,
     changedPaths: result.incremental.changedPaths.map(mapPath),
     provisionalPaths: result.incremental.provisionalPaths.map(mapPath),
+    ...(result.incremental.outOfDistributionPaths ? { outOfDistributionPaths: result.incremental.outOfDistributionPaths.map(mapPath) } : {}),
+    ...(result.incremental.knnSupport ? { knnSupport: Object.fromEntries(Object.entries(result.incremental.knnSupport).map(([path, value]) => [mapPath(path), value])) } : {}),
+    ...(result.incremental.knnDistance ? { knnDistance: Object.fromEntries(Object.entries(result.incremental.knnDistance).map(([path, value]) => [mapPath(path), value])) } : {}),
   } : undefined;
   const provisionalPaths = result.provisionalPaths?.map(mapPath);
   return {

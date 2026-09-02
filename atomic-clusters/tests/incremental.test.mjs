@@ -42,6 +42,20 @@ function baseResult() {
     leafOrdering: [0, 1],
     memberships: [[1, 0], [0, 1]],
     softMemberships: [[1, 0], [0, 1]],
+    umap: {
+      modelHash: "umap-1",
+      sourcePcaModelHash: "pca-1",
+      runtime: "umap-js",
+      inputDimension: 2,
+      outputDimension: 2,
+      nNeighbors: 1,
+      minDist: 0.1,
+      spread: 1,
+      seed: 42,
+      coordinates: [[0, 0], [10, 0]],
+      leafKnnDistanceP95: { "0": Number.POSITIVE_INFINITY, "1": Number.POSITIVE_INFINITY },
+      transform: { method: "pca-knn-barycentric", neighbors: 1 }
+    },
     timings: {},
     embeddingProvider: "local",
     embeddingModel: "m",
@@ -86,6 +100,7 @@ test("soft refresh reuses the hierarchy and marks a newly placed note provisiona
     notes,
     vectorsByPath: new Map([["a.md", [1, 0]], ["b.md", [0, 1]], ["new.md", [0.98, 0.1]]]),
     existingCoordinates: new Map([["a.md", [1, 0]], ["b.md", [0, 1]]]),
+    existingUmapCoordinates: new Map([["a.md", [0, 0]], ["b.md", [10, 0]]]),
     changedPaths: new Set(["new.md"]),
     deletedPaths: new Set(),
     provider: "local",
@@ -97,6 +112,36 @@ test("soft refresh reuses the hierarchy and marks a newly placed note provisiona
   assert.equal(refreshed.result.incremental.mode, "soft");
   assert.equal(refreshed.result.visualization, undefined);
   assert.deepEqual(refreshed.projectedPaths, ["new.md"]);
+  assert.equal(refreshed.result.umap.coordinates.length, 3);
+  assert.equal(refreshed.result.incremental.outOfDistributionPaths, undefined);
+});
+
+test("soft refresh uses UMAP-space votes and leaves an OOD point provisional", async () => {
+  const { buildSoftRefresh } = await loadIncremental();
+  const result = baseResult();
+  result.umap = { ...result.umap, nNeighbors: 2, transform: { method: "pca-knn-barycentric", neighbors: 2 } };
+  const notes = [
+    { path: "a.md", title: "A", content: "a", mtime: 1, hash: "a" },
+    { path: "b.md", title: "B", content: "b", mtime: 1, hash: "b" },
+    { path: "new.md", title: "New", content: "new", mtime: 2, hash: "new" }
+  ];
+  const refreshed = buildSoftRefresh({
+    result,
+    notes,
+    vectorsByPath: new Map([["new.md", [0.5, 0.5]]]),
+    existingCoordinates: new Map([["a.md", [1, 0]], ["b.md", [0, 1]]]),
+    existingUmapCoordinates: new Map([["a.md", [0, 0]], ["b.md", [10, 0]]]),
+    changedPaths: new Set(["new.md"]),
+    provider: "local",
+    model: "m",
+    minSupport: 0.55,
+    minProbability: 0.35
+  });
+  assert.equal(refreshed.result.leafLabels[2], -1);
+  assert.deepEqual(refreshed.result.incremental.outOfDistributionPaths, ["new.md"]);
+  assert.equal(refreshed.result.incremental.fullRebuildRecommended, true, "a tiny fixture crosses the provisional/OOD growth guard");
+  assert.equal(refreshed.result.outlierProxy[2], 1);
+  assert.equal(refreshed.result.memberships[2][0] >= 0, true);
 });
 
 test("path-only rename mapping follows chained renames without changing row count", async () => {

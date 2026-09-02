@@ -94,6 +94,20 @@ function v6Result() {
       { kind: "residual", nodeId: null, confidence: 0 }
     ],
     titles: { "0": "Old leaf", "2": "Old root" },
+    umap: {
+      modelHash: "umap-hash",
+      sourcePcaModelHash: "pca-hash",
+      runtime: "umap-js",
+      inputDimension: 2,
+      outputDimension: 2,
+      nNeighbors: 2,
+      minDist: 0.1,
+      spread: 1,
+      seed: 42,
+      coordinates: [[0, 0], [1, 1], [2, 2]],
+      leafKnnDistanceP95: { "0": 0.75, "1": Infinity },
+      transform: { method: "pca-knn-barycentric", neighbors: 2 }
+    },
     timings: {}
   };
 }
@@ -157,6 +171,9 @@ test("v6 hierarchy nodes, ordered children, root children, memberships, and plac
   assert.deepEqual(hydrated.ids, result.ids);
   assert.deepEqual(hydrated.hierarchy, result.hierarchy);
   assert.deepEqual(hydrated.hierarchyPlacements, result.hierarchyPlacements);
+  assert.deepEqual(hydrated.umap.coordinates, result.umap.coordinates);
+  assert.equal(hydrated.umap.leafKnnDistanceP95["0"], 0.75);
+  assert.equal(hydrated.umap.leafKnnDistanceP95["1"], Infinity, "singleton p95 must survive JSON null encoding");
   store.close();
 });
 

@@ -130,6 +130,30 @@ export interface PcaModelArtifact {
   model?: string;
 }
 
+/**
+ * Durable UMAP state used by incremental placement.  The production UMAP
+ * implementation is fit only during a full build.  Its row-aligned output is
+ * retained so a changed note can be projected through a bounded kNN transform
+ * and assigned against the same UMAP space without changing the saved map.
+ */
+export interface UmapProjectionArtifact {
+  modelHash: string;
+  sourcePcaModelHash?: string;
+  runtime: "umap-js" | string;
+  inputDimension: number;
+  outputDimension: number;
+  nNeighbors: number;
+  minDist: number;
+  spread: number;
+  seed: number;
+  /** Row-aligned UMAP coordinates, usually the 20D clustering space. */
+  coordinates: number[][];
+  /** Per-leaf p95 distance to the in-leaf kNN boundary. */
+  leafKnnDistanceP95: Record<string, number>;
+  /** The persisted transform seam used for changed/new points. */
+  transform?: { method: "pca-knn-barycentric"; neighbors: number };
+}
+
 export type VisualizationCoordinate = [number, number];
 
 export interface VisualizationConfiguration {
@@ -205,6 +229,11 @@ export interface IncrementalRefreshMetadata {
   reason?: string;
   cumulativeChangedCount?: number;
   lastFullRebuildAt?: string;
+  /** Changed notes rejected by the UMAP-space confidence/OOD gates. */
+  outOfDistributionPaths?: string[];
+  /** Diagnostics for explaining why a provisional placement was made. */
+  knnSupport?: Record<string, number>;
+  knnDistance?: Record<string, number>;
 }
 
 export type ClusterTitleStatus = "generated" | "empty";
@@ -246,6 +275,8 @@ export interface ClusterResult {
   /** Embedding space used by this structural result. */
   embeddingProvider?: string;
   embeddingModel?: string;
+  /** Saved 20D UMAP coordinates and the transform/gating metadata. */
+  umap?: UmapProjectionArtifact;
   /** Paths placed with the saved structure but not yet included in a full rebuild. */
   provisionalPaths?: string[];
   incremental?: IncrementalRefreshMetadata;

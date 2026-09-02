@@ -33,6 +33,7 @@ interface PreparedIncrementalChanges {
   deletedPaths: Set<string>;
   renames: Map<string, string>;
   existingCoordinates: Map<string, number[]>;
+  existingUmapCoordinates: Map<string, number[]>;
   pathOnly: boolean;
 }
 
@@ -528,12 +529,17 @@ export default class AtomicClustersPlugin extends Plugin {
       if (entries.get(`${provider.id}:${provider.model}:${cachePath}`)?.hash !== note.hash) changedPaths.add(note.path);
     }
     const existingCoordinates = new Map<string, number[]>();
+    const existingUmapCoordinates = new Map<string, number[]>();
     const modelHash = result?.pca.model?.modelHash;
     if (modelHash && result) {
       const coordinates = await sqlite.getPcaCoordinatesMany(result.ids, modelHash);
       result.ids.forEach((path, index) => { const coordinate = coordinates[index]; if (coordinate) existingCoordinates.set(path, coordinate); });
     }
-    return { notes, result, provider, noteHashes: new Map(notes.map((note) => [note.path, note.hash])), changedPaths, deletedPaths, renames, existingCoordinates, pathOnly: changedPaths.size === 0 && deletedPaths.size === 0 && renames.size > 0 };
+    if (result && result.umap?.coordinates.length === result.ids.length) result.ids.forEach((path, index) => {
+      const coordinate = result.umap?.coordinates[index];
+      if (coordinate) existingUmapCoordinates.set(path, coordinate);
+    });
+    return { notes, result, provider, noteHashes: new Map(notes.map((note) => [note.path, note.hash])), changedPaths, deletedPaths, renames, existingCoordinates, existingUmapCoordinates, pathOnly: changedPaths.size === 0 && deletedPaths.size === 0 && renames.size > 0 };
   }
 
   private async applyIncrementalRefresh(prepared: PreparedIncrementalChanges): Promise<void> {
@@ -590,11 +596,13 @@ export default class AtomicClustersPlugin extends Plugin {
       const vectorsByPath = new Map<string, number[]>();
       for (const note of prepared.notes) { const cachedEntry = cached(note); if (!cachedEntry) throw new Error(`Embedding cache is incomplete for ${note.path}.`); vectorsByPath.set(note.path, cachedEntry.vector); }
       const existingCoordinates = new Map(prepared.existingCoordinates);
+      const existingUmapCoordinates = new Map(prepared.existingUmapCoordinates);
       for (const [oldPath, newPath] of appliedRenames) { const coordinate = existingCoordinates.get(oldPath); if (coordinate) existingCoordinates.set(newPath, coordinate); existingCoordinates.delete(oldPath); }
+      for (const [oldPath, newPath] of appliedRenames) { const coordinate = existingUmapCoordinates.get(oldPath); if (coordinate) existingUmapCoordinates.set(newPath, coordinate); existingUmapCoordinates.delete(oldPath); }
       const changedPaths = new Set([...prepared.changedPaths].map((path) => appliedRenames.get(path) || path));
       const deletedPaths = new Set(prepared.deletedPaths); for (const oldPath of appliedRenames.keys()) deletedPaths.delete(oldPath);
       if (currentResult.pca.model) currentResult = { ...currentResult, pca: { ...currentResult.pca, model: { ...currentResult.pca.model, provider: prepared.provider.id, model: prepared.provider.model } } };
-      const soft = buildSoftRefresh({ result: currentResult, notes: prepared.notes, vectorsByPath, existingCoordinates, changedPaths, deletedPaths, provider: prepared.provider.id, model: prepared.provider.model });
+      const soft = buildSoftRefresh({ result: currentResult, notes: prepared.notes, vectorsByPath, existingCoordinates, existingUmapCoordinates, changedPaths, deletedPaths, provider: prepared.provider.id, model: prepared.provider.model });
       if (soft.projectedPaths.length && soft.result.pca.model) await sqlite.projectMany(soft.projectedPaths.map((path) => ({ path, vector: vectorsByPath.get(path)! })), soft.result.pca.model);
       const resultId = await sqlite.saveResult(soft.result, { noteHashes: prepared.noteHashes }); this.latestResultId = resultId; this.setLatestResult(soft.result); await this.publishResult(soft.result);
       persistedRunLog = { ...persistedRunLog, completedAt: new Date().toISOString(), stage: "clustering" }; await sqlite.saveEmbeddingLog(persistedRunLog);

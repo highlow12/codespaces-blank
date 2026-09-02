@@ -98,11 +98,14 @@ disabled and progress remains in the persistent Notice.
 When **Automatic refresh** is enabled, Markdown create/modify/delete/rename
 events are debounced (5 seconds by default, with a 60-second cap). Only notes
 whose content hash changed are embedded. Same-content renames move the cached
-path and PCA row, while small edits reuse the saved PCA and hierarchy as
-provisional placements. The Explorer labels those placements and the refresh
-policy schedules a full rebuild when its change, deletion, cumulative, or
-provisional thresholds are exceeded. **Refresh changed notes** runs the same
-path manually; **Rebuild all clusters** always uses the complete WASM pipeline.
+path and PCA/UMAP rows, while small edits reuse the saved PCA transform and
+20-dimensional UMAP coordinates. A changed note is projected with the saved
+PCA-to-UMAP kNN transform and admitted only when probability-weighted UMAP
+neighbour votes clear support, per-leaf p95 distance, and confidence gates.
+Low-confidence and out-of-distribution notes remain provisional; accumulated
+provisional/OOD growth schedules a full rebuild. The Explorer labels those
+placements. **Refresh changed notes** runs the same path manually; **Rebuild
+all clusters** always uses the complete WASM pipeline.
 
 When the local provider is selected, **Test local runtime** verifies the
 installed model, bundled renderer-safe ORT assets, ONNX session initialization,

@@ -273,6 +273,10 @@ function compactV6Result(result: ClusterResult): string {
     titleGeneration: result.titleGeneration,
     embeddingProvider: result.embeddingProvider,
     embeddingModel: result.embeddingModel,
+    // UMAP coordinates are the durable insertion space. They are kept in the
+    // compact metadata JSON because they must remain row-aligned with the
+    // result even when the optional 2D visualization is lazily regenerated.
+    umap: result.umap,
     incremental: result.incremental ? { ...result.incremental, provisionalPaths: [] } : undefined,
     visualization: result.visualization ? { configuration: result.visualization.configuration, timings: result.visualization.timings } : undefined,
     _normalizedV6: { memberships: !!(result.softMemberships || result.memberships), softMemberships: !!result.softMemberships, titles: result.titles !== undefined }
@@ -336,6 +340,12 @@ export function validateClusterResultAlignment(result: ClusterResult): void {
   }
   if (result.visualization && (result.visualization.coordinates.length !== n || result.visualization.labels.length !== n)) throw new Error("Cluster visualization must align with ids");
   if (result.visualization?.coordinates.some((point) => point.length !== 2 || point.some((value) => !Number.isFinite(value)))) throw new Error("Cluster visualization coordinates must be finite 2D points");
+  if (result.umap) {
+    if (result.umap.coordinates.length !== n) throw new Error("Saved UMAP coordinates must align with ids");
+    if (!Number.isSafeInteger(result.umap.inputDimension) || result.umap.inputDimension < 1 || !Number.isSafeInteger(result.umap.outputDimension) || result.umap.outputDimension < 1) throw new Error("Saved UMAP dimensions are invalid");
+    if (result.umap.coordinates.some((row) => row.length !== result.umap!.outputDimension || row.some((value) => !Number.isFinite(value)))) throw new Error("Saved UMAP coordinates must be finite and rectangular");
+    if (Object.values(result.umap.leafKnnDistanceP95 || {}).some((value) => !Number.isFinite(value) && value !== Number.POSITIVE_INFINITY || Number(value) < 0)) throw new Error("Saved UMAP leaf kNN envelopes are invalid");
+  }
 }
 
 /** Write a converted result while the open-time migration transaction is held. */
@@ -657,6 +667,13 @@ export class SqliteClusterStore {
     const points = this.getVisualization(id); const visualizationMetadata = stored.visualization;
     const titles = Object.fromEntries(this.query("SELECT node_id AS nodeId,title FROM cluster_titles WHERE result_id=? ORDER BY node_id", [id]).map((item) => [String(item.nodeId), String(item.title)]));
     const pcaStub = stored.pca.model as unknown as { modelHash?: string } | undefined; const pcaModel = pcaStub?.modelHash ? await this.getPcaModel(pcaStub.modelHash) : undefined;
+    const umap = stored.umap ? {
+      ...stored.umap,
+      // JSON encodes an infinite singleton-leaf p95 as null. Restore the
+      // sentinel so a singleton remains an intentionally open distance gate
+      // after a SQLite round trip instead of becoming a zero-radius leaf.
+      leafKnnDistanceP95: Object.fromEntries(Object.entries(stored.umap.leafKnnDistanceP95 || {}).map(([leaf, value]) => [leaf, value == null ? Number.POSITIVE_INFINITY : Number(value)])),
+    } : undefined;
     return {
       schemaVersion: 6,
       ids,
@@ -674,6 +691,7 @@ export class SqliteClusterStore {
       ...(stored.titleGeneration ? { titleGeneration: stored.titleGeneration } : {}),
       ...(stored.embeddingProvider ? { embeddingProvider: String(stored.embeddingProvider) } : {}),
       ...(stored.embeddingModel ? { embeddingModel: String(stored.embeddingModel) } : {}),
+      ...(umap ? { umap } : {}),
       ...(provisionalPaths.length ? { provisionalPaths } : {}),
       ...(stored.incremental ? { incremental: { ...stored.incremental, provisionalPaths } } : {}),
       timings: stored.timings || {}
