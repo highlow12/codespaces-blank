@@ -51,6 +51,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private runAbortController: AbortController | null = null;
   private sqliteStore: SqliteClusterStore | null = null;
   private latestResultId: string | null = null;
+  private explorerSearchNotes: NoteRecord[] = [];
   private resultRevision = 0;
   private readonly visualizationPromises = new WeakMap<readonly string[], Promise<ClusterVisualization>>();
   private pendingVaultChanges: VaultChangeQueue | null = null;
@@ -76,12 +77,13 @@ export default class AtomicClustersPlugin extends Plugin {
       // saved visualization rather than an empty placeholder.
       this.latestResult = await sqlite.getResult();
       this.latestResultId = await sqlite.getLatestResultId();
+      this.explorerSearchNotes = await sqlite.listNotes(true);
     }
     catch (error) { new Notice(`Atomic Clusters SQLite storage unavailable: ${safeRunError(error)}`); }
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.pendingVaultChanges = new VaultChangeQueue({ delayMs: this.refreshDelayMs(), maxDelayMs: 60000, onReady: () => { void this.processPendingVaultChanges(); } });
     this.registerVaultChangeListeners();
-    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters(), this.latestResult, (result) => this.ensureVisualization(result)));
+    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters(), this.latestResult, (result) => this.ensureVisualization(result), this.explorerSearchNotes));
     this.registerHoverLinkSource(VIEW_TYPE_CLUSTER_EXPLORER, { display: "Atomic Clusters", defaultMod: false });
     this.addRibbonIcon("scatter-chart", "Open Cluster Explorer", () => void this.openExplorer());
     this.addCommand({ id: "build-note-clusters", name: "Build note clusters", callback: () => void this.buildClusters() });
@@ -701,7 +703,10 @@ export default class AtomicClustersPlugin extends Plugin {
     }
   }
   private setLatestResult(result: ClusterResult): void { this.latestResult = result; this.resultRevision++; }
-  private async publishResult(result: ClusterResult): Promise<void> { for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setResult(result); }
+  private async publishResult(result: ClusterResult): Promise<void> {
+    try { this.explorerSearchNotes = await (await this.getSqliteStore()).listNotes(true); } catch { /* Search still works from paths and titles when note bodies are unavailable. */ }
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) { const view = leaf.view as ClusterExplorerView; view.setSearchNotes(this.explorerSearchNotes); view.setResult(result); }
+  }
   private publishPendingChangeCount(): void { const count = this.pendingVaultChanges?.size || 0; for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setPendingChangeCount(count); }
   private updateProgress(phase: string, progress: number): void { this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER).forEach((leaf) => { const view = leaf.view as ClusterExplorerView; view.contentEl.setAttribute("aria-label", `${phase} ${Math.round(progress * 100)}%`); view.setProgress(phase, progress); }); }
   private async saveSettings(): Promise<void> { await this.saveData(this.settings); }

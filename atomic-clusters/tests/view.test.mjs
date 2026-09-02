@@ -90,6 +90,27 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(css, /@media \(max-width: 640px\)/);
 });
 
+test("Explorer renders local search, combinable filters, and focus controls", async () => {
+  const view = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(view, /atomic-clusters-search-input/);
+  assert.match(view, /parseSearchQuery|SearchIndex/);
+  assert.match(view, /tag|path|cluster/);
+  assert.match(view, /Current cluster/);
+  assert.match(view, /Manually adjusted/);
+  assert.match(view, /Recently changed/);
+  assert.match(view, /setFocusNode|focusCluster/);
+  assert.match(view, /Previous sibling/);
+  assert.match(view, /Exit focus/);
+  assert.match(view, /event\.key === "Escape"/);
+  assert.match(view, /event\.key === "Enter"/);
+  assert.match(view, /ArrowDown/);
+  assert.match(view, /event\.key === "\/"/);
+  assert.match(view, /event\.ctrlKey/);
+  assert.match(css, /\.atomic-clusters-search-panel/);
+  assert.match(css, /\.atomic-clusters-search-dimmed/);
+});
+
 test("restored explorer views can render the persisted result on first open", async () => {
   const view = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
   const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
