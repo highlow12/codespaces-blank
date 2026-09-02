@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { build } from "esbuild";
 
 async function loadWasmKernel() {
@@ -36,17 +36,11 @@ test("WASM PCA and HDBSCAN satisfy the Python golden shape/value contract", asyn
   assert.deepEqual(result.outlierProxy, hdbscan.expected_outlier_proxy);
 });
 
-test("Pyodide worker invokes cluster_documents through an injected discovery seam", async () => {
-  const source = await readFile(new URL("../src/pyodide-worker.ts", import.meta.url), "utf8");
-  const client = await readFile(new URL("../src/pyodide-worker-client.ts", import.meta.url), "utf8");
-  assert.match(source, /loadPyodide/);
-  assert.match(source, /cluster_documents\(embeddings, ids=ids, config=config, discovery_runner=runner\)/);
-  assert.match(source, /discoverPcaFeatures/);
-  assert.match(source, /buildHierarchy/);
-  assert.match(source, /computeHierarchyPlacements/);
-  assert.match(source, /pluginResult\.schemaVersion = 6/);
-  assert.match(source, /runtime\.FS\.writeFile/);
-  assert.match(client, /class PyodideClusteringWorker/);
-  assert.match(client, /type: "INIT"/);
-  assert.match(client, /type: "CLUSTER"/);
+test("the plugin source keeps the Python reference external", async () => {
+  const sourceNames = await readdir(new URL("../src/", import.meta.url));
+  const types = await Promise.all(sourceNames.filter((name) => name.endsWith(".ts")).map((name) => readFile(new URL(`../src/${name}`, import.meta.url), "utf8")));
+  assert.ok(types.length > 0);
+  assert.ok(types.every((source) => !/pyodide/i.test(source)));
+  const pythonReference = await readFile(new URL("../../pyodide_core/atomic_clustering/__init__.py", import.meta.url), "utf8");
+  assert.match(pythonReference, /cluster_documents/);
 });

@@ -34,7 +34,7 @@ test("PCA projection normalizes, centers, and multiplies components transpose", 
 
 test("schema declares immutable embeddings, PCA, normalized result relations, views, and migrations", async () => {
   const source = await readFile(new URL("../src/sqlite-storage.ts", import.meta.url), "utf8");
-  for (const relation of ["notes", "embeddings", "pca_models", "pca_coordinates", "assignments", "hierarchy_merges", "cluster_titles", "soft_memberships", "embedding_logs", "migrations"]) assert.match(source, new RegExp(`CREATE TABLE IF NOT EXISTS ${relation}`));
+  for (const relation of ["notes", "embeddings", "pca_models", "pca_coordinates", "results", "result_note_hashes", "assignments", "hierarchy_merges", "cluster_titles", "soft_memberships", "embedding_logs", "migrations"]) assert.match(source, new RegExp(`CREATE TABLE IF NOT EXISTS ${relation}`));
   for (const view of ["v_current_embeddings", "v_note_pca", "v_cluster_assignments", "v_embedding_log"]) assert.match(source, new RegExp(`CREATE VIEW IF NOT EXISTS ${view}`));
   assert.match(source, /BEGIN IMMEDIATE/); assert.match(source, /ROLLBACK/); assert.match(source, /INSERT INTO migrations/);
 });

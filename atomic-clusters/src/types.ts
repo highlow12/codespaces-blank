@@ -14,11 +14,12 @@ export interface PluginSettings {
   umapNeighbors: number;
   umapMinDist: number;
   pcaVarianceTarget: number;
-  /** Optional Python reference runtime; WASM remains the desktop default. */
-  clusteringRuntime?: "wasm" | "pyodide";
-  pyodideUrl?: string;
   /** Generate titles for every leaf and merge node after a successful build. */
   clusterTitlesEnabled?: boolean;
+  /** Watch Markdown vault events and refresh changed notes after a short delay. */
+  automaticRefresh?: boolean;
+  /** Debounce delay for automatic refresh, in seconds. */
+  refreshDelaySeconds?: number;
 }
 
 export interface NoteRecord {
@@ -124,6 +125,33 @@ export interface PcaModelArtifact {
   mean: number[];
   components: number[][];
   explainedVariance: number[];
+  /** Embedding-space metadata used to decide whether PCA can be reused. */
+  provider?: string;
+  model?: string;
+}
+
+/**
+ * Durable UMAP state used by incremental placement.  The production UMAP
+ * implementation is fit only during a full build.  Its row-aligned output is
+ * retained so a changed note can be projected through a bounded kNN transform
+ * and assigned against the same UMAP space without changing the saved map.
+ */
+export interface UmapProjectionArtifact {
+  modelHash: string;
+  sourcePcaModelHash?: string;
+  runtime: "umap-js" | string;
+  inputDimension: number;
+  outputDimension: number;
+  nNeighbors: number;
+  minDist: number;
+  spread: number;
+  seed: number;
+  /** Row-aligned UMAP coordinates, usually the 20D clustering space. */
+  coordinates: number[][];
+  /** Per-leaf p95 distance to the in-leaf kNN boundary. */
+  leafKnnDistanceP95: Record<string, number>;
+  /** The persisted transform seam used for changed/new points. */
+  transform?: { method: "pca-knn-barycentric"; neighbors: number };
 }
 
 export type VisualizationCoordinate = [number, number];
@@ -189,6 +217,25 @@ export interface HierarchyPlacement {
   confidence: number;
 }
 
+export type IncrementalRefreshMode = "full" | "soft" | "no-op";
+
+/** Durable status for the last refresh. It contains no note content or vectors. */
+export interface IncrementalRefreshMetadata {
+  mode: IncrementalRefreshMode;
+  generatedAt: string;
+  changedPaths: string[];
+  provisionalPaths: string[];
+  fullRebuildRecommended: boolean;
+  reason?: string;
+  cumulativeChangedCount?: number;
+  lastFullRebuildAt?: string;
+  /** Changed notes rejected by the UMAP-space confidence/OOD gates. */
+  outOfDistributionPaths?: string[];
+  /** Diagnostics for explaining why a provisional placement was made. */
+  knnSupport?: Record<string, number>;
+  knnDistance?: Record<string, number>;
+}
+
 export type ClusterTitleStatus = "generated" | "empty";
 
 /** Metadata persisted with a v3 result. It intentionally contains no note text. */
@@ -225,10 +272,18 @@ export interface ClusterResult {
   /** Node id (leaf label or merge id) to the normalized display title. */
   titles?: Record<string, string>;
   titleGeneration?: ClusterTitleGeneration;
+  /** Embedding space used by this structural result. */
+  embeddingProvider?: string;
+  embeddingModel?: string;
+  /** Saved 20D UMAP coordinates and the transform/gating metadata. */
+  umap?: UmapProjectionArtifact;
+  /** Paths placed with the saved structure but not yet included in a full rebuild. */
+  provisionalPaths?: string[];
+  incremental?: IncrementalRefreshMetadata;
 }
 
 export type WorkerRequest =
-  | { type: "INIT"; version: 1; pyodideUrl?: string; indexURL?: string }
+  | { type: "INIT"; version: 1 }
   | { type: "CLUSTER"; jobId: string; ids: string[]; embeddings: number[][]; config: ClusteringConfig }
   | { type: "CANCEL"; jobId?: string };
 
@@ -237,8 +292,3 @@ export type WorkerResponse =
   | { type: "PROGRESS"; jobId: string; phase: string; progress: number }
   | { type: "RESULT"; jobId: string; result: ClusterResult }
   | { type: "ERROR"; jobId?: string; code: string; message: string };
-
-export interface PyodideClusterResult extends ClusterResult {
-  /** Raw JSON-friendly result emitted by pyodide_core.cluster_documents. */
-  pyodide?: Record<string, unknown>;
-}

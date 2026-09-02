@@ -100,6 +100,9 @@ test("restored explorer views can render the persisted result on first open", as
   assert.match(main, /deferVisualization: true/);
   assert.match(main, /getPcaCoordinatesMany\(result\.ids, modelHash\)/);
   assert.match(main, /patchResultVisualization\(resultId, visualization\)/);
+  assert.match(main, /resultRevision/);
+  assert.match(main, /requestedResult === result && current === result/);
+  assert.match(main, /this\.resultRevision !== requestedRevision/);
 });
 
 test("v6 results without UMAP schedule one idle visualization preparation and apply a returned visualization", async () => {

@@ -42,7 +42,7 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS notes (
   path TEXT PRIMARY KEY, title TEXT NOT NULL, mtime INTEGER NOT NULL,
-  content_hash TEXT NOT NULL, content TEXT
+  content_hash TEXT NOT NULL, content TEXT, active INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE IF NOT EXISTS embeddings (
   path TEXT NOT NULL, provider TEXT NOT NULL, model TEXT NOT NULL,
@@ -67,9 +67,15 @@ CREATE TABLE IF NOT EXISTS results (
   result_id TEXT PRIMARY KEY, schema_version INTEGER NOT NULL, created_at TEXT NOT NULL,
   result_json TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS result_note_hashes (
+  result_id TEXT NOT NULL, path TEXT NOT NULL, content_hash TEXT NOT NULL,
+  PRIMARY KEY(result_id, path),
+  FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE,
+  FOREIGN KEY(path) REFERENCES notes(path) ON DELETE CASCADE
+);
 CREATE TABLE IF NOT EXISTS assignments (
   result_id TEXT NOT NULL, path TEXT NOT NULL, leaf_label INTEGER NOT NULL,
-  probability REAL NOT NULL, outlier_score REAL NOT NULL, PRIMARY KEY(result_id, path),
+  probability REAL NOT NULL, outlier_score REAL NOT NULL, provisional INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(result_id, path),
   FOREIGN KEY(result_id) REFERENCES results(result_id) ON DELETE CASCADE,
   FOREIGN KEY(path) REFERENCES notes(path) ON DELETE CASCADE
 );
@@ -137,7 +143,8 @@ CREATE VIEW IF NOT EXISTS v_current_embeddings AS
     e.embedding_hash, e.note_content_hash, e.dimension, e.vector_json, e.created_at
   FROM embeddings e JOIN notes n USING(path)
   WHERE e.rowid = (SELECT MAX(e2.rowid) FROM embeddings e2
-                   WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model);
+                   WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model)
+    AND n.active=1;
 CREATE VIEW IF NOT EXISTS v_note_pca AS
   SELECT c.path, n.title, n.mtime, n.content_hash, c.model_hash, c.coordinates_json
   FROM pca_coordinates c JOIN notes n USING(path);
@@ -260,10 +267,17 @@ function compactV6Result(result: ClusterResult): string {
   const modelHash = result.pca.model?.modelHash;
   return JSON.stringify({
     schemaVersion: 6,
-    pca: { ...result.pca, model: modelHash ? { modelHash } : undefined },
+    pca: { ...result.pca, model: modelHash ? { modelHash, provider: result.pca.model?.provider, model: result.pca.model?.model } : undefined },
     hierarchy: { root: result.hierarchy.root, splitMethod: result.hierarchy.splitMethod },
     timings: result.timings,
     titleGeneration: result.titleGeneration,
+    embeddingProvider: result.embeddingProvider,
+    embeddingModel: result.embeddingModel,
+    // UMAP coordinates are the durable insertion space. They are kept in the
+    // compact metadata JSON because they must remain row-aligned with the
+    // result even when the optional 2D visualization is lazily regenerated.
+    umap: result.umap,
+    incremental: result.incremental ? { ...result.incremental, provisionalPaths: [] } : undefined,
     visualization: result.visualization ? { configuration: result.visualization.configuration, timings: result.visualization.timings } : undefined,
     _normalizedV6: { memberships: !!(result.softMemberships || result.memberships), softMemberships: !!result.softMemberships, titles: result.titles !== undefined }
   });
@@ -326,17 +340,24 @@ export function validateClusterResultAlignment(result: ClusterResult): void {
   }
   if (result.visualization && (result.visualization.coordinates.length !== n || result.visualization.labels.length !== n)) throw new Error("Cluster visualization must align with ids");
   if (result.visualization?.coordinates.some((point) => point.length !== 2 || point.some((value) => !Number.isFinite(value)))) throw new Error("Cluster visualization coordinates must be finite 2D points");
+  if (result.umap) {
+    if (result.umap.coordinates.length !== n) throw new Error("Saved UMAP coordinates must align with ids");
+    if (!Number.isSafeInteger(result.umap.inputDimension) || result.umap.inputDimension < 1 || !Number.isSafeInteger(result.umap.outputDimension) || result.umap.outputDimension < 1) throw new Error("Saved UMAP dimensions are invalid");
+    if (result.umap.coordinates.some((row) => row.length !== result.umap!.outputDimension || row.some((value) => !Number.isFinite(value)))) throw new Error("Saved UMAP coordinates must be finite and rectangular");
+    if (Object.values(result.umap.leafKnnDistanceP95 || {}).some((value) => !Number.isFinite(value) && value !== Number.POSITIVE_INFINITY || Number(value) < 0)) throw new Error("Saved UMAP leaf kNN envelopes are invalid");
+  }
 }
 
 /** Write a converted result while the open-time migration transaction is held. */
 function persistMigratedResult(db: SqlDatabase, result: ClusterResult, resultId: string, now: string, pcaJsonRequired: boolean): void {
   validateClusterResultAlignment(result);
   const pcaModel = result.pca.model;
-  if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, null, null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), now]);
-  db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
+  if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, pcaModel.provider || null, pcaModel.model || null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), now]);
+  db.run("DELETE FROM result_note_hashes WHERE result_id=?", [resultId]); db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
   result.ids.forEach((path, index) => {
     db.run("INSERT OR IGNORE INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?)", [path, path.split("/").pop() || path, 0, "legacy", null]);
-    db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score) VALUES(?,?,?,?,?)", [resultId, path, result.leafLabels[index], result.probabilities[index], result.outlierProxy[index]]);
+    const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []);
+    db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score,provisional) VALUES(?,?,?,?,?,?)", [resultId, path, result.leafLabels[index], result.probabilities[index], result.outlierProxy[index], provisional.has(path) ? 1 : 0]);
   });
   result.hierarchy.leaves.forEach((leaf, ordinal) => db.run("INSERT INTO hierarchy_leaves(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
   (result.leafOrder || result.leafOrdering || result.hierarchy.leaves).forEach((leaf, ordinal) => db.run("INSERT INTO leaf_order(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
@@ -378,6 +399,9 @@ export class SqliteClusterStore {
     // note-content column. Keep opening them safe and let the next write
     // populate the richer immutable embedding records.
     for (const statement of [
+      "ALTER TABLE notes ADD COLUMN content TEXT",
+      "ALTER TABLE notes ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+      "ALTER TABLE assignments ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0",
       "ALTER TABLE embeddings ADD COLUMN note_content_hash TEXT NOT NULL DEFAULT ''",
       "ALTER TABLE embeddings ADD COLUMN vector_blob BLOB",
       "ALTER TABLE pca_models ADD COLUMN mean_blob BLOB",
@@ -385,6 +409,10 @@ export class SqliteClusterStore {
       "ALTER TABLE pca_models ADD COLUMN explained_variance_blob BLOB",
       "ALTER TABLE pca_coordinates ADD COLUMN coordinate_blob BLOB",
     ]) try { this.db.run(statement); } catch { /* idempotent migration */ }
+    // CREATE VIEW IF NOT EXISTS does not replace a view created by an older
+    // plugin build, so refresh the active-only cache view after adding the
+    // note activity flag.
+    try { this.db.run("DROP VIEW IF EXISTS v_current_embeddings"); this.db.run(SCHEMA); } catch { /* retain the already-open schema */ }
     const requires = (table: string, columns: string[]): boolean => {
       const info = this.db.exec(`PRAGMA table_info(${table})`)[0]?.values || [];
       return info.some((row) => columns.includes(String(row[1])) && Number(row[3]) === 1);
@@ -485,10 +513,46 @@ export class SqliteClusterStore {
   }
 
   async upsertNote(note: NoteRecord): Promise<void> {
-    await this.transaction((db) => db.run("INSERT INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content", [note.path, note.title, note.mtime, note.hash, note.content]));
+    await this.transaction((db) => db.run("INSERT INTO notes(path,title,mtime,content_hash,content,active) VALUES(?,?,?,?,?,1) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content,active=1", [note.path, note.title, note.mtime, note.hash, note.content]));
   }
   async upsertNotes(notes: NoteRecord[]): Promise<void> {
-    await this.transaction((db) => { for (const note of notes) db.run("INSERT INTO notes(path,title,mtime,content_hash,content) VALUES(?,?,?,?,?) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content", [note.path, note.title, note.mtime, note.hash, note.content]); });
+    await this.transaction((db) => { for (const note of notes) db.run("INSERT INTO notes(path,title,mtime,content_hash,content,active) VALUES(?,?,?,?,?,1) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content,active=1", [note.path, note.title, note.mtime, note.hash, note.content]); });
+  }
+  /** Synchronize the active note set without deleting historical cache rows. */
+  async syncActiveNotes(notes: NoteRecord[]): Promise<void> {
+    await this.transaction((db) => {
+      db.run("UPDATE notes SET active=0");
+      for (const note of notes) db.run("INSERT INTO notes(path,title,mtime,content_hash,content,active) VALUES(?,?,?,?,?,1) ON CONFLICT(path) DO UPDATE SET title=excluded.title,mtime=excluded.mtime,content_hash=excluded.content_hash,content=excluded.content,active=1", [note.path, note.title, note.mtime, note.hash, note.content]);
+    });
+  }
+  async listNoteMetadata(activeOnly = false): Promise<Array<{ path: string; hash: string; mtime: number; active: boolean; content?: string }>> {
+    this.requireOpen();
+    const rows = this.query(`SELECT path,content_hash AS hash,mtime,active,content FROM notes${activeOnly ? " WHERE active=1" : ""} ORDER BY path`);
+    return rows.map((row) => ({ path: String(row.path), hash: String(row.hash), mtime: Number(row.mtime), active: Number(row.active) !== 0, content: row.content == null ? undefined : String(row.content) }));
+  }
+  async listNotes(activeOnly = false): Promise<NoteRecord[]> {
+    this.requireOpen();
+    const rows = this.query(`SELECT path,title,mtime,content_hash AS hash,content FROM notes${activeOnly ? " WHERE active=1" : ""} ORDER BY path`);
+    return rows.map((row) => ({ path: String(row.path), title: String(row.title), mtime: Number(row.mtime), hash: String(row.hash), content: row.content == null ? "" : String(row.content) }));
+  }
+  /** Move all path-keyed cache and result rows in one transaction. */
+  async renameNote(oldPath: string, newPath: string): Promise<boolean> {
+    if (!oldPath || !newPath || oldPath === newPath) return oldPath === newPath;
+    return this.transaction((db) => {
+      const oldRows = db.exec(`SELECT path FROM notes WHERE path=${sqlQuote(oldPath)}`);
+      const newRows = db.exec(`SELECT path FROM notes WHERE path=${sqlQuote(newPath)}`);
+      // A previous refresh may have moved the normalized rows successfully
+      // and failed only while publishing the compact result. Treat the same
+      // rename as already applied so the queued event can be retried safely.
+      if (!oldRows[0]?.values.length) return !!newRows[0]?.values.length;
+      if (newRows[0]?.values.length) return false;
+      // Child rows must move before the referenced parent row while foreign
+      // keys are enabled. The target was checked above, so each update keeps
+      // its table's primary key unique.
+      for (const table of ["embeddings", "pca_coordinates", "result_note_hashes", "assignments", "visualization_points", "soft_memberships", "membership_rows", "hierarchy_placements"]) db.run(`UPDATE ${table} SET path=? WHERE path=?`, [newPath, oldPath]);
+      db.run("UPDATE notes SET path=? WHERE path=?", [newPath, oldPath]);
+      return true;
+    });
   }
   async putEmbedding(entry: CachedEmbedding): Promise<string> {
     const hash = await embeddingHash(entry.vector);
@@ -509,7 +573,7 @@ export class SqliteClusterStore {
   }
   async getEmbedding(path: string, provider: string, model: string, noteHash?: string): Promise<CachedEmbedding | undefined> {
     this.requireOpen();
-    const statement = this.db.prepare("SELECT e.path,e.provider,e.model,e.embedding_hash,e.note_content_hash,e.vector_json,e.vector_blob,n.content_hash FROM embeddings e JOIN notes n USING(path) WHERE e.path=? AND e.provider=? AND e.model=? ORDER BY e.created_at DESC");
+    const statement = this.db.prepare("SELECT e.path,e.provider,e.model,e.embedding_hash,e.note_content_hash,e.vector_json,e.vector_blob,n.content_hash FROM embeddings e JOIN notes n USING(path) WHERE e.path=? AND e.provider=? AND e.model=? AND n.active=1 ORDER BY e.created_at DESC");
     try { statement.bind([path, provider, model]); while (statement.step()) { const row = statement.getAsObject(); if (!noteHash || row.note_content_hash === noteHash) return { path: String(row.path), provider: String(row.provider), model: String(row.model), hash: String(row.note_content_hash), vector: row.vector_blob ? float32Values(row.vector_blob) : JSON.parse(String(row.vector_json)) }; } }
     finally { statement.free(); }
     return undefined;
@@ -517,7 +581,7 @@ export class SqliteClusterStore {
   async loadEmbeddings(provider?: string, model?: string): Promise<Map<string, CachedEmbedding>> {
     this.requireOpen();
     const predicates = [provider ? `provider=${sqlQuote(provider)}` : "1=1", model ? `model=${sqlQuote(model)}` : "1=1"];
-    const rows = this.db.exec(`SELECT e.path,e.provider,e.model,e.note_content_hash,e.vector_json,e.vector_blob FROM embeddings e WHERE ${predicates.join(" AND ")} AND e.rowid=(SELECT MAX(e2.rowid) FROM embeddings e2 WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model)`);
+    const rows = this.db.exec(`SELECT e.path,e.provider,e.model,e.note_content_hash,e.vector_json,e.vector_blob FROM embeddings e JOIN notes n USING(path) WHERE ${predicates.join(" AND ")} AND n.active=1 AND e.rowid=(SELECT MAX(e2.rowid) FROM embeddings e2 WHERE e2.path=e.path AND e2.provider=e.provider AND e2.model=e.model)`);
     const map = new Map<string, CachedEmbedding>();
     for (const row of rows[0]?.values || []) { const [path, itemProvider, itemModel, hash, vector, blob] = row; const entry = { path: String(path), provider: String(itemProvider), model: String(itemModel), hash: String(hash), vector: blob ? float32Values(blob) : JSON.parse(String(vector)) as number[] }; map.set(`${entry.provider}:${entry.model}:${entry.path}`, entry); }
     return map;
@@ -544,16 +608,21 @@ export class SqliteClusterStore {
     await this.transaction((db) => rows.forEach((row, index) => db.run("INSERT OR REPLACE INTO pca_coordinates(path,model_hash,coordinates_json,coordinate_blob) VALUES(?,?,?,?)", [row.path, model.modelHash, this.coordinateJsonRequired ? JSON.stringify(coordinates[index]) : null, float32Blob(coordinates[index])] )));
     return coordinates;
   }
-  async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>> } = {}): Promise<string> {
+  async saveResult(result: ClusterResult, options: { resultId?: string; coordinates?: Record<string, number[]>; softMemberships?: Record<string, Record<number, number>>; noteHashes?: ReadonlyMap<string, string> } = {}): Promise<string> {
     validateClusterResultAlignment(result);
     for (const [path, point] of Object.entries(options.coordinates || {})) if (!result.ids.includes(path) || point.length !== 2 || point.some((value) => !Number.isFinite(value))) throw new Error(`Visualization coordinate for ${path} is invalid or unaligned`);
     const resultId = options.resultId || await contentHash(JSON.stringify(result));
     await this.transaction((db) => {
       const pcaModel = result.pca.model;
-      if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, null, null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, this.pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), this.now()]);
+      if (pcaModel) db.run("INSERT OR REPLACE INTO pca_models(model_hash,provider,model,input_dimension,output_dimension,normalization,mean_json,components_json,explained_variance_json,mean_blob,components_blob,explained_variance_blob,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", [pcaModel.modelHash, pcaModel.provider || null, pcaModel.model || null, pcaModel.inputDimension, pcaModel.outputDimension, pcaModel.normalization, this.pcaJsonRequired ? JSON.stringify(pcaModel.mean) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.components) : null, this.pcaJsonRequired ? JSON.stringify(pcaModel.explainedVariance) : null, float32Blob(pcaModel.mean), float32Blob(flattenNumbers(pcaModel.components)), float32Blob(pcaModel.explainedVariance), this.now()]);
       db.run("INSERT OR REPLACE INTO results(result_id,schema_version,created_at,result_json) VALUES(?,?,?,?)", [resultId, result.schemaVersion, this.now(), result.schemaVersion === 6 ? compactV6Result(result) : JSON.stringify(result)]);
-      db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
-      result.ids.forEach((path, i) => db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score) VALUES(?,?,?,?,?)", [resultId, path, result.leafLabels[i], result.probabilities[i], result.outlierProxy[i]]));
+      db.run("DELETE FROM result_note_hashes WHERE result_id=?", [resultId]); db.run("DELETE FROM assignments WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_merges WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_leaves WHERE result_id=?", [resultId]); db.run("DELETE FROM leaf_order WHERE result_id=?", [resultId]); db.run("DELETE FROM visualization_points WHERE result_id=?", [resultId]); db.run("DELETE FROM cluster_titles WHERE result_id=?", [resultId]); db.run("DELETE FROM soft_memberships WHERE result_id=?", [resultId]); db.run("DELETE FROM membership_rows WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_nodes WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_children WHERE result_id=?", [resultId]); db.run("DELETE FROM root_children WHERE result_id=?", [resultId]); db.run("DELETE FROM hierarchy_placements WHERE result_id=?", [resultId]);
+      const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []);
+      result.ids.forEach((path, i) => db.run("INSERT INTO assignments(result_id,path,leaf_label,probability,outlier_score,provisional) VALUES(?,?,?,?,?,?)", [resultId, path, result.leafLabels[i], result.probabilities[i], result.outlierProxy[i], provisional.has(path) ? 1 : 0]));
+      if (options.noteHashes) for (const path of result.ids) {
+        const hash = options.noteHashes.get(path);
+        if (hash !== undefined) db.run("INSERT INTO result_note_hashes(result_id,path,content_hash) VALUES(?,?,?)", [resultId, path, hash]);
+      }
       result.hierarchy.leaves.forEach((leaf, ordinal) => db.run("INSERT INTO hierarchy_leaves(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       (result.leafOrder || result.leafOrdering || result.hierarchy.leaves).forEach((leaf, ordinal) => db.run("INSERT INTO leaf_order(result_id,ordinal,leaf_id) VALUES(?,?,?)", [resultId, ordinal, leaf]));
       result.hierarchy.merges.forEach((merge) => db.run("INSERT INTO hierarchy_merges(result_id,id,left_id,right_id,distance,mass) VALUES(?,?,?,?,?,?)", [resultId, merge.id, merge.left, merge.right, merge.distance, merge.mass]));
@@ -586,8 +655,9 @@ export class SqliteClusterStore {
     const stored = JSON.parse(String(row[2])) as ClusterResult & { _normalizedV6?: { memberships?: boolean; softMemberships?: boolean; titles?: boolean } };
     if (Number(row[1]) !== 6 || !stored._normalizedV6) return stored;
     const id = String(row[0]);
-    const assignments = this.query("SELECT a.path,a.leaf_label AS leafLabel,a.probability,a.outlier_score AS outlierScore FROM hierarchy_placements p JOIN assignments a ON a.result_id=p.result_id AND a.path=p.path WHERE p.result_id=? ORDER BY p.ordinal", [id]);
+    const assignments = this.query("SELECT a.path,a.leaf_label AS leafLabel,a.probability,a.outlier_score AS outlierScore,a.provisional FROM hierarchy_placements p JOIN assignments a ON a.result_id=p.result_id AND a.path=p.path WHERE p.result_id=? ORDER BY p.ordinal", [id]);
     const ids = assignments.map((item) => String(item.path));
+    const provisionalPaths = assignments.filter((item) => Number(item.provisional) !== 0).map((item) => String(item.path));
     const leaves = this.query("SELECT leaf_id AS leafId FROM hierarchy_leaves WHERE result_id=? ORDER BY ordinal", [id]).map((item) => Number(item.leafId));
     const leafOrdering = this.query("SELECT leaf_id AS leafId FROM leaf_order WHERE result_id=? ORDER BY ordinal", [id]).map((item) => Number(item.leafId));
     const membershipByPath = new Map(this.getMembershipRows(id).map((item) => [item.path, item.memberships])); const memberships = ids.map((path) => membershipByPath.get(path) || []);
@@ -597,6 +667,13 @@ export class SqliteClusterStore {
     const points = this.getVisualization(id); const visualizationMetadata = stored.visualization;
     const titles = Object.fromEntries(this.query("SELECT node_id AS nodeId,title FROM cluster_titles WHERE result_id=? ORDER BY node_id", [id]).map((item) => [String(item.nodeId), String(item.title)]));
     const pcaStub = stored.pca.model as unknown as { modelHash?: string } | undefined; const pcaModel = pcaStub?.modelHash ? await this.getPcaModel(pcaStub.modelHash) : undefined;
+    const umap = stored.umap ? {
+      ...stored.umap,
+      // JSON encodes an infinite singleton-leaf p95 as null. Restore the
+      // sentinel so a singleton remains an intentionally open distance gate
+      // after a SQLite round trip instead of becoming a zero-radius leaf.
+      leafKnnDistanceP95: Object.fromEntries(Object.entries(stored.umap.leafKnnDistanceP95 || {}).map(([leaf, value]) => [leaf, value == null ? Number.POSITIVE_INFINITY : Number(value)])),
+    } : undefined;
     return {
       schemaVersion: 6,
       ids,
@@ -612,8 +689,20 @@ export class SqliteClusterStore {
       ...(visualizationMetadata ? { visualization: { ...visualizationMetadata, coordinates: points.map((point) => [point.x, point.y] as [number, number]), labels: points.map((point) => point.leafLabel), leafOrdering, memberships } } : {}),
       ...(stored._normalizedV6.titles ? { titles } : {}),
       ...(stored.titleGeneration ? { titleGeneration: stored.titleGeneration } : {}),
+      ...(stored.embeddingProvider ? { embeddingProvider: String(stored.embeddingProvider) } : {}),
+      ...(stored.embeddingModel ? { embeddingModel: String(stored.embeddingModel) } : {}),
+      ...(umap ? { umap } : {}),
+      ...(provisionalPaths.length ? { provisionalPaths } : {}),
+      ...(stored.incremental ? { incremental: { ...stored.incremental, provisionalPaths } } : {}),
       timings: stored.timings || {}
     };
+  }
+  /** Return the note hashes captured by the last successfully saved result. */
+  async getResultNoteHashes(resultId?: string): Promise<Map<string, string>> {
+    this.requireOpen();
+    const id = resultId || await this.getLatestResultId();
+    if (!id) return new Map();
+    return new Map(this.query("SELECT path,content_hash AS hash FROM result_note_hashes WHERE result_id=? ORDER BY path", [id]).map((row) => [String(row.path), String(row.hash)]));
   }
   async getNote(path: string): Promise<NoteRecord | undefined> {
     this.requireOpen(); const rows = this.db.exec(`SELECT path,title,mtime,content_hash,content FROM notes WHERE path=${sqlQuote(path)}`); const row = rows[0]?.values[0];

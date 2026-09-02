@@ -1,5 +1,5 @@
 import { UMAP } from "umap-js";
-import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyNode, HierarchyPlacement, HierarchyTree, PcaModelArtifact, PcaPreservationCandidate, PcaSelection, VisualizationCoordinate } from "./types";
+import { ClusterResult, ClusterVisualization, ClusteringConfig, HierarchyMerge, HierarchyNode, HierarchyPlacement, HierarchyTree, PcaModelArtifact, PcaPreservationCandidate, PcaSelection, UmapProjectionArtifact, VisualizationCoordinate } from "./types";
 
 export interface NumericKernel {
   normalize(rows: number[][]): number[][];
@@ -106,6 +106,8 @@ export interface DiscoveryResult {
   probabilities: number[];
   outlierProxy: number[];
   memberships?: number[][];
+  umapConfiguration: Pick<UmapProjectionArtifact, "runtime" | "inputDimension" | "outputDimension" | "nNeighbors" | "minDist" | "spread" | "seed">;
+  leafKnnDistanceP95: Record<string, number>;
 }
 
 export interface VisualizationOptions { seed?: number; onProgress?: ClusterProgress; signal?: { cancelled: boolean }; }
@@ -209,7 +211,7 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   progress("umap", 0.2);
   const discovery = await discoverPcaFeatures(pca.projected, config, { ...options, onProgress: progress });
   const hdbscan = discovery;
-  /* The Python/Pyodide worker uses this same boundary after fitting its
+  /* The external Python reference uses this same boundary after fitting its
    * authoritative PCA. Keeping discovery separate makes the JS callback a
    * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
   progress("hdbscan", 0.78);
@@ -228,9 +230,17 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   const hierarchyPlacements = computeHierarchyPlacements(hdbscan.labels, hdbscan.probabilities, memberships, hierarchy);
   const placedHierarchy = applyHierarchyPlacementMasses(hierarchy, hierarchyPlacements);
   const completeVisualization = visualization ? { ...visualization, leafOrdering: leafOrder, memberships } : undefined;
+  const umap: UmapProjectionArtifact = {
+    modelHash: umapModelFingerprint(selectedPca.model.modelHash, discovery.umapConfiguration, discovery.umapFeatures),
+    sourcePcaModelHash: selectedPca.model.modelHash,
+    ...discovery.umapConfiguration,
+    coordinates: discovery.umapFeatures,
+    leafKnnDistanceP95: discovery.leafKnnDistanceP95,
+    transform: { method: "pca-knn-barycentric", neighbors: discovery.umapConfiguration.nNeighbors }
+  };
   return {
     schemaVersion: 6, ids, leafLabels: hdbscan.labels, probabilities: hdbscan.probabilities,
-    outlierProxy: hdbscan.outlierProxy, softMemberships: memberships, leafOrder, leafOrdering: leafOrder, memberships, pca: selectedPca, hierarchy: placedHierarchy, ...(completeVisualization ? { visualization: completeVisualization } : {}),
+    outlierProxy: hdbscan.outlierProxy, softMemberships: memberships, leafOrder, leafOrdering: leafOrder, memberships, pca: selectedPca, hierarchy: placedHierarchy, umap, ...(completeVisualization ? { visualization: completeVisualization } : {}),
     hierarchyPlacements,
     timings: { totalMs: Date.now() - started }
   };
@@ -288,7 +298,39 @@ export async function discoverPcaFeatures(pcaFeatures: number[][], config: Clust
   // Python PCA -> UMAP -> HDBSCAN route uses min_samples=3.
   const minSamples = config.minSamples ?? 3;
   const hdbscan = (options.hdbscan || new DeterministicHdbscanProvider()).fit(reduced, minClusterSize, minSamples, kernel);
-  return { umapFeatures: reduced, labels: hdbscan.labels, probabilities: hdbscan.probabilities, outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value), memberships: hdbscan.memberships };
+  const umapConfiguration: DiscoveryResult["umapConfiguration"] = {
+    runtime: "umap-js",
+    inputDimension: pcaFeatures[0].length,
+    outputDimension: reduced[0]?.length || config.umapComponents || 20,
+    nNeighbors: Math.min(config.umapNeighbors || 15, Math.max(2, pcaFeatures.length - 1)),
+    minDist: config.umapMinDist ?? 0.1,
+    spread: 1,
+    seed: config.seed ?? 42
+  };
+  return { umapFeatures: reduced, labels: hdbscan.labels, probabilities: hdbscan.probabilities, outlierProxy: hdbscan.outlierProxy || hdbscan.probabilities.map((value) => 1 - value), memberships: hdbscan.memberships, umapConfiguration, leafKnnDistanceP95: computeLeafKnnDistanceP95(reduced, hdbscan.labels, umapConfiguration.nNeighbors) };
+}
+
+/**
+ * Compute the per-leaf distance envelope used when admitting an incremental
+ * UMAP-space placement.  Each point contributes its distance to the
+ * k-th-nearest point in the same leaf; the 95th percentile is robust to one
+ * unusually sparse boundary point while still rejecting obvious OOD points.
+ */
+export function computeLeafKnnDistanceP95(rows: readonly number[][], labels: readonly number[], neighbors = 15): Record<string, number> {
+  if (rows.length !== labels.length) throw new Error("UMAP rows and labels must align");
+  const groups = new Map<number, number[]>();
+  labels.forEach((label, index) => { if (label >= 0) groups.set(label, [...(groups.get(label) || []), index]); });
+  const result: Record<string, number> = {};
+  for (const [label, members] of groups) {
+    if (members.length < 2) { result[String(label)] = Number.POSITIVE_INFINITY; continue; }
+    const k = Math.max(1, Math.min(Math.floor(neighbors), members.length - 1));
+    const kth = members.map((index) => members.filter((other) => other !== index).map((other) => euclideanDistance(rows[index], rows[other])).sort((left, right) => left - right)[k - 1]);
+    kth.sort((left, right) => left - right);
+    const position = 0.95 * (kth.length - 1);
+    const lower = Math.floor(position); const upper = Math.ceil(position); const fraction = position - lower;
+    result[String(label)] = kth[lower] + (kth[upper] - kth[lower]) * fraction;
+  }
+  return result;
 }
 
 export function candidateComponents(max: number, min = 32, step = 32): number[] {
@@ -570,6 +612,18 @@ function normalize(rows: number[][]): number[][] {
   const normalized: number[][] = new Array(rows.length);
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) normalized[rowIndex] = normalizeVector(rows[rowIndex]);
   return normalized;
+}
+function euclideanDistance(left: readonly number[], right: readonly number[]): number {
+  if (left.length !== right.length) return Number.POSITIVE_INFINITY;
+  let squared = 0;
+  for (let index = 0; index < left.length; index++) { const delta = left[index] - right[index]; squared += delta * delta; }
+  return Math.sqrt(squared);
+}
+function umapModelFingerprint(sourcePcaModelHash: string, configuration: DiscoveryResult["umapConfiguration"], rows: readonly number[][]): string {
+  const value = JSON.stringify({ sourcePcaModelHash, configuration, rowCount: rows.length, outputDimension: rows[0]?.length || configuration.outputDimension });
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) { hash ^= value.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `umap-fnv1a-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 function normalizeVector(row: number[]): number[] { const norm = Math.sqrt(row.reduce((sum, value) => sum + value * value, 0)) || 1; return row.map((value) => value / norm); }
 function dot(a: number[], b: number[]): number { return a.reduce((sum, value, i) => sum + value * b[i], 0); }

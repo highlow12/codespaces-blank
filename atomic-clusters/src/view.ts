@@ -76,6 +76,7 @@ export class ClusterExplorerView extends ItemView {
   private readonly visualizationControlsId = ++ClusterExplorerView.visualizationControlsCounter;
   private readonly rebuildClusters?: () => void | Promise<void>;
   private readonly ensureVisualization?: EnsureVisualization;
+  private pendingChangeCount = 0;
   private visualizationGenerationResult: ClusterResult | null = null;
   private visualizationGenerationIdleHandle: number | null = null;
   private visualizationGenerationCancel: (() => void) | null = null;
@@ -99,6 +100,7 @@ export class ClusterExplorerView extends ItemView {
   async onOpen(): Promise<void> { this.visualizationClosed = false; this.render(); }
   async onClose(): Promise<void> { this.visualizationClosed = true; this.invalidateVisualizationGeneration(); this.disposeVisualization(); this.contentEl.empty(); }
   setResult(result: ClusterResult): void { if (this.result !== result) this.invalidateVisualizationGeneration(); this.cancelVisualizationAnimation(false); this.result = result; this.visualizationNodeId = "root"; this.visualizationSelectedNodeId = null; this.visualizationDepth = 0; this.visualizationCameraState = null; this.visualizationTransition = null; this.visualizationLastCamera = null; this.visualizationDisplayedCamera = null; this.render(); }
+  setPendingChangeCount(count: number): void { const next = Math.max(0, Math.trunc(count)); if (next === this.pendingChangeCount) return; this.pendingChangeCount = next; if (this.result) this.render(); }
   setProgress(phase: string, value: number): void { this.progress = { phase, value }; this.render(); }
   private invalidateVisualizationGeneration(): void {
     this.visualizationGenerationToken++;
@@ -136,6 +138,12 @@ export class ClusterExplorerView extends ItemView {
     if (this.progress && this.progress.value < 1) { header.createDiv({ text: `${this.progress.phase} · ${Math.round(this.progress.value * 100)}%` }).addClass("atomic-clusters-status"); const bar = header.createDiv({ cls: "atomic-clusters-progress" }); bar.createEl("span").style.width = `${Math.round(this.progress.value * 100)}%`; if (!this.result) return; }
     if (!this.result) { this.contentEl.createDiv({ text: "No clustering result yet. Run Build note clusters." }).addClass("atomic-clusters-status"); return; }
     header.createDiv({ text: `${this.result.hierarchy.leaves.length} leaf clusters · ${this.result.hierarchy.merges.length} hierarchy merges · PCA ${this.result.pca.selected} dimensions` }).addClass("atomic-clusters-status");
+    if (this.pendingChangeCount) header.createDiv({ text: `${this.pendingChangeCount} note${this.pendingChangeCount === 1 ? "" : "s"} pending refresh` }).addClass("atomic-clusters-status");
+    const provisionalCount = this.result.provisionalPaths?.length || this.result.incremental?.provisionalPaths?.length || 0;
+    if (this.result.incremental?.mode === "soft" || provisionalCount || this.result.incremental?.fullRebuildRecommended) {
+      const status = provisionalCount ? `${provisionalCount} provisional placement${provisionalCount === 1 ? "" : "s"}` : "Structure reused";
+      header.createDiv({ text: `${status}${this.result.incremental?.fullRebuildRecommended ? " · full rebuild recommended" : ""}` }).addClass("atomic-clusters-status");
+    }
     // Create the tree panel before wiring the plot's ResizeObserver. The
     // tree is visually ordered below the plot via CSS, but its flex space is
     // present while the first camera is measured. Otherwise appending it
@@ -144,10 +152,11 @@ export class ClusterExplorerView extends ItemView {
     // a just-started navigation animation.
     const tree = this.contentEl.createEl("details", { cls: "atomic-clusters-tree-panel" }); tree.createEl("summary", { text: `Cluster hierarchy · ${this.result.hierarchy.leaves.length} leaves` });
     const list = tree.createDiv({ cls: "atomic-clusters-tree" }); const adapterRoot = buildVisualizationTree(this.result.hierarchy, this.result.leafLabels); const palette = visualizationColorScheme(adapterRoot);
+    const provisional = new Set(this.result.provisionalPaths || this.result.incremental?.provisionalPaths || []);
     const residuals = (this.result.hierarchyPlacements || []).map((placement, index) => ({ placement, path: this.result!.ids[index], index })).filter(({ placement }) => placement.kind === "residual");
     const renderScrollableNotes = (parent: HTMLElement, paths: readonly string[]): void => {
       const viewport = parent.createDiv({ cls: "atomic-clusters-note-list", attr: { tabindex: "0" } }); let rendered = 0; const chunkSize = 80;
-      const appendChunk = (): void => { const end = Math.min(paths.length, rendered + chunkSize); for (; rendered < end; rendered++) { const path = paths[rendered]; viewport.createEl("button", { text: path, attr: { type: "button" } }).addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); } };
+      const appendChunk = (): void => { const end = Math.min(paths.length, rendered + chunkSize); for (; rendered < end; rendered++) { const path = paths[rendered]; viewport.createEl("button", { text: provisional.has(path) ? `${path} · provisional` : path, attr: { type: "button" } }).addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); } };
       const onScroll = (): void => { if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 96) appendChunk(); };
       appendChunk(); viewport.addEventListener("scroll", onScroll);
     };

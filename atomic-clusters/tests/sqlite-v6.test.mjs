@@ -94,6 +94,20 @@ function v6Result() {
       { kind: "residual", nodeId: null, confidence: 0 }
     ],
     titles: { "0": "Old leaf", "2": "Old root" },
+    umap: {
+      modelHash: "umap-hash",
+      sourcePcaModelHash: "pca-hash",
+      runtime: "umap-js",
+      inputDimension: 2,
+      outputDimension: 2,
+      nNeighbors: 2,
+      minDist: 0.1,
+      spread: 1,
+      seed: 42,
+      coordinates: [[0, 0], [1, 1], [2, 2]],
+      leafKnnDistanceP95: { "0": 0.75, "1": Infinity },
+      transform: { method: "pca-knn-barycentric", neighbors: 2 }
+    },
     timings: {}
   };
 }
@@ -157,6 +171,9 @@ test("v6 hierarchy nodes, ordered children, root children, memberships, and plac
   assert.deepEqual(hydrated.ids, result.ids);
   assert.deepEqual(hydrated.hierarchy, result.hierarchy);
   assert.deepEqual(hydrated.hierarchyPlacements, result.hierarchyPlacements);
+  assert.deepEqual(hydrated.umap.coordinates, result.umap.coordinates);
+  assert.equal(hydrated.umap.leafKnnDistanceP95["0"], 0.75);
+  assert.equal(hydrated.umap.leafKnnDistanceP95["1"], Infinity, "singleton p95 must survive JSON null encoding");
   store.close();
 });
 
@@ -450,4 +467,61 @@ test("legacy JSON imports are normalized to v6 and embedding vectors get a Float
   assert.equal(hydrated.hierarchyPlacements.length, 2);
   assert.deepEqual(store.query("SELECT schema_version AS schemaVersion FROM results"), [{ schemaVersion: 6 }]);
   store.close();
+});
+
+test("incremental storage moves rename state and persists provisional assignments", async () => {
+  const Storage = await loadStorage();
+  const { store } = await openStore(Storage);
+  await seedNotes(store, 3, "");
+  const model = { modelHash: "pca-incremental", inputDimension: 2, outputDimension: 2, normalization: "none", mean: [0, 0], components: [[1, 0], [0, 1]], explainedVariance: [1, 1], provider: "local", model: "m" };
+  await store.putEmbedding({ path: "a.md", provider: "local", model: "m", hash: "hash-0", vector: [1, 0] });
+  await store.savePcaModel(model);
+  await store.project("a.md", [1, 0], model);
+  const result = {
+    ...v6Result(),
+    pca: { selected: 2, model },
+    embeddingProvider: "local",
+    embeddingModel: "m",
+    provisionalPaths: ["b.md"],
+    incremental: { mode: "soft", generatedAt: "2026-08-31T00:00:00.000Z", changedPaths: ["b.md"], provisionalPaths: ["b.md"], fullRebuildRecommended: false, cumulativeChangedCount: 1, lastFullRebuildAt: "2026-08-31T00:00:00.000Z" }
+  };
+  const noteHashes = new Map([["a.md", "hash-0"], ["b.md", "hash-1"], ["c.md", "hash-2"]]);
+  const resultId = await store.saveResult(result, { resultId: "incremental", noteHashes });
+  assert.deepEqual([...await store.getResultNoteHashes(resultId)], [...noteHashes]);
+  assert.equal((await store.listNoteMetadata(true)).find((note) => note.path === "a.md").content, "content 0");
+  assert.equal(await store.renameNote("a.md", "renamed.md"), true);
+  assert.deepEqual([...await store.getResultNoteHashes(resultId)], [["b.md", "hash-1"], ["c.md", "hash-2"], ["renamed.md", "hash-0"]]);
+  assert.deepEqual((await store.getEmbedding("renamed.md", "local", "m", "hash-0")).vector, [1, 0]);
+  assert.deepEqual(await store.getPcaCoordinates("renamed.md", "pca-incremental"), [1, 0]);
+  assert.equal(await store.getEmbedding("a.md", "local", "m", "hash-0"), undefined);
+  const hydrated = await store.getResult(resultId);
+  assert.deepEqual(hydrated.ids, ["renamed.md", "b.md", "c.md"]);
+  assert.deepEqual(hydrated.provisionalPaths, ["b.md"]);
+  assert.deepEqual(hydrated.incremental.provisionalPaths, ["b.md"]);
+  assert.equal(hydrated.embeddingProvider, "local");
+  await store.syncActiveNotes([
+    { path: "renamed.md", title: "renamed", mtime: 2, content: "content 0", hash: "hash-0" },
+    { path: "b.md", title: "b", mtime: 1, content: "content 1", hash: "hash-1" }
+  ]);
+  assert.deepEqual((await store.listNoteMetadata(true)).map((note) => note.path), ["b.md", "renamed.md"]);
+  assert.equal(store.query("SELECT active FROM notes WHERE path='c.md'")[0].active, 0);
+  store.close();
+});
+
+test("result hash baseline survives note metadata writes until a new result commits", async () => {
+  const Storage = await loadStorage();
+  const { store, adapter, SQL } = await openStore(Storage);
+  await seedNotes(store, 3, "");
+  const baseline = new Map([["a.md", "hash-0"], ["b.md", "hash-1"], ["c.md", "hash-2"]]);
+  await store.saveResult(v6Result(), { resultId: "baseline", noteHashes: baseline });
+  await store.syncActiveNotes([
+    { path: "a.md", title: "a", mtime: 2, content: "changed 0", hash: "hash-new-0" },
+    { path: "b.md", title: "b", mtime: 2, content: "changed 1", hash: "hash-new-1" },
+    { path: "c.md", title: "c", mtime: 2, content: "changed 2", hash: "hash-new-2" }
+  ]);
+  assert.deepEqual([...await store.getResultNoteHashes("baseline")], [...baseline]);
+  store.close();
+  const reopened = await new Storage.SqliteClusterStore(adapter, SQL).open();
+  assert.deepEqual([...await reopened.getResultNoteHashes("baseline")], [...baseline]);
+  reopened.close();
 });
