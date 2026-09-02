@@ -90,6 +90,8 @@ export class ClusterExplorerView extends ItemView {
   private searchDocuments: SearchDocument[] = [];
   private readonly searchIndex = new SearchIndex();
   private searchResult: SearchResult | null = null;
+  private searchIndexedResult: ClusterResult | null = null;
+  private searchIndexedNotes: readonly NoteRecord[] | null = null;
   private searchQuery = "";
   private searchFilters = new Set<SearchFilter>(["all"]);
   private searchInput: HTMLInputElement | null = null;
@@ -157,14 +159,22 @@ export class ClusterExplorerView extends ItemView {
   }
   private refreshSearchIndex(): void {
     if (!this.result) {
-      this.searchDocuments = [];
-      this.searchIndex.replace([], []);
+      if (this.searchIndexedResult !== null || this.searchIndexedNotes !== this.searchNotes) {
+        this.searchDocuments = [];
+        this.searchIndex.replace([], []);
+        this.searchIndexedResult = null;
+        this.searchIndexedNotes = this.searchNotes;
+      }
       this.searchResult = this.searchIndex.search(this.searchQuery, this.currentSearchFilters());
       return;
     }
-    const built = buildSearchDocuments(this.searchNotes, this.result);
-    this.searchDocuments = built.documents;
-    this.searchIndex.replace(built.documents, built.clusters);
+    if (this.searchIndexedResult !== this.result || this.searchIndexedNotes !== this.searchNotes) {
+      const built = buildSearchDocuments(this.searchNotes, this.result);
+      this.searchDocuments = built.documents;
+      this.searchIndex.replace(built.documents, built.clusters);
+      this.searchIndexedResult = this.result;
+      this.searchIndexedNotes = this.searchNotes;
+    }
     this.searchResult = this.searchIndex.search(this.searchQuery, this.currentSearchFilters());
   }
   private clusterKeyForNodeId(nodeId: string): string { return nodeId === "root" ? "root" : nodeId.replace(/^node:/, ""); }
