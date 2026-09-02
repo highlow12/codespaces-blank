@@ -107,6 +107,8 @@ test("Explorer renders local search, combinable filters, and focus controls", as
   assert.match(view, /ArrowDown/);
   assert.match(view, /event\.key === "\/"/);
   assert.match(view, /event\.ctrlKey/);
+  assert.match(view, /searchIndexedResult/);
+  assert.match(view, /searchIndexedNotes/);
   assert.match(css, /\.atomic-clusters-search-panel/);
   assert.match(css, /\.atomic-clusters-search-dimmed/);
 });

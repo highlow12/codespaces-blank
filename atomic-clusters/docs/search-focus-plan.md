@@ -1,7 +1,8 @@
 # Search & Focus implementation plan
 
-Status: planned on the PR #3 merged baseline; this document is the design and
-acceptance checklist for Milestone B in [`../../plan.md`](../../plan.md).
+Status: implemented in the merged Search & Focus work; this document remains
+the design and acceptance checklist for Milestone B in
+[`../../plan.md`](../../plan.md).
 
 ## Goals and non-goals
 
@@ -83,16 +84,16 @@ remain unchanged and green.
 
 ## Acceptance checklist
 
-- [ ] Search bar is visible in every Explorer result state.
-- [ ] Plain, phrase, `tag:`, `path:`, and `cluster:` queries are deterministic.
-- [ ] Matching notes/clusters are highlighted; nonmatches are dimmed and
+- [x] Search bar is visible in every Explorer result state.
+- [x] Plain, phrase, `tag:`, `path:`, and `cluster:` queries are deterministic.
+- [x] Matching notes/clusters are highlighted; nonmatches are dimmed and
       hierarchy ancestors remain visible.
-- [ ] Result summary and all six combinable filter chips are present; missing
+- [x] Result summary and all six combinable filter chips are present; missing
       schema fields use an explicit fallback/disabled state.
-- [ ] Focus provides subtree view, breadcrumbs, sibling navigation, and
+- [x] Focus provides subtree view, breadcrumbs, sibling navigation, and
       Escape/root exit.
-- [ ] `/`, Cmd/Ctrl+F, Escape, Enter, and arrow navigation work without a
+- [x] `/`, Cmd/Ctrl+F, Escape, Enter, and arrow navigation work without a
       clustering call.
-- [ ] 10,000-metadata fixture/benchmark and focused tests pass.
-- [ ] TypeScript, plugin build, full tests, and release/WASM checks are run;
+- [x] 10,000-metadata fixture/benchmark and focused tests pass.
+- [x] TypeScript, plugin build, full tests, and release/WASM checks are run;
       unavailable generated WASM tooling is recorded rather than fabricated.
