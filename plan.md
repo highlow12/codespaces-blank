@@ -1,6 +1,6 @@
 # Atomic Clusters 제품화 계획
 
-기준일: 2026-08-30
+기준일: 2026-09-03
 
 이 문서는 Atomic Clusters MVP를 실제로 계속 사용할 수 있는 제품으로 다듬기 위한 구현 계획이다. 현재 핵심 흐름인 `Vault → embedding → clustering → hierarchy → keyword titles → Explorer`는 동작하므로, 이후 개발은 새로운 연구 기능을 넓히기보다 사용 중 반복해서 발생하는 비용과 실패 지점을 줄이는 데 집중한다.
 
@@ -34,6 +34,8 @@
   설정에 vault-relative exclusion을 저장한다. 이는 사용자 수정과 피드백
   전체가 구현되었다는 뜻이 아니다. 수동 cluster title 수정/reset, note
   preference, manual group, feedback log는 아직 구현하지 않았다.
+  상위 폴더 상속 메뉴와 마지막 활성 노트 제외 처리는 리뷰 후속 작업으로
+  `0.2`에 기록했으며, 해당 경계 조건의 수정·회귀 검증은 아직 남아 있다.
 - **#3 — Note detail panel (plan §3.6): 구현됨.** 선택한 note의 path/title,
   automatic leaf, hierarchy, membership/probability와 관련 note 정보를
   확인하고 원본 note를 여는 detail panel을 구현했다. Search & Focus는 이전에
@@ -56,6 +58,23 @@
 
 상세 raw 결과는 `/tmp/atomic-clusters-large-vault-hardening-final-2026-09-03/`
 및 `atomic-clusters/docs/large-vault-hardening-report.md`에 있다.
+
+## 0.2 리뷰 후속 작업 — exclusion 경계 조건
+
+2026-09-03 코드 리뷰에서 노트 제외 기능의 두 경계 조건을 확인했다. 아래
+항목은 다음 exclusion 수정 작업의 필수 acceptance 조건이다.
+
+- **상위 폴더 제외 상속을 파일 메뉴에 반영한다.** 노트가 `excludedFolders`의
+  하위에 있으면 이미 제외된 상태이므로 파일 메뉴에 중복 `Exclude`를 제공하지
+  않는다. 직접 `excludedNotes` 항목이 있어도 `Restore`가 상위 폴더 규칙을
+  무시하는 것처럼 보이면 안 된다. 메뉴를 비활성화하거나 상속 상태를 명확히
+  표시한다.
+- **마지막 활성 노트 제외를 정상 처리한다.** 활성 노트가 0개가 되는 경우에도
+  변경 queue를 오류로 되돌리지 않는다. 빈 structural result로 교체하거나,
+  마지막 노트 제외를 명시적으로 막고 사용자에게 이유를 안내해야 한다. 설정상
+  제외된 노트가 이전 Explorer 결과에 계속 표시되어서는 안 된다.
+- 두 경우 모두 context menu, 설정 복구, rename, automatic refresh on/off 상태를
+  회귀 테스트한다.
 
 ### 제품화 원칙
 
