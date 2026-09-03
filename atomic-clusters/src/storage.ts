@@ -1,5 +1,5 @@
 import { normalizePath, Plugin, Vault } from "obsidian";
-import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord } from "./types";
+import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord, normalizeExcludedPaths, normalizeVaultRelativePath, pathMatchesExcludedFolder } from "./types";
 // The SQLite store is exported from this legacy entry point so callers can
 // adopt the durable store without changing their storage import path.
 export { SqliteClusterStore, createSqliteStore, migrateLegacyJson, migrateLegacyAdapter, projectPca, embeddingHash, pcaModelHash, SQLITE_PATH, SQLITE_SCHEMA_VERSION } from "./sqlite-storage";
@@ -35,15 +35,17 @@ export class EmbeddingCache {
 export class NoteStore {
   constructor(private readonly vault: Vault) {}
 
-  async collect(excludedFolders: string[] = []): Promise<NoteRecord[]> {
-    const files = this.vault.getMarkdownFiles().filter((file) => !excludedFolders.some((folder) => file.path === folder || file.path.startsWith(`${folder}/`)));
-    const notes: NoteRecord[] = [];
+  async collect(excludedFolders: string[] = [], excludedNotes: string[] = []): Promise<NoteRecord[]> {
+    const folders = normalizeExcludedPaths(excludedFolders);
+    const notes = new Set(normalizeExcludedPaths(excludedNotes));
+    const files = this.vault.getMarkdownFiles().filter((file) => !folders.some((folder) => pathMatchesExcludedFolder(file.path, folder)) && !notes.has(normalizeVaultRelativePath(file.path)));
+    const records: NoteRecord[] = [];
     for (const file of files) {
       const content = await this.vault.cachedRead(file);
       const { contentHash } = await import("./hash");
-      notes.push({ path: file.path, title: file.basename, content, mtime: file.stat.mtime, hash: await contentHash(content) });
+      records.push({ path: file.path, title: file.basename, content, mtime: file.stat.mtime, hash: await contentHash(content) });
     }
-    return notes;
+    return records;
   }
 }
 

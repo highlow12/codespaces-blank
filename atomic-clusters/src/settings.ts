@@ -1,7 +1,7 @@
 import * as Obsidian from "obsidian";
-import { App, Modal, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { App, Modal, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { LocalModelManager, LocalModelProgress, LocalRuntimeProgress } from "./embedding";
-import { PluginSettings } from "./types";
+import { normalizeExcludedPaths, PluginSettings } from "./types";
 
 export interface ClusterRunControls {
   build(): Promise<void>;
@@ -13,7 +13,7 @@ export interface ClusterRunControls {
 export type LocalRuntimeTest = (onProgress: (progress: LocalRuntimeProgress) => void) => Promise<void>;
 
 export class AtomicClustersSettingTab extends PluginSettingTab {
-  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest, private readonly onRefreshSettingsChange?: () => void) { super(app, plugin); }
+  constructor(app: App, plugin: Plugin, private readonly settings: PluginSettings, private readonly save: () => Promise<void>, private readonly localModels: LocalModelManager, private readonly openEmbeddingLog: () => Promise<void>, private readonly clusterRun: ClusterRunControls, private readonly testLocalRuntime: LocalRuntimeTest, private readonly onRefreshSettingsChange?: () => void, private readonly onExcludedNotesChange?: () => Promise<void>) { super(app, plugin); }
   display(): void {
     const { containerEl } = this; containerEl.empty(); containerEl.createEl("h2", { text: "Atomic Clusters" });
     new Setting(containerEl).setName("Embedding provider").setDesc("Gemini sends note text to Google; Local keeps inference on this device.").addDropdown((dropdown) => dropdown.addOption("gemini", "Gemini API").addOption("local", "Local multilingual-e5-small").setValue(this.settings.embeddingProvider).onChange(async (value) => { this.settings.embeddingProvider = value as PluginSettings["embeddingProvider"]; await this.save(); this.onRefreshSettingsChange?.(); this.display(); }));
@@ -22,7 +22,8 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("HDBSCAN minimum samples").setDesc("Core-distance neighbourhood size (default: 3). Lower values retain finer leaf clusters.").addText((text) => text.setValue(String(this.settings.minSamples)).onChange(async (value) => { const parsed = Number.parseInt(value, 10); this.settings.minSamples = Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : 3; await this.save(); }));
     new Setting(containerEl).setName("Automatic refresh").setDesc("Watch Markdown changes and refresh a small change set after the delay. Large or structurally risky changes trigger a full rebuild.").addToggle((toggle) => toggle.setValue(this.settings.automaticRefresh !== false).onChange(async (value) => { this.settings.automaticRefresh = value; await this.save(); this.onRefreshSettingsChange?.(); }));
     new Setting(containerEl).setName("Refresh delay (seconds)").setDesc("Debounce automatic refreshes; the safety cap is 60 seconds.").addText((text) => text.setValue(String(this.settings.refreshDelaySeconds ?? 5)).setPlaceholder("5").onChange(async (value) => { const parsed = Number.parseFloat(value); this.settings.refreshDelaySeconds = Number.isFinite(parsed) ? Math.max(0, Math.min(60, parsed)) : 5; await this.save(); this.onRefreshSettingsChange?.(); }));
-    new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = value.split(",").map((item) => item.trim()).filter(Boolean); await this.save(); this.onRefreshSettingsChange?.(); }));
+    new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = normalizeExcludedPaths(value.split(",")); await this.save(); this.onRefreshSettingsChange?.(); }));
+    this.renderExcludedNotesControl(containerEl);
     this.renderClusterRunControl(containerEl);
     this.renderKeywordTitleControl(containerEl);
     if (this.settings.embeddingProvider === "local") {
@@ -51,6 +52,44 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
 
   private renderKeywordTitleControl(containerEl: HTMLElement): void {
     new Setting(containerEl).setName("Keyword cluster titles").setDesc("Deterministic top-three TF-IDF/BM25 representative keywords; note text stays local and no model is downloaded.").addToggle((toggle) => toggle.setValue(this.settings.clusterTitlesEnabled !== false).onChange(async (value) => { this.settings.clusterTitlesEnabled = value; await this.save(); }));
+  }
+
+  private renderExcludedNotesControl(containerEl: HTMLElement): void {
+    const excludedNotes = normalizeExcludedPaths(this.settings.excludedNotes);
+    this.settings.excludedNotes = excludedNotes;
+    const setting = new Setting(containerEl)
+      .setName("Excluded notes")
+      .setDesc("Notes excluded from embeddings and clustering. This does not modify Markdown or frontmatter.");
+    if (!excludedNotes.length) {
+      setting.controlEl.createDiv({ cls: "atomic-clusters-excluded-notes-empty", text: "No individual notes excluded." });
+      return;
+    }
+    const list = setting.controlEl.createDiv({ cls: "atomic-clusters-excluded-notes" });
+    excludedNotes.forEach((path) => {
+      const row = list.createDiv({ cls: "atomic-clusters-excluded-note" });
+      const file = this.app.vault.getAbstractFileByPath(path);
+      row.createSpan({ text: path, cls: file ? "" : "atomic-clusters-excluded-note-missing" });
+      if (!file) row.createSpan({ text: " (not in vault)", cls: "atomic-clusters-excluded-note-missing" });
+      row.createEl("button", { text: "Restore", attr: { type: "button", "aria-label": `Restore ${path}` } }).addEventListener("click", () => {
+        void this.restoreExcludedNote(path).catch((error) => new Notice(`Could not restore excluded note: ${safeUiError(error)}`));
+      });
+    });
+    setting.addButton((button) => button.setButtonText("Restore all").onClick(() => {
+      void (async () => {
+        this.settings.excludedNotes = [];
+        await this.save();
+        await this.onExcludedNotesChange?.();
+        this.display();
+      })().catch((error) => new Notice(`Could not restore excluded notes: ${safeUiError(error)}`));
+    }));
+  }
+
+  private async restoreExcludedNote(path: string): Promise<void> {
+    const target = normalizeExcludedPaths(this.settings.excludedNotes).filter((item) => item !== path);
+    this.settings.excludedNotes = target;
+    await this.save();
+    await this.onExcludedNotesChange?.();
+    this.display();
   }
 
   private renderClusterRunControl(containerEl: HTMLElement): void {

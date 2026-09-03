@@ -1,6 +1,6 @@
 # Atomic Clusters 개발 현황과 아키텍처
 
-기준일: 2026-08-23
+기준일: 2026-09-03
 
 이 문서는 `atomic-clusters/` Obsidian plugin의 현재 구현, 수치 파이프라인,
 검증 결과와 남은 통합 작업을 기록한다. 숫자는 저장소의 현재 소스와 `/tmp` 실행
@@ -92,6 +92,31 @@ probability를 모두 통과하지 못한 노트는 억지로 배치하지 않�
 noise로 남긴다. provisional/OOD 누적, 변경·삭제·누적 비율이 기준을 넘으면
 전체 WASM rebuild로 전환한다. Refresh 중 새 이벤트는 다음 한 번의 refresh에
 포함되고, 실패하면 직전 structural result pointer를 유지한다.
+
+## 2026-09-03 Large Vault hardening 상태
+
+실제 `dbpedia_gemini_embeddings.json.gz` 3,000행 입력과 release WASM으로
+1,000행/3,000행을 순차 측정했다. 상세 raw 결과는
+`/tmp/atomic-clusters-large-vault-hardening-final-2026-09-03/`에 있다.
+
+| 행 수 | clustering wall time | peak RSS | 최대 progress gap |
+| ---: | ---: | ---: | ---: |
+| 1,000 | 97,745 ms | 1,218,125,824 bytes | 88,648 ms |
+| 3,000 | 167,310 ms | 1,623,543,808 bytes | 144,482 ms |
+
+두 실행의 backend는 `rust-wasm`이었고 release WASM asset/export 검증은
+통과했다. worker heartbeat 최대 간격은 약 55 ms, 관찰된 event-loop delay
+최대치는 43.7/78.6 ms였으며 250 ms 초과 main-thread stall은 관찰되지 않았다.
+다만 PCA → UMAP progress callback 침묵 구간은 여전히 길다. renderer의
+persistent Notice heartbeat가 30초 이후 elapsed/“Still working”을 표시하지만,
+이는 사용자 가시성을 보완할 뿐 phase 계산 또는 progress gap을 해결한 것은
+아니다. 5,000/10,000행은 실제 입력 부족으로 아직 측정하지 않았다.
+
+전체 clustering 직전에는 renderer-safe memory preflight가 실제 vector
+행 수/차원으로 보수적 working-set을 계산한다. Chromium
+`performance.memory`가 유효한 headroom을 제공하고 위험 임계치를 넘을 때만
+실행을 중단하며, `navigator.deviceMemory` 또는 신호 없음은 estimate를
+Notice에 남기고 계속 진행한다.
 
 ## 현재 기본값과 파이프라인 의미
 

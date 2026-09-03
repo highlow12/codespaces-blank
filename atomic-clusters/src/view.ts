@@ -1,5 +1,6 @@
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import { ClusterResult, NoteRecord } from "./types";
+import { buildNoteDetail, NoteDetailModel } from "./note-detail";
 import { buildSearchDocuments, SearchDocument, SearchFilter, SearchFilters, SearchIndex, SearchResult } from "./search";
 import { accumulateVisualizationDensity, blendVisualizationColor, buildVisualizationPointSpatialIndex, buildVisualizationTree, clampVisualizationKernelScale, layoutVisualizationClusterLabels, pickVisualizationCloud, validateVisualizationData, visualizationBaseBandwidth, visualizationOutgoingLayerTransform, visualizationCameraTransform, visualizationCloudColor, visualizationColorScheme, visualizationColorVector, visualizationDensityAlpha, visualizationFrontier, visualizationGlobalDepthFrontier, visualizationFitCameraState, visualizationCameraFromState, visualizationNoteTerminalPath, visualizationLeafOrdering, visualizationMembershipAmplitude, visualizationPath, visualizationP95RowSum, visualizationRegion, visualizationScaledStageSigma, visualizationTopMemberships, visualizationWorldToScreen, zoomVisualizationCameraAt, panVisualizationCamera, VisualizationCamera, VisualizationCameraState, VisualizationNode, VisualizationPointSpatialIndex, VisualizationSplat, VISUALIZATION_KERNEL_SCALE_DEFAULT, VISUALIZATION_KERNEL_SCALE_MAX, VISUALIZATION_KERNEL_SCALE_MIN, VISUALIZATION_KERNEL_SCALE_STEP, VISUALIZATION_NOISE_COLOR } from "./visualization";
 
@@ -18,6 +19,7 @@ const VISUALIZATION_VIEWPORT_TOLERANCE = 1.25;
 const VISUALIZATION_GESTURE_OVERSCAN = 128;
 
 function visualizationMembershipPercent(value: number): string { return `${(Math.max(0, Math.min(1, value)) * 100).toFixed(1)}%`; }
+function formatDetailPercent(value: number | null): string { return value === null ? "Unavailable" : visualizationMembershipPercent(value); }
 
 function createVisualizationHoverSummary(document: Document, result: ClusterResult, point: number): HTMLElement {
   const summary = document.createElement("div"); summary.className = "atomic-clusters-hover-membership-summary"; summary.dataset.pointIndex = String(point);
@@ -99,6 +101,8 @@ export class ClusterExplorerView extends ItemView {
   private searchActiveResultIndex = -1;
   /** Focus is Explorer navigation state; it never changes clustering output. */
   private focusNodeId: string | null = null;
+  /** Selected note drives the detail panel and is independent from camera/focus state. */
+  private selectedNotePath: string | null = null;
   private explorerKeydownHandler: ((event: KeyboardEvent) => void) | null = null;
   constructor(leaf: WorkspaceLeaf, rebuildClusters?: () => void | Promise<void>, initialResult?: ClusterResult | null, ensureVisualization?: EnsureVisualization, initialNotes?: readonly NoteRecord[]) {
     super(leaf);
@@ -142,6 +146,7 @@ export class ClusterExplorerView extends ItemView {
     this.visualizationTransition = null;
     this.visualizationLastCamera = null;
     this.visualizationDisplayedCamera = null;
+    if (this.selectedNotePath && !result.ids.includes(this.selectedNotePath)) this.selectedNotePath = null;
     this.render();
   }
   setSearchNotes(notes: readonly NoteRecord[]): void { this.searchNotes = notes.slice(); if (this.result) this.render(); }
@@ -208,7 +213,10 @@ export class ClusterExplorerView extends ItemView {
   private clearSearch(): void { this.searchQuery = ""; this.searchActiveResultIndex = -1; this.render(); this.focusSearchInput(false); }
   private openActiveSearchResult(): void {
     const path = this.searchResult?.notePaths[this.searchActiveResultIndex >= 0 ? this.searchActiveResultIndex : 0];
-    if (path) void this.app.workspace.openLinkText(path, "", false);
+    if (path) {
+      this.selectNote(path);
+      void this.app.workspace.openLinkText(path, "", false);
+    }
     else {
       const cluster = this.searchResult?.matchedClusters[0];
       if (cluster) this.focusCluster(cluster.id);
@@ -221,6 +229,13 @@ export class ClusterExplorerView extends ItemView {
     const path = this.searchResult!.notePaths[this.searchActiveResultIndex];
     this.contentEl.querySelectorAll(".atomic-clusters-search-result-note").forEach((element) => { const active = (element as HTMLElement).dataset.path === path; if (active) element.classList.add("is-active"); else element.classList.remove("is-active"); });
   }
+  private selectNote(path: string): void {
+    if (!this.result || !this.result.ids.includes(path)) return;
+    this.selectedNotePath = path;
+    this.searchActiveResultIndex = this.searchResult?.notePaths.indexOf(path) ?? -1;
+    this.render();
+  }
+  private openSelectedNote(path: string): void { void this.app.workspace.openLinkText(path, "", false); }
   private handleExplorerKeydown(event: KeyboardEvent): void {
     const target = event.target as HTMLElement | null;
     const isInput = target === this.searchInput || target?.tagName === "INPUT" || target?.tagName === "TEXTAREA";
@@ -312,12 +327,75 @@ export class ClusterExplorerView extends ItemView {
     if (this.isSearchActive()) {
       const results = panel.createDiv({ cls: "atomic-clusters-search-results" });
       if (!result.notePaths.length && !result.matchedClusters.length) results.createDiv({ text: "No matching notes or clusters" }).addClass("atomic-clusters-status");
-      result.notePaths.slice(0, 12).forEach((path, index) => { const button = results.createEl("button", { text: path, cls: "atomic-clusters-search-result-note", attr: { type: "button", "data-path": path } }); if (index === this.searchActiveResultIndex) button.classList.add("is-active"); button.addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); });
+      result.notePaths.slice(0, 12).forEach((path, index) => { const button = results.createEl("button", { text: path, cls: "atomic-clusters-search-result-note", attr: { type: "button", "data-path": path, "aria-selected": String(path === this.selectedNotePath) } }); if (index === this.searchActiveResultIndex || path === this.selectedNotePath) button.classList.add("is-active"); button.addEventListener("click", () => this.selectNote(path)); });
       result.matchedClusters.slice(0, 8).forEach((cluster) => { const button = results.createEl("button", { text: `Cluster · ${cluster.title}`, cls: "atomic-clusters-search-result-cluster", attr: { type: "button" } }); button.addEventListener("click", () => this.focusCluster(cluster.id)); });
     }
     this.renderFocusControls(panel);
     return panel;
   }
+
+  private renderNoteDetailPanel(parent: HTMLElement): HTMLElement {
+    const panel = parent.createEl("section", { cls: "atomic-clusters-note-detail", attr: { "aria-label": "Selected note details", "aria-live": "polite" } });
+    const detail: NoteDetailModel | null = this.result && this.selectedNotePath ? buildNoteDetail(this.result, this.searchNotes, this.selectedNotePath) : null;
+    if (!detail) {
+      panel.createEl("h4", { text: "Note details" });
+      panel.createDiv({ text: "Select a note from search results, the hierarchy, or the map to inspect it." }).addClass("atomic-clusters-status");
+      return panel;
+    }
+
+    const heading = panel.createDiv({ cls: "atomic-clusters-note-detail-heading" });
+    heading.createEl("h4", { text: detail.title });
+    heading.createDiv({ text: detail.path, cls: "atomic-clusters-note-detail-path" });
+    heading.createEl("button", { text: "Open note", cls: "mod-cta", attr: { type: "button", "aria-label": `Open note ${detail.path}` } }).addEventListener("click", () => this.openSelectedNote(detail.path));
+
+    const status = panel.createDiv({ cls: "atomic-clusters-note-detail-status" });
+    const statusValues: string[] = [];
+    if (detail.noise) statusValues.push("Noise");
+    else if (detail.residual) statusValues.push("Residual placement");
+    if (detail.provisional) statusValues.push("Provisional");
+    status.createSpan({ text: statusValues.length ? statusValues.join(" · ") : "Stable automatic placement", cls: statusValues.length ? "atomic-clusters-note-detail-badge is-warning" : "atomic-clusters-note-detail-badge" });
+
+    const placement = panel.createDiv({ cls: "atomic-clusters-note-detail-section" });
+    placement.createEl("h5", { text: "Placement" });
+    const placementGrid = placement.createDiv({ cls: "atomic-clusters-note-detail-grid" });
+    placementGrid.createDiv({ text: `Automatic leaf: ${detail.automaticLeaf?.title || "Noise / no leaf"}` });
+    placementGrid.createDiv({ text: `Probability: ${formatDetailPercent(detail.probability)}` });
+    placementGrid.createDiv({ text: `Strongest membership: ${formatDetailPercent(detail.strongestMembership)}` });
+    placementGrid.createDiv({ text: `Manual preferred: ${detail.manualPreferredCluster?.title || "None recorded; using automatic"}` });
+
+    const hierarchy = panel.createDiv({ cls: "atomic-clusters-note-detail-section" });
+    hierarchy.createEl("h5", { text: "Automatic hierarchy" });
+    if (detail.ancestors.length) {
+      const list = hierarchy.createEl("ol", { cls: "atomic-clusters-note-detail-ancestors" });
+      detail.ancestors.forEach((ancestor) => list.createEl("li", { text: ancestor.title }));
+    } else hierarchy.createDiv({ text: "Hierarchy information unavailable." }).addClass("atomic-clusters-status");
+
+    const membership = panel.createDiv({ cls: "atomic-clusters-note-detail-section" });
+    membership.createEl("h5", { text: "Membership" });
+    if (detail.memberships.length) {
+      const list = membership.createEl("ul", { cls: "atomic-clusters-note-detail-memberships" });
+      detail.memberships.forEach((item) => list.createEl("li", { text: `${item.title} · ${formatDetailPercent(item.value)}` }));
+    } else membership.createDiv({ text: "No soft-membership data available." }).addClass("atomic-clusters-status");
+
+    const keywords = panel.createDiv({ cls: "atomic-clusters-note-detail-section" });
+    keywords.createEl("h5", { text: "Cluster keywords" });
+    if (detail.clusterKeywords.length) {
+      const keywordList = keywords.createDiv({ cls: "atomic-clusters-note-detail-keywords" });
+      detail.clusterKeywords.forEach((keyword) => keywordList.createSpan({ text: keyword }));
+    } else keywords.createDiv({ text: "No keyword metadata available." }).addClass("atomic-clusters-status");
+
+    const related = panel.createDiv({ cls: "atomic-clusters-note-detail-section" });
+    related.createEl("h5", { text: "Related notes" });
+    if (detail.relatedNotes.length) {
+      const list = related.createDiv({ cls: "atomic-clusters-note-detail-related" });
+      detail.relatedNotes.forEach((item) => {
+        const button = list.createEl("button", { text: `${item.title} · ${item.path} · ${formatDetailPercent(item.similarity)}`, attr: { type: "button", "aria-label": `Select related note ${item.path}` } });
+        button.addEventListener("click", () => this.selectNote(item.path));
+      });
+    } else related.createDiv({ text: "Related-note data is unavailable for this saved result." }).addClass("atomic-clusters-status");
+    return panel;
+  }
+
   private invalidateVisualizationGeneration(): void {
     this.visualizationGenerationToken++;
     if (this.visualizationGenerationIdleHandle !== null) this.visualizationGenerationCancel?.();
@@ -361,6 +439,7 @@ export class ClusterExplorerView extends ItemView {
       header.createDiv({ text: `${status}${this.result.incremental?.fullRebuildRecommended ? " · full rebuild recommended" : ""}` }).addClass("atomic-clusters-status");
     }
     this.renderSearchControls(this.contentEl);
+    this.renderNoteDetailPanel(this.contentEl);
     // Create the tree panel before wiring the plot's ResizeObserver. The
     // tree is visually ordered below the plot via CSS, but its flex space is
     // present while the first camera is measured. Otherwise appending it
@@ -375,7 +454,7 @@ export class ClusterExplorerView extends ItemView {
     const residuals = (this.result.hierarchyPlacements || []).map((placement, index) => ({ placement, path: this.result!.ids[index], index })).filter(({ placement }) => placement.kind === "residual");
     const renderScrollableNotes = (parent: HTMLElement, paths: readonly string[]): void => {
       const viewport = parent.createDiv({ cls: "atomic-clusters-note-list", attr: { tabindex: "0" } }); let rendered = 0; const chunkSize = 80;
-      const appendChunk = (): void => { const end = Math.min(paths.length, rendered + chunkSize); for (; rendered < end; rendered++) { const path = paths[rendered]; const note = viewport.createEl("button", { text: provisional.has(path) ? `${path} · provisional` : path, attr: { type: "button", "data-path": path } }); note.classList.add(searchActive && matchedNotes.has(path) ? "atomic-clusters-search-match" : searchActive ? "atomic-clusters-search-dimmed" : "atomic-clusters-search-neutral"); note.addEventListener("click", () => void this.app.workspace.openLinkText(path, "", false)); } };
+      const appendChunk = (): void => { const end = Math.min(paths.length, rendered + chunkSize); for (; rendered < end; rendered++) { const path = paths[rendered]; const note = viewport.createEl("button", { text: provisional.has(path) ? `${path} · provisional` : path, attr: { type: "button", "data-path": path, "aria-selected": String(path === this.selectedNotePath) } }); note.classList.add(searchActive && matchedNotes.has(path) ? "atomic-clusters-search-match" : searchActive ? "atomic-clusters-search-dimmed" : "atomic-clusters-search-neutral"); note.addEventListener("click", () => this.selectNote(path)); } };
       const onScroll = (): void => { if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 96) appendChunk(); };
       appendChunk(); viewport.addEventListener("scroll", onScroll);
     };
@@ -501,7 +580,7 @@ export class ClusterExplorerView extends ItemView {
         for (const [index, hit] of pointHitButtons) if (!poolSet.has(index)) { if (hit.parentElement === hitLayer) hitLayer.removeChild(hit); pointHitButtons.delete(index); }
         this.visualizationHitElements = poolIndices.map((index) => {
           const placement = result.hierarchyPlacements?.[index]; const residualDepth = placement?.nodeId === null ? 0 : hierarchyDepths.get(placement?.nodeId ?? -1) || 0; const residualDetail = placement?.kind === "residual" ? ` · residual at ${placement.nodeId === null ? "root" : `node ${placement.nodeId}`} · depth ${residualDepth} · max child confidence ${placement.confidence.toFixed(3)}` : "";
-          let hit = pointHitButtons.get(index); if (!hit) { hit = hitLayer.createEl("button", { cls: "atomic-clusters-umap-point-hit", attr: { type: "button", "data-point-index": String(index) } }); hit.addEventListener("mouseenter", (event) => this.setHoveredVisualizationPoint(index, event, hit!, draw)); hit.addEventListener("click", (event) => { event.preventDefault(); void this.app.workspace.openLinkText(result.ids[index], "", false); }); pointHitButtons.set(index, hit); }
+          let hit = pointHitButtons.get(index); if (!hit) { hit = hitLayer.createEl("button", { cls: "atomic-clusters-umap-point-hit", attr: { type: "button", "data-point-index": String(index), "aria-label": `Select note ${result.ids[index]}` } }); hit.addEventListener("mouseenter", (event) => this.setHoveredVisualizationPoint(index, event, hit!, draw)); hit.addEventListener("click", (event) => { event.preventDefault(); this.selectNote(result.ids[index]); }); pointHitButtons.set(index, hit); }
           hit.setAttribute("aria-label", `${result.ids[index]}${residualDetail}`); hit.setAttribute("title", `${result.ids[index]}${residualDetail}`); return hit;
         });
         const field = accumulateVisualizationDensity(cachedClouds.flat(), rasterWidth, rasterHeight); const bitmap = typeof document === "undefined" ? null : document.createElement("canvas"); if (bitmap) { bitmap.width = rasterWidth; bitmap.height = rasterHeight; const bitmapContext = bitmap.getContext("2d"); if (bitmapContext) { const image = bitmapContext.createImageData(rasterWidth, rasterHeight); for (let offset = 0; offset < field.density.length; offset++) { const density = field.density[offset]; const alpha = visualizationDensityAlpha(density); image.data[offset * 4] = density > 0 ? Math.round(field.red[offset] / density) : 0; image.data[offset * 4 + 1] = density > 0 ? Math.round(field.green[offset] / density) : 0; image.data[offset * 4 + 2] = density > 0 ? Math.round(field.blue[offset] / density) : 0; image.data[offset * 4 + 3] = Math.round(alpha * 255); } bitmapContext.putImageData(image, 0, 0); cachedBitmap = bitmap; } }
@@ -590,7 +669,7 @@ export class ClusterExplorerView extends ItemView {
     const gestureOverscan = VISUALIZATION_GESTURE_OVERSCAN; const rectSize = (): [number, number] | null => { const rect = plot.getBoundingClientRect(); const w = rect.width || plot.clientWidth; const h = rect.height || plot.clientHeight; return w > 0 && h > 0 ? [Math.max(1, Math.round(w)), Math.max(1, Math.round(h))] : null; };
     const bitmapFor = (splats: readonly VisualizationSplat[], opacity: number): HTMLCanvasElement | null => { if (typeof document === "undefined") return null; const rasterWidth = width + gestureOverscan * 2; const rasterHeight = height + gestureOverscan * 2; const field = accumulateVisualizationDensity(splats, rasterWidth, rasterHeight); const bitmap = document.createElement("canvas"); bitmap.width = rasterWidth; bitmap.height = rasterHeight; const bitmapContext = bitmap.getContext("2d"); if (!bitmapContext) return null; const image = bitmapContext.createImageData(rasterWidth, rasterHeight); for (let i = 0; i < field.density.length; i++) { const density = field.density[i]; image.data[i * 4] = density > 0 ? Math.round(field.red[i] / density) : 0; image.data[i * 4 + 1] = density > 0 ? Math.round(field.green[i] / density) : 0; image.data[i * 4 + 2] = density > 0 ? Math.round(field.blue[i] / density) : 0; image.data[i * 4 + 3] = Math.round(visualizationDensityAlpha(density) * opacity * 255); } bitmapContext.putImageData(image, 0, 0); return bitmap; };
     const terminalPath = (index: number): string[] => visualizationNoteTerminalPath(root, index, labels, result.hierarchyPlacements); const pointActive = (index: number): boolean => (!this.visualizationSelectedNodeId || terminalPath(index).includes(this.visualizationSelectedNodeId)) && (!searchActive || matchedNotes.has(result.ids[index]));
-    const activatePoint = (index: number): void => { const path = terminalPath(index); const selected = this.visualizationSelectedNodeId; if (selected && path[path.length - 1] === selected) { void this.app.workspace.openLinkText(result.ids[index], "", false); return; } if (path.length === 1) { if (this.visualizationDepth === 0 && !selected) void this.app.workspace.openLinkText(result.ids[index], "", false); else { this.visualizationSelectedNodeId = null; this.focusNodeId = null; this.visualizationDepth = 0; this.render(); } return; } const entry = frontier.find((item) => item.pointIndices.includes(index)); if (entry) { this.visualizationSelectedNodeId = entry.node.id; this.focusNodeId = entry.node.id; if (entry.node.children.length) this.visualizationDepth++; this.visualizationNodeId = entry.node.id; this.visualizationCameraState = visualizationFitCameraState(entry.node.pointIndices.map((pointIndex) => coordinates[pointIndex]).filter((point): point is [number, number] => !!point && point.every(Number.isFinite)), width || 1, height || 1); this.render(); return; } const next = path.find((id) => id !== "root"); if (next) { this.visualizationSelectedNodeId = next; this.focusNodeId = next; this.visualizationDepth++; this.visualizationNodeId = next; this.visualizationCameraState = visualizationFitCameraState(coordinates, width || 1, height || 1); this.render(); } };
+    const activatePoint = (index: number): void => { const path = terminalPath(index); const selected = this.visualizationSelectedNodeId; if (selected && path[path.length - 1] === selected) { this.selectNote(result.ids[index]); return; } if (path.length === 1) { if (this.visualizationDepth === 0 && !selected) this.selectNote(result.ids[index]); else { this.visualizationSelectedNodeId = null; this.focusNodeId = null; this.visualizationDepth = 0; this.render(); } return; } const entry = frontier.find((item) => item.pointIndices.includes(index)); if (entry) { this.visualizationSelectedNodeId = entry.node.id; this.focusNodeId = entry.node.id; if (entry.node.children.length) this.visualizationDepth++; this.visualizationNodeId = entry.node.id; this.visualizationCameraState = visualizationFitCameraState(entry.node.pointIndices.map((pointIndex) => coordinates[pointIndex]).filter((point): point is [number, number] => !!point && point.every(Number.isFinite)), width || 1, height || 1); this.render(); return; } const next = path.find((id) => id !== "root"); if (next) { this.visualizationSelectedNodeId = next; this.focusNodeId = next; this.visualizationDepth++; this.visualizationNodeId = next; this.visualizationCameraState = visualizationFitCameraState(coordinates, width || 1, height || 1); this.render(); } };
     const activateCluster = (node: VisualizationNode): void => { this.visualizationSelectedNodeId = node.id; this.focusNodeId = node.id; if (node.children.length) this.visualizationDepth++; this.visualizationNodeId = node.id; this.visualizationCameraState = visualizationFitCameraState(node.pointIndices.map((index) => coordinates[index]).filter((point): point is [number, number] => !!point && point.every(Number.isFinite)), width || 1, height || 1); this.render(); };
     const draw = (reraster = true): boolean => { const size = rectSize(); if (!size) return false; [width, height] = size; const rasterWidth = width + gestureOverscan * 2; const rasterHeight = height + gestureOverscan * 2; const dpr = Math.max(1, typeof window === "undefined" ? 1 : window.devicePixelRatio || 1); canvas.width = rasterWidth * dpr; canvas.height = rasterHeight * dpr; canvas.style.left = `${-gestureOverscan}px`; canvas.style.top = `${-gestureOverscan}px`; canvas.style.width = `${rasterWidth}px`; canvas.style.height = `${rasterHeight}px`; const context = canvas.getContext("2d"); if (!context) return false; context.setTransform(dpr, 0, 0, dpr, 0, 0); context.clearRect(0, 0, rasterWidth, rasterHeight); if (!this.visualizationCameraState || this.visualizationCameraState.width !== width || this.visualizationCameraState.height !== height) { const fitted = visualizationFitCameraState(coordinates, width, height); const old = this.visualizationCameraState; this.visualizationCameraState = old ? { ...fitted, centerX: old.centerX, centerY: old.centerY, zoom: old.zoom } : fitted; } camera = visualizationCameraFromState(this.visualizationCameraState); points = coordinates.map((point) => visualizationWorldToScreen(camera, point)); this.visualizationPoints = points; const rasterPoints = points.map(([x, y]) => [x + gestureOverscan, y + gestureOverscan] as [number, number]); const key = `${this.visualizationDepth}|${this.visualizationSelectedNodeId || ""}|${camera.scale}|${camera.offsetX}|${camera.offsetY}|${width}x${height}|${this.visualizationKernelScale}|${this.searchQuery}|${[...this.searchFilters].join(",")}`; if (reraster && key !== cachedKey) { cachedKey = key; const active: VisualizationSplat[] = []; const inactive: VisualizationSplat[] = []; cachedClouds = []; for (const entry of frontier) { const value = visualizationCloudColor(entry.node, palette); const color = /^#[0-9a-f]{6}$/i.test(value) ? [parseInt(value.slice(1, 3), 16), parseInt(value.slice(3, 5), 16), parseInt(value.slice(5, 7), 16)] as [number, number, number] : visualizationColorVector([], ordering); const splats: VisualizationSplat[] = []; for (const index of entry.pointIndices) { const point = rasterPoints[index]; if (!point) continue; splats.push({ x: point[0], y: point[1], sigma: visualizationScaledStageSigma(baseSigma, entry.remainingDepth, !entry.node.children.length, this.visualizationKernelScale) * camera.scale, color, amplitude: visualizationMembershipAmplitude(memberships[index] || [], p95) }); } cachedClouds.push(splats); const clusterKey = entry.node.sourceId === null ? "root" : String(entry.node.sourceId); (entry.active && (!searchActive || matchedClusters.has(clusterKey)) ? active : inactive).push(...splats); } const activeBitmap = bitmapFor(active, 1); const inactiveBitmap = bitmapFor(inactive, .2); cachedBitmap = document.createElement("canvas"); cachedBitmap.width = rasterWidth; cachedBitmap.height = rasterHeight; const merged = cachedBitmap.getContext("2d"); if (merged) { if (inactiveBitmap) merged.drawImage(inactiveBitmap, 0, 0); if (activeBitmap) merged.drawImage(activeBitmap, 0, 0); } } if (cachedBitmap) context.drawImage(cachedBitmap, 0, 0); const style = typeof getComputedStyle === "function" ? getComputedStyle(frame) : null; const background = style?.getPropertyValue("--background-primary").trim() || "transparent"; for (let index = 0; index < points.length; index++) { const point = rasterPoints[index]; const placement = result.hierarchyPlacements?.[index]; context.beginPath(); context.fillStyle = labels[index] === -1 || placement?.kind === "residual" ? VISUALIZATION_NOISE_COLOR : blendVisualizationColor(memberships[index] || [], ordering, palette.leafColors); context.globalAlpha = this.hoveredVisualizationPoint === index ? 1 : pointActive(index) ? 1 : .2; context.arc(point[0], point[1], this.hoveredVisualizationPoint === index ? 6 : 4, 0, Math.PI * 2); context.fill(); context.globalAlpha = 1; context.strokeStyle = background; context.stroke(); } const labelsOnCanvas = layoutVisualizationClusterLabels(frontier, rasterPoints, result.titles, palette.nodeColors, rasterWidth, rasterHeight); if (typeof context.fillText === "function") for (const label of labelsOnCanvas) { const entry = frontier.find((item) => item.node.id === label.id); const clusterKey = entry?.node.sourceId === null ? "root" : entry ? String(entry.node.sourceId) : ""; context.save(); context.globalAlpha = entry?.active && (!searchActive || matchedClusters.has(clusterKey)) ? 1 : .2; context.fillStyle = entry ? palette.nodeColors.get(entry.node.id) || VISUALIZATION_NOISE_COLOR : VISUALIZATION_NOISE_COLOR; context.fillRect(label.x, label.y, label.width, label.height); context.fillStyle = label.contrast.foreground; context.font = "600 12px system-ui, sans-serif"; context.textAlign = "center"; context.textBaseline = "middle"; context.fillText(label.text, label.x + label.width / 2, label.y + label.height / 2); context.restore(); } this.visualizationRenderedPointIndices = points.map((_point, index) => index); this.visualizationSpatialIndex = buildVisualizationPointSpatialIndex(points, pointHitRadius * 2); const pool = this.visualizationSpatialIndex.queryRect(-pointHitRadius, -pointHitRadius, width + pointHitRadius, height + pointHitRadius).slice(0, 96); const poolSet = new Set(pool); for (const [index, hit] of pointHitButtons) if (!poolSet.has(index)) { hit.remove(); pointHitButtons.delete(index); } this.visualizationHitElements = pool.map((index) => { let hit = pointHitButtons.get(index); if (!hit) { hit = hitLayer.createEl("button", { cls: "atomic-clusters-umap-point-hit", attr: { type: "button", "data-point-index": String(index), "aria-label": result.ids[index] } }); hit.addEventListener("mouseenter", (event) => this.setHoveredVisualizationPoint(index, event, hit!, () => draw(false))); hit.addEventListener("click", (event) => { event.preventDefault(); activatePoint(index); }); pointHitButtons.set(index, hit); } hit.style.left = `${points[index][0]}px`; hit.style.top = `${points[index][1]}px`; return hit; }); return true; };
     const updateLayerTransform = (): void => { if (!rasterCameraState || !this.visualizationCameraState) return; const source = visualizationCameraFromState(rasterCameraState); const target = visualizationCameraFromState(this.visualizationCameraState); const ratio = target.scale / source.scale; // The raster canvas starts at -overscan, so preserve that origin when scaling.
@@ -600,9 +679,27 @@ export class ClusterExplorerView extends ItemView {
     const fit = navigation.createEl("button", { text: "Fit all", attr: { type: "button", "aria-label": "Fit all notes in view" } }); fit.addEventListener("click", () => { this.visualizationCameraState = visualizationFitCameraState(coordinates, width || 1, height || 1); visualLayer.style.transform = "none"; cachedKey = ""; cachedBitmap = null; draw(true); });
     let dragging = false; let moved = false; let startX = 0; let startY = 0; let startState: VisualizationCameraState | null = null; const onPointerDown = (event: PointerEvent): void => { if (event.button !== 0) return; dragging = true; moved = false; startX = event.clientX; startY = event.clientY; startState = this.visualizationCameraState ? { ...this.visualizationCameraState } : null; const target = event.currentTarget as (HTMLElement & { setPointerCapture?: (pointerId: number) => void }) | null; target?.setPointerCapture?.(event.pointerId); }; const onPointerMove = (event: PointerEvent): void => { if (!dragging || !startState) return; const dx = event.clientX - startX, dy = event.clientY - startY; if (!moved && Math.hypot(dx, dy) < 4) return; moved = true; suppressClick = true; this.visualizationCameraState = panVisualizationCamera(startState, dx, dy); updateLayerTransform(); }; const onPointerUp = (): void => { if (!dragging) return; dragging = false; if (moved) scheduleDensity(); startState = null; }; const onWheel = (event: WheelEvent): void => { event.preventDefault(); const rect = plot.getBoundingClientRect(); this.visualizationCameraState = zoomVisualizationCameraAt(this.visualizationCameraState || visualizationFitCameraState(coordinates, width || 1, height || 1), event.clientX - rect.left, event.clientY - rect.top, Math.exp(-event.deltaY * .001)); updateLayerTransform(); scheduleDensity(); };
     const onClick = (event: MouseEvent): void => { if (suppressClick) { suppressClick = false; return; } const pointButton = event.target instanceof HTMLElement && event.target.classList.contains("atomic-clusters-umap-point-hit"); if (pointButton) return; // Pointer capture can retarget a click to the gesture layer (or its hit-layer), so do not require the canvas to be the event target. All other descendants are part of the plot surface.
-      if (event.target !== canvas && event.target !== visualLayer && event.target !== hitLayer) return; const rect = plot.getBoundingClientRect(); const x = event.clientX - rect.left, y = event.clientY - rect.top; const index = this.visualizationSpatialIndex?.queryNearest(x, y, pointHitRadius) ?? null; if (index !== null) { activatePoint(index); return; } const picked = pickVisualizationCloud(cachedClouds, x + gestureOverscan, y + gestureOverscan); if (picked !== null && frontier[picked]) activateCluster(frontier[picked].node); };
+      if (event.target !== canvas && event.target !== visualLayer && event.target !== hitLayer) return; const rect = plot.getBoundingClientRect(); const x = event.clientX - rect.left, y = event.clientY - rect.top; const index = this.visualizationSpatialIndex?.queryNearest(x, y, pointHitRadius) ?? null; if (index !== null) { if (event.target === canvas) this.selectNote(result.ids[index]); else activatePoint(index); return; } const picked = pickVisualizationCloud(cachedClouds, x + gestureOverscan, y + gestureOverscan); if (picked !== null && frontier[picked]) activateCluster(frontier[picked].node); };
     const onMouseMove = (event: MouseEvent): void => { if (dragging) return; const rect = plot.getBoundingClientRect(); const index = this.visualizationSpatialIndex?.queryNearest(event.clientX - rect.left, event.clientY - rect.top, pointHitRadius) ?? null; this.setHoveredVisualizationPoint(index, event, canvas, () => draw(false)); }; const onMouseLeave = (): void => this.setHoveredVisualizationPoint(null, null, null, () => draw(false));
     visualLayer.addEventListener("pointerdown", onPointerDown); visualLayer.addEventListener("pointermove", onPointerMove); visualLayer.addEventListener("pointerup", onPointerUp); visualLayer.addEventListener("pointercancel", onPointerUp); visualLayer.addEventListener("wheel", onWheel, { passive: false }); visualLayer.addEventListener("click", onClick); canvas.addEventListener("mousemove", onMouseMove); canvas.addEventListener("mouseleave", onMouseLeave); this.visualizationCleanup = () => { if (densityTimer !== null) globalThis.clearTimeout(densityTimer); if (resizeTimer !== null) globalThis.clearTimeout(resizeTimer); pendingResize = null; visualLayer.removeEventListener("pointerdown", onPointerDown); visualLayer.removeEventListener("pointermove", onPointerMove); visualLayer.removeEventListener("pointerup", onPointerUp); visualLayer.removeEventListener("pointercancel", onPointerUp); visualLayer.removeEventListener("wheel", onWheel); visualLayer.removeEventListener("click", onClick); canvas.removeEventListener("mousemove", onMouseMove); canvas.removeEventListener("mouseleave", onMouseLeave); this.visualizationHitElements = []; this.visualizationSpatialIndex = null; }; draw(true); if (typeof ResizeObserver === "function") { this.visualizationResizeObserver = new ResizeObserver((entries) => { const entry = entries?.[0]; const rect = entry?.contentRect; const nextSize: [number, number] = rect && rect.width > 0 && rect.height > 0 ? [Math.round(rect.width), Math.round(rect.height)] : rectSize() || [width, height]; if (nextSize[0] === width && nextSize[1] === height) return; scheduleResize(nextSize); }); this.visualizationResizeObserver.observe(plot); }
+    const onAccessiblePointClick = (event: MouseEvent): void => {
+      const target = event.target;
+      if (!(target instanceof HTMLElement) || !target.classList.contains("atomic-clusters-umap-point-hit")) return;
+      const index = Number(target.dataset.pointIndex);
+      if (!Number.isSafeInteger(index) || index < 0 || index >= result.ids.length) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      this.selectNote(result.ids[index]);
+    };
+    // Point buttons are the keyboard-accessible semantic layer. Capture their
+    // click before the camera-navigation handler can interpret the same point
+    // as a cluster target.
+    hitLayer.addEventListener("click", onAccessiblePointClick, true);
+    const previousVisualizationCleanup = this.visualizationCleanup;
+    this.visualizationCleanup = () => {
+      previousVisualizationCleanup?.();
+      hitLayer.removeEventListener("click", onAccessiblePointClick, true);
+    };
     rasterCameraState = this.visualizationCameraState ? { ...this.visualizationCameraState } : null;
   }
   private captureVisualizationSnapshot(sourceCamera?: VisualizationCamera): HTMLCanvasElement | null {

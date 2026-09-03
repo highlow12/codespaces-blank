@@ -1,14 +1,15 @@
-import { App, Modal, Notice, Plugin } from "obsidian";
+import { App, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, TFolder } from "obsidian";
 import { configureLocalOrtAssets, disposeLocalOrtAssets, EmbeddingProvider, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LocalRuntimeDiagnostics, LocalRuntimeProgress, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, LOCAL_ORT_WEBGPU_MJS_ASSET, LOCAL_ORT_WEBGPU_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { createSqliteStore, migrateLegacyAdapter, SqliteClusterStore, KeywordTitleLogStore, NoteStore } from "./storage";
 import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest } from "./settings";
 import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
-import { CachedEmbedding, ClusteringConfig, ClusterResult, ClusterVisualization, EmbeddingLogEntry, EmbeddingRunLog, NoteRecord, PluginSettings } from "./types";
+import { CachedEmbedding, ClusteringConfig, ClusterResult, ClusterVisualization, EmbeddingLogEntry, EmbeddingRunLog, normalizeExcludedPaths, normalizeVaultRelativePath, NoteRecord, pathMatchesExcludedFolder, PluginSettings } from "./types";
 import { VaultChangeQueue, PendingVaultChanges, buildSoftRefresh, createPendingVaultChanges, decideIncrementalRefresh, markFullRebuildResult, renameClusterResultPaths } from "./incremental";
 import { BrowserClusteringWorker, InProcessClusteringWorker, NodeClusteringWorker } from "./worker-client";
 import workerSource from "./worker-source";
 import browserWorkerSource from "./browser-worker-source";
 import { AtomicClustersProgress } from "./progress";
+import { preflightRendererClusteringMemory } from "./memory-preflight";
 import { prepareLocalOrtRendererModule, resolveLocalOrtAssetPrefix } from "./ort-assets";
 import { generateKeywordTitles, KEYWORD_TITLE_ALGORITHM_VERSION } from "./title";
 import { projectVisualization } from "./clustering";
@@ -19,7 +20,7 @@ import initSqlJs from "sql.js";
 
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
-  localModel: "multilingual-e5-small", localExecutionProvider: "auto", excludedFolders: [], minClusterSize: 5, minSamples: 3,
+  localModel: "multilingual-e5-small", localExecutionProvider: "auto", excludedFolders: [], excludedNotes: [], minClusterSize: 5, minSamples: 3,
   umapNeighbors: 15, umapMinDist: 0.1, pcaVarianceTarget: 0.9, clusterTitlesEnabled: true,
   automaticRefresh: true, refreshDelaySeconds: 5
 };
@@ -68,7 +69,13 @@ export default class AtomicClustersPlugin extends Plugin {
       configureLocalOrtAssets(prefix);
       await this.configureRendererOrtAssets(adapter, prefix);
     } catch { /* Local inference reports a useful error if this cannot be resolved. */ }
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings> || {});
+    const storedSettings = await this.loadData() as Partial<PluginSettings> | null;
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, storedSettings || {});
+    // Older settings documents have no per-note exclusion list. Normalize
+    // both exclusion collections at the boundary so every later caller can
+    // safely assume canonical vault-relative paths.
+    this.settings.excludedFolders = normalizeExcludedPaths(this.settings.excludedFolders);
+    this.settings.excludedNotes = normalizeExcludedPaths(this.settings.excludedNotes);
     try {
       const sqlite = await this.openSqliteStore(adapter);
       // Load the last structural result before registering the view factory.
@@ -83,6 +90,7 @@ export default class AtomicClustersPlugin extends Plugin {
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.pendingVaultChanges = new VaultChangeQueue({ delayMs: this.refreshDelayMs(), maxDelayMs: 60000, onReady: () => { void this.processPendingVaultChanges(); } });
     this.registerVaultChangeListeners();
+    this.registerFileContextMenus();
     this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters(), this.latestResult, (result) => this.ensureVisualization(result), this.explorerSearchNotes));
     this.registerHoverLinkSource(VIEW_TYPE_CLUSTER_EXPLORER, { display: "Atomic Clusters", defaultMod: false });
     this.addRibbonIcon("scatter-chart", "Open Cluster Explorer", () => void this.openExplorer());
@@ -96,11 +104,11 @@ export default class AtomicClustersPlugin extends Plugin {
     this.addCommand({ id: "cancel-clustering", name: "Cancel clustering", callback: () => this.cancelClustering() });
     const clusterRun: ClusterRunControls = { build: () => this.buildClusters(), regenerateTitles: () => this.regenerateTitles(), cancel: () => this.cancelClustering(), isRunning: () => this.running || this.incrementalProcessing };
     const testLocalRuntime: LocalRuntimeTest = (onProgress) => this.testLocalRuntime(onProgress);
-    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun, testLocalRuntime, () => { void this.configureAutomaticRefresh(); }));
+    this.addSettingTab(new AtomicClustersSettingTab(this.app, this, this.settings, () => this.saveSettings(), this.localModelManager, () => this.openEmbeddingLog(), clusterRun, testLocalRuntime, () => { void this.configureAutomaticRefresh(); }, () => this.refreshAfterExclusionChange()));
     if (this.latestResult && this.settings.automaticRefresh !== false) void this.detectStartupChanges();
   }
 
-  async onunload(): Promise<void> { this.pendingVaultChanges?.dispose(); this.pendingVaultChanges = null; if (this.fullRebuildTimer !== undefined) clearTimeout(this.fullRebuildTimer); this.fullRebuildTimer = undefined; await this.worker?.terminate(); this.worker = null; this.sqliteStore?.close(); this.sqliteStore = null; disposeLocalOrtAssets(); }
+  async onunload(): Promise<void> { this.pendingVaultChanges?.dispose(); this.pendingVaultChanges = null; if (this.fullRebuildTimer !== undefined) clearTimeout(this.fullRebuildTimer); this.fullRebuildTimer = undefined; this.operationProgress?.hide(); this.operationProgress = null; await this.worker?.terminate(); this.worker = null; this.sqliteStore?.close(); this.sqliteStore = null; disposeLocalOrtAssets(); }
 
   private async openSqliteStore(adapter: typeof this.app.vault.adapter & { getBasePath?: () => string }): Promise<SqliteClusterStore> {
     if (this.sqliteStore) return this.sqliteStore;
@@ -158,7 +166,7 @@ export default class AtomicClustersPlugin extends Plugin {
     let runProvider = this.settings.embeddingProvider; let runModel = this.settings.embeddingProvider === "gemini" ? this.settings.geminiModel : `${this.settings.localModel}@2024-05-01`;
     try {
       progress.update({ phase: "cache scan", progress: 0.02, detail: "Scanning Markdown notes" });
-      const notes = await new NoteStore(this.app.vault).collect(this.settings.excludedFolders);
+      const notes = await new NoteStore(this.app.vault).collect(this.settings.excludedFolders, this.settings.excludedNotes);
       if (!notes.length) throw new Error("No Markdown notes found in the selected vault folders.");
       const sqlite = await this.getSqliteStore();
       await sqlite.syncActiveNotes(notes);
@@ -207,6 +215,9 @@ export default class AtomicClustersPlugin extends Plugin {
       persistedRunLog = { ...persistedRunLog, stage: "clustering" };
       const vectors = activeNotes.map((note) => cached(note)?.vector);
       if (vectors.some((vector) => !vector)) throw new Error("Embedding cache is incomplete; please run the build again.");
+      const memoryPreflight = preflightRendererClusteringMemory(vectors as number[][]);
+      progress.update({ phase: "memory preflight", progress: 0.83, detail: memoryPreflight.detail });
+      if (!memoryPreflight.canProceed) throw new Error(memoryPreflight.error || memoryPreflight.detail);
       const ids = activeNotes.map((note) => note.path);
       const worker = await this.getWorker();
       progress.update({ phase: "clustering", progress: 0.84, detail: `${worker instanceof InProcessClusteringWorker ? "Worker APIs unavailable; clustering in process" : worker instanceof BrowserClusteringWorker ? "Using Chromium worker fallback" : "Clustering"} · ${activeNotes.length} notes` });
@@ -261,7 +272,7 @@ export default class AtomicClustersPlugin extends Plugin {
       progress.update({ phase: "result load", progress: 0.02, detail: "Loading the saved cluster hierarchy" });
       const sqlite = await this.getSqliteStore(); const result = await sqlite.getResult();
       if (!result) throw new Error("No saved cluster result is available; build clusters first.");
-      const notes = await new NoteStore(this.app.vault).collect(this.settings.excludedFolders);
+      const notes = await new NoteStore(this.app.vault).collect(this.settings.excludedFolders, this.settings.excludedNotes);
       const byPath = new Map(notes.map((note) => [note.path, note]));
       const missing = result.ids.filter((path) => !byPath.has(path));
       if (missing.length) throw new Error(`${missing.length} note${missing.length === 1 ? " is" : "s are"} missing from the saved cluster result; build clusters again before regenerating titles.`);
@@ -323,7 +334,9 @@ export default class AtomicClustersPlugin extends Plugin {
   }
 
   private isMarkdownPath(path: string): boolean { return path.toLowerCase().endsWith(".md"); }
-  private isExcludedPath(path: string): boolean { return this.settings.excludedFolders.some((folder) => path === folder || path.startsWith(`${folder}/`)); }
+  private isExcludedFolderPath(path: string): boolean { return normalizeExcludedPaths(this.settings.excludedFolders).some((folder) => pathMatchesExcludedFolder(path, folder)); }
+  private isExcludedNotePath(path: string): boolean { return new Set(normalizeExcludedPaths(this.settings.excludedNotes)).has(normalizeVaultRelativePath(path)); }
+  private isExcludedPath(path: string): boolean { return this.isExcludedFolderPath(path) || this.isExcludedNotePath(path); }
   private markdownPath(file: { path?: string; extension?: string }): string | null {
     const path = file.path || "";
     return path && (file.extension?.toLowerCase() === "md" || this.isMarkdownPath(path)) ? path : null;
@@ -358,10 +371,15 @@ export default class AtomicClustersPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("delete", (file) => { const path = file.path || ""; if (path) queuePath("deleted", path); }));
     this.registerEvent(this.app.vault.on("rename", (file, oldPath) => {
       const nextPath = this.markdownPath(file); const previousPath = String(oldPath || "");
-      if (!this.pendingVaultChanges || this.settings.automaticRefresh === false) return;
+      if (!this.pendingVaultChanges) return;
       const enqueueRename = (from: string, to: string): void => {
-        const previousIncluded = this.isMarkdownPath(from) && !this.isExcludedPath(from);
-        const nextIncluded = this.isMarkdownPath(to) && !this.isExcludedPath(to);
+        // Per-note exclusions follow a renamed note. This keeps an excluded
+        // note excluded without writing a marker into its Markdown file.
+        const previouslyExcludedNote = this.isExcludedNotePath(from);
+        const carriedNoteExclusion = previouslyExcludedNote && !this.isExcludedNotePath(to) && this.rewriteExcludedNoteRename(from, to);
+        if (this.settings.automaticRefresh === false) return;
+        const previousIncluded = this.isMarkdownPath(from) && !this.isExcludedFolderPath(from) && !previouslyExcludedNote;
+        const nextIncluded = this.isMarkdownPath(to) && !this.isExcludedFolderPath(to) && !this.isExcludedNotePath(to) && !carriedNoteExclusion;
         if (previousIncluded && nextIncluded) this.pendingVaultChanges!.enqueueRenamed(from, to);
         else if (previousIncluded) this.pendingVaultChanges!.enqueueDeleted(from);
         else if (nextIncluded) this.pendingVaultChanges!.enqueueCreated(to);
@@ -384,6 +402,79 @@ export default class AtomicClustersPlugin extends Plugin {
       }
       if (childPaths.length) this.publishPendingChangeCount();
     }));
+  }
+
+  private registerFileContextMenus(): void {
+    // `file-menu` is the public Obsidian event for both files and folders in
+    // the File Explorer. Keep the handler structural and idempotent so a
+    // restored workspace cannot add duplicate actions.
+    this.registerEvent(this.app.workspace.on("file-menu", (menu, file) => this.addFileContextMenuItems(menu, file)));
+  }
+
+  private addFileContextMenuItems(menu: Menu, file: TAbstractFile): void {
+    const path = normalizeVaultRelativePath(file.path);
+    if (!path) return;
+    if (file instanceof TFile) {
+      if (!this.isMarkdownPath(path)) return;
+      const directlyExcluded = this.isExcludedNotePath(path);
+      menu.addSeparator();
+      menu.addItem((item) => item
+        .setTitle(directlyExcluded ? "Restore in Atomic Clusters" : "Exclude from Atomic Clusters")
+        .setIcon(directlyExcluded ? "eye" : "eye-off")
+        .setWarning(!directlyExcluded)
+        .onClick(() => { void this.setNoteExcluded(path, !directlyExcluded).catch((error) => new Notice(`Atomic Clusters could not update note exclusion: ${safeRunError(error)}`)); }));
+      return;
+    }
+    if (file instanceof TFolder) {
+      const directlyExcluded = normalizeExcludedPaths(this.settings.excludedFolders).includes(path);
+      const coveredByParent = this.isExcludedFolderPath(path) && !directlyExcluded;
+      menu.addSeparator();
+      menu.addItem((item) => {
+        item.setTitle(directlyExcluded ? "Include folder in Atomic Clusters" : "Exclude folder").setIcon(directlyExcluded ? "folder-open" : "folder-minus");
+        if (coveredByParent) item.setDisabled(true);
+        else item.onClick(() => { void this.setFolderExcluded(path, !directlyExcluded).catch((error) => new Notice(`Atomic Clusters could not update folder exclusion: ${safeRunError(error)}`)); });
+      });
+    }
+  }
+
+  private async setNoteExcluded(path: string, excluded: boolean): Promise<void> {
+    const normalized = normalizeVaultRelativePath(path);
+    if (!normalized) return;
+    const current = normalizeExcludedPaths(this.settings.excludedNotes);
+    const next = excluded ? [...current, normalized] : current.filter((item) => item !== normalized);
+    this.settings.excludedNotes = normalizeExcludedPaths(next);
+    await this.saveSettings();
+    await this.refreshAfterExclusionChange();
+    new Notice(excluded ? `Excluded from Atomic Clusters: ${normalized}` : `Restored in Atomic Clusters: ${normalized}`);
+  }
+
+  private async setFolderExcluded(path: string, excluded: boolean): Promise<void> {
+    const normalized = normalizeVaultRelativePath(path);
+    if (!normalized) return;
+    const current = normalizeExcludedPaths(this.settings.excludedFolders);
+    const next = excluded ? [...current, normalized] : current.filter((item) => item !== normalized);
+    this.settings.excludedFolders = normalizeExcludedPaths(next);
+    await this.saveSettings();
+    await this.refreshAfterExclusionChange();
+    new Notice(excluded ? `Excluded folder from Atomic Clusters: ${normalized}` : `Restored folder in Atomic Clusters: ${normalized}`);
+  }
+
+  private rewriteExcludedNoteRename(oldPath: string, newPath: string): boolean {
+    const oldNormalized = normalizeVaultRelativePath(oldPath); const newNormalized = normalizeVaultRelativePath(newPath);
+    const current = normalizeExcludedPaths(this.settings.excludedNotes);
+    if (!oldNormalized || !newNormalized || !current.includes(oldNormalized) || current.includes(newNormalized)) return false;
+    this.settings.excludedNotes = normalizeExcludedPaths(current.map((path) => path === oldNormalized ? newNormalized : path));
+    void this.saveSettings().catch(() => undefined);
+    return true;
+  }
+
+  private async refreshAfterExclusionChange(): Promise<void> {
+    if (!this.latestResult || !this.pendingVaultChanges) return;
+    await this.detectStartupChanges(true);
+    if (!this.pendingVaultChanges.hasChanges) return;
+    this.publishPendingChangeCount();
+    if (this.running || this.incrementalProcessing) return;
+    await this.processPendingVaultChanges(true);
   }
 
   private async configureAutomaticRefresh(): Promise<void> {

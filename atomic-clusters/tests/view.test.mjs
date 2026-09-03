@@ -54,6 +54,7 @@ test("cluster explorer uses the full pane for UMAP and exposes per-note hover ta
   assert.match(view, /mouseenter/);
   assert.match(view, /const pointButton = this\.visualizationHitElements\.find\(\(hit\) => Number\(hit\.dataset\.pointIndex\) === point\)/);
   assert.match(view, /openLinkText\(path, "", false\)/);
+  assert.match(view, /private openActiveSearchResult\(\): void \{[\s\S]*?if \(path\) \{[\s\S]*?openLinkText\(path, "", false\)/);
   assert.match(view, /atomic-clusters-tree-panel/);
   assert.match(css, /\.atomic-clusters-view \{[^}]*height: 100%/s);
   assert.match(css, /\.atomic-clusters-umap \{[^}]*flex: 1 1 auto/s);

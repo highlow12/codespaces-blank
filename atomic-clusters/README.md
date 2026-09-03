@@ -9,6 +9,15 @@ refresh**, **Open cluster explorer**, and **Cancel clustering**.
 검증 수치와 다음 단계는 [개발 현황 문서](docs/development-status.md)에 정리되어
 있다.
 
+The final release-WASM large-vault run measured 1,000 rows in 97,745 ms and
+3,000 rows in 167,310 ms on the checked-in 3,000-record Gemini dataset. Peak
+RSS was about 1.22 GB and 1.62 GB respectively; no repeated 250 ms main-thread
+stall was observed. The measured PCA-to-UMAP progress silence can exceed two
+minutes at 3,000 rows, so the persistent Notice heartbeat reports elapsed time
+and “Still working” while the algorithm remains unchanged. The 5,000/10,000
+scales remain explicitly unavailable until real source rows are supplied. See
+the [large-vault measurement report](docs/large-vault-hardening-report.md).
+
 ## Runtime design
 
 The plugin reads Markdown through the Obsidian Vault API, fingerprints content,

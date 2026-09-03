@@ -87,9 +87,9 @@ function positiveInteger(value, name) {
   return number;
 }
 
-async function readDataset(inputPath) {
+export async function readDataset(inputPath) {
   const absolute = resolve(inputPath);
-  if (basename(absolute) === "dbpedia_label_embeddings.json") {
+  if (["dbpedia_label_embeddings.json", "dbpedia_label_embeddings.json.gz"].includes(basename(absolute))) {
     throw new Error("Refusing dbpedia_label_embeddings.json; use the 3,000-record Gemini embedding dataset.");
   }
   if (!existsSync(absolute)) throw new Error(`Input dataset does not exist: ${absolute}`);
@@ -169,7 +169,7 @@ async function loadWasm(plugin) {
   return { kernel: new plugin.WasmNumericKernel(bindings), loaded: true, exports: Object.keys(bindings) };
 }
 
-function clusteringConfig(options, count, dimension) {
+export function clusteringConfig(options, count, dimension) {
   if (!options.fast) return { seed: options.seed };
   return {
     seed: options.seed,

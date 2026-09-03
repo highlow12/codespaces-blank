@@ -23,6 +23,40 @@
   → 다음 재빌드에서도 사용자의 수정은 보존된다
 ```
 
+## 0.1 2026-09-03 구현 상태 — 이전 remaining-work 목록의 #2, #3, #5
+
+현재 소스와 실제 release-WASM 측정 결과를 기준으로 한 상태 기록이다. 아래의
+`구현됨`은 해당 기능의 구현 상태를 뜻하며, 대규모 성능 항목은 측정 한계까지
+별도로 판정한다.
+
+- **#2 — per-note/folder exclusion (plan §2.6): 구현됨.** note context
+  menu와 folder context menu에서 Atomic Clusters 대상 제외/복구를 하고,
+  설정에 vault-relative exclusion을 저장한다. 이는 사용자 수정과 피드백
+  전체가 구현되었다는 뜻이 아니다. 수동 cluster title 수정/reset, note
+  preference, manual group, feedback log는 아직 구현하지 않았다.
+- **#3 — Note detail panel (plan §3.6): 구현됨.** 선택한 note의 path/title,
+  automatic leaf, hierarchy, membership/probability와 관련 note 정보를
+  확인하고 원본 note를 여는 detail panel을 구현했다. Search & Focus는 이전에
+  구현되어 있던 범위이며 이번 번호 작업의 구현 완료로 다시 주장하지 않는다.
+  manual preferred cluster/note preference는 아직 구현하지 않았다.
+- **작업 5 — Large Vault hardening: 부분 완료.** 계측 runner, renderer memory
+  preflight, persistent Notice heartbeat, cancellation/progress/RSS 계측과
+  release WASM 검증을 구현했다. 2026-09-03 실제 Gemini 3,000-record 입력의
+  release-WASM 실행은 1,000행 `97,745 ms`/peak RSS `1,218,125,824 bytes`,
+  3,000행 `167,310 ms`/peak RSS `1,623,543,808 bytes`였고, 두 실행 모두
+  반복적인 250 ms 초과 main-thread stall은 관찰되지 않았다. cancellation은
+  137–219 ms, release asset/export 검증은 통과했다.
+  - 5,000/10,000행은 현재 실제 입력이 3,000행뿐이므로 중복·외삽 없이
+    `unavailable`로 남긴다.
+  - PCA → UMAP progress 침묵 구간은 1,000행 `88,648 ms`, 3,000행
+    `144,482 ms`로 측정됐다. heartbeat는 이 동안 Notice의 elapsed/“Still
+    working” 가시성을 보완하지만 알고리즘 progress gap을 없애지 않으므로,
+    이 수치와 5,000/10,000 미측정 상태 때문에 작업 5의 제품 acceptance를
+    완료로 표시하지 않는다.
+
+상세 raw 결과는 `/tmp/atomic-clusters-large-vault-hardening-final-2026-09-03/`
+및 `atomic-clusters/docs/large-vault-hardening-report.md`에 있다.
+
 ### 제품화 원칙
 
 1. **자동화보다 통제 가능성이 우선이다.** 자동 결과는 수정할 수 있어야 한다.

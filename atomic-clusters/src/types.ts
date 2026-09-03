@@ -9,6 +9,8 @@ export interface PluginSettings {
   /** Prefer WebGPU when available, or force the WASM CPU backend. */
   localExecutionProvider?: LocalExecutionProvider;
   excludedFolders: string[];
+  /** Vault-relative Markdown paths excluded without changing note frontmatter. */
+  excludedNotes?: string[];
   minClusterSize: number;
   minSamples: number;
   umapNeighbors: number;
@@ -20,6 +22,29 @@ export interface PluginSettings {
   automaticRefresh?: boolean;
   /** Debounce delay for automatic refresh, in seconds. */
   refreshDelaySeconds?: number;
+}
+
+/** Normalize user-entered vault-relative paths before comparing or persisting them. */
+export function normalizeVaultRelativePath(value: unknown): string {
+  return String(value ?? "")
+    .trim()
+    .replace(/\\/g, "/")
+    .replace(/^\.\/+/, "")
+    .replace(/^\/+/, "")
+    .replace(/\/+$/, "")
+    .trim();
+}
+
+/** Keep exclusion settings migration-safe when loading older plugin data. */
+export function normalizeExcludedPaths(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map(normalizeVaultRelativePath).filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+export function pathMatchesExcludedFolder(path: string, folder: string): boolean {
+  const normalizedPath = normalizeVaultRelativePath(path);
+  const normalizedFolder = normalizeVaultRelativePath(folder);
+  return !!normalizedPath && !!normalizedFolder && (normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`));
 }
 
 export interface NoteRecord {
