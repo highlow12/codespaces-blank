@@ -1,7 +1,16 @@
 import * as Obsidian from "obsidian";
 import { App, Modal, Notice, Plugin, PluginSettingTab, Setting } from "obsidian";
 import { LocalModelManager, LocalModelProgress, LocalRuntimeProgress } from "./embedding";
-import { normalizeExcludedPaths, PluginSettings } from "./types";
+import { normalizeExcludedPaths, normalizeVaultRelativePath, pathMatchesExcludedFolder, PluginSettings } from "./types";
+
+export function hasIncludedMarkdownNotePaths(paths: readonly string[], excludedFolders: readonly string[] = [], excludedNotes: readonly string[] = []): boolean {
+  const folders = normalizeExcludedPaths(excludedFolders);
+  const notes = new Set(normalizeExcludedPaths(excludedNotes));
+  return paths.some((value) => {
+    const path = normalizeVaultRelativePath(value);
+    return path.toLowerCase().endsWith(".md") && !!path && !notes.has(path) && !folders.some((folder) => pathMatchesExcludedFolder(path, folder));
+  });
+}
 
 export interface ClusterRunControls {
   build(): Promise<void>;
@@ -22,7 +31,22 @@ export class AtomicClustersSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("HDBSCAN minimum samples").setDesc("Core-distance neighbourhood size (default: 3). Lower values retain finer leaf clusters.").addText((text) => text.setValue(String(this.settings.minSamples)).onChange(async (value) => { const parsed = Number.parseInt(value, 10); this.settings.minSamples = Number.isSafeInteger(parsed) && parsed >= 1 ? parsed : 3; await this.save(); }));
     new Setting(containerEl).setName("Automatic refresh").setDesc("Watch Markdown changes and refresh a small change set after the delay. Large or structurally risky changes trigger a full rebuild.").addToggle((toggle) => toggle.setValue(this.settings.automaticRefresh !== false).onChange(async (value) => { this.settings.automaticRefresh = value; await this.save(); this.onRefreshSettingsChange?.(); }));
     new Setting(containerEl).setName("Refresh delay (seconds)").setDesc("Debounce automatic refreshes; the safety cap is 60 seconds.").addText((text) => text.setValue(String(this.settings.refreshDelaySeconds ?? 5)).setPlaceholder("5").onChange(async (value) => { const parsed = Number.parseFloat(value); this.settings.refreshDelaySeconds = Number.isFinite(parsed) ? Math.max(0, Math.min(60, parsed)) : 5; await this.save(); this.onRefreshSettingsChange?.(); }));
-    new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => text.setValue(this.settings.excludedFolders.join(", ")).onChange(async (value) => { this.settings.excludedFolders = normalizeExcludedPaths(value.split(",")); await this.save(); this.onRefreshSettingsChange?.(); }));
+    new Setting(containerEl).setName("Excluded folders").setDesc("Comma-separated vault-relative folder paths.").addText((text) => {
+      let lastAccepted = normalizeExcludedPaths(this.settings.excludedFolders);
+      return text.setValue(lastAccepted.join(", ")).onChange(async (value) => {
+        const next = normalizeExcludedPaths(value.split(","));
+        const paths = this.app.vault.getMarkdownFiles().map((file) => file.path);
+        if (!hasIncludedMarkdownNotePaths(paths, next, this.settings.excludedNotes)) {
+          text.setValue(lastAccepted.join(", "));
+          new Notice("Atomic Clusters must keep at least one Markdown note included. Restore another note or folder before excluding this folder.");
+          return;
+        }
+        this.settings.excludedFolders = next;
+        lastAccepted = next;
+        await this.save();
+        await this.onExcludedNotesChange?.();
+      });
+    });
     this.renderExcludedNotesControl(containerEl);
     this.renderClusterRunControl(containerEl);
     this.renderKeywordTitleControl(containerEl);

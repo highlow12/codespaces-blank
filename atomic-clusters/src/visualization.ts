@@ -3,6 +3,9 @@ import { ClusterResult, HierarchyMerge, HierarchyPlacement, HierarchyTree, Visua
 const TAB20 = ["#1f77b4", "#aec7e8", "#ff7f0e", "#ffbb78", "#2ca02c", "#98df8a", "#d62728", "#ff9896", "#9467bd", "#c5b0d5", "#8c564b", "#c49c94", "#e377c2", "#f7b6d2", "#7f7f7f", "#c7c7c7", "#bcbd22", "#dbdb8d", "#17becf", "#9edae5"] as const;
 export const VISUALIZATION_NOISE_COLOR = "#9aa0a6";
 export const VISUALIZATION_POINT_PADDING = 18;
+export const VISUALIZATION_POINT_RADIUS = 4;
+export const VISUALIZATION_HOVER_POINT_RADIUS = 6;
+export const VISUALIZATION_HOVER_RING_RADIUS = 10;
 export const VISUALIZATION_KERNEL_SCALE_MIN = 0.25;
 export const VISUALIZATION_KERNEL_SCALE_MAX = 2;
 export const VISUALIZATION_KERNEL_SCALE_STEP = 0.05;
@@ -22,8 +25,16 @@ export interface VisualizationDepthEntry extends VisualizationFrontierEntry {
   /** Root-to-entry ids, useful for assigning note emphasis without rescanning. */
   pathIds: string[];
 }
-export interface VisualizationCameraState { centerX: number; centerY: number; zoom: number; fitScale: number; width: number; height: number; padding: number; }
 export interface VisualizationCamera { scale: number; offsetX: number; offsetY: number; width: number; height: number; worldRegion: { minX: number; maxX: number; minY: number; maxY: number }; }
+export interface VisualizationWorldBounds { minX: number; maxX: number; minY: number; maxY: number; }
+export interface VisualizationLabelBox { width: number; height: number; }
+export interface VisualizationCameraFitOptions {
+  pointRadius?: number;
+  hoverPointRadius?: number;
+  labelBoxes?: readonly VisualizationLabelBox[];
+  labelMargin?: number;
+}
+export interface VisualizationCameraState { centerX: number; centerY: number; zoom: number; fitScale: number; width: number; height: number; padding: number; contentBounds?: VisualizationWorldBounds; renderedPointRadius?: number; }
 export interface VisualizationCameraLayerTransform { scale: number; translateX: number; translateY: number; }
 export interface VisualizationSplat { x: number; y: number; sigma: number; color: [number, number, number]; amplitude: number; }
 export interface VisualizationDensityField { width: number; height: number; density: Float32Array; red: Float32Array; green: Float32Array; blue: Float32Array; }
@@ -284,20 +295,73 @@ export function clampVisualizationZoom(value: number): number {
 export const VISUALIZATION_ZOOM_MIN = 0.5;
 export const VISUALIZATION_ZOOM_MAX = 16;
 
+/**
+ * Return the smallest symmetric screen inset that keeps rendered geometry
+ * inside the viewport.  The label contribution is based on measured boxes,
+ * not on a guessed character count, so long titles and theme fonts get the
+ * same treatment as points.
+ */
+export function visualizationSafePadding(
+  width: number,
+  height: number,
+  padding = VISUALIZATION_POINT_PADDING,
+  options: VisualizationCameraFitOptions = {},
+): number {
+  const safeWidth = Math.max(1, Number.isFinite(width) ? width : 1);
+  const safeHeight = Math.max(1, Number.isFinite(height) ? height : 1);
+  const basePadding = Math.max(0, Number.isFinite(padding) ? padding : VISUALIZATION_POINT_PADDING);
+  const pointRadius = Math.max(0, Number.isFinite(options.pointRadius) ? options.pointRadius! : VISUALIZATION_POINT_RADIUS);
+  const hoverRadius = Math.max(pointRadius, Number.isFinite(options.hoverPointRadius) ? options.hoverPointRadius! : VISUALIZATION_HOVER_RING_RADIUS);
+  const labelMargin = Math.max(0, Number.isFinite(options.labelMargin) ? options.labelMargin! : 8);
+  const labelPadding = (options.labelBoxes || []).reduce((maximum, box) => {
+    if (!box) return maximum;
+    const boxWidth = Math.max(0, Number.isFinite(box.width) ? box.width : 0);
+    const boxHeight = Math.max(0, Number.isFinite(box.height) ? box.height : 0);
+    return Math.max(maximum, boxWidth / 2, boxHeight / 2);
+  }, 0) + labelMargin;
+  return Math.min(Math.max(basePadding, pointRadius, hoverRadius, labelPadding), Math.min(safeWidth, safeHeight) / 2);
+}
+
 /** Fit all world coordinates and return a pan/zoom state centered on them. */
-export function visualizationFitCameraState(coordinates: readonly VisualizationCoordinate[], width: number, height: number, padding = VISUALIZATION_POINT_PADDING): VisualizationCameraState {
+export function visualizationFitCameraState(
+  coordinates: readonly VisualizationCoordinate[],
+  width: number,
+  height: number,
+  padding = VISUALIZATION_POINT_PADDING,
+  options: VisualizationCameraFitOptions = {},
+): VisualizationCameraState {
   const region = visualizationRegion({ pointIndices: coordinates.map((_point, index) => index) } as VisualizationNode, coordinates);
   const safeWidth = Math.max(1, Number.isFinite(width) ? width : 1), safeHeight = Math.max(1, Number.isFinite(height) ? height : 1);
-  const safePadding = Math.max(0, Math.min(Number.isFinite(padding) ? padding : VISUALIZATION_POINT_PADDING, Math.min(safeWidth, safeHeight) / 2));
+  const safePadding = visualizationSafePadding(safeWidth, safeHeight, padding, options);
   const fitScale = Math.min((safeWidth - safePadding * 2) / Math.max(EPSILON, region.maxX - region.minX), (safeHeight - safePadding * 2) / Math.max(EPSILON, region.maxY - region.minY));
-  return { centerX: (region.minX + region.maxX) / 2, centerY: (region.minY + region.maxY) / 2, zoom: 1, fitScale: Math.max(EPSILON, fitScale), width: safeWidth, height: safeHeight, padding: safePadding };
+  const renderedPointRadius = Math.max(
+    Number.isFinite(options.pointRadius) ? options.pointRadius! : VISUALIZATION_POINT_RADIUS,
+    Number.isFinite(options.hoverPointRadius) ? options.hoverPointRadius! : VISUALIZATION_HOVER_RING_RADIUS,
+  );
+  return {
+    centerX: (region.minX + region.maxX) / 2,
+    centerY: (region.minY + region.maxY) / 2,
+    zoom: 1,
+    fitScale: Math.max(EPSILON, fitScale),
+    width: safeWidth,
+    height: safeHeight,
+    padding: safePadding,
+    contentBounds: { ...region },
+    renderedPointRadius,
+  };
 }
 export const fitVisualizationCamera = visualizationFitCameraState;
 export const createVisualizationCameraState = visualizationFitCameraState;
 /** Resize a camera while preserving its world center and user zoom. */
-export function resizeVisualizationCameraState(state: VisualizationCameraState, coordinates: readonly VisualizationCoordinate[], width: number, height: number): VisualizationCameraState {
-  const fitted = visualizationFitCameraState(coordinates, width, height, state.padding);
-  return { ...fitted, centerX: state.centerX, centerY: state.centerY, zoom: clampVisualizationZoom(state.zoom) };
+export function resizeVisualizationCameraState(
+  state: VisualizationCameraState,
+  coordinates: readonly VisualizationCoordinate[],
+  width: number,
+  height: number,
+  options: VisualizationCameraFitOptions = {},
+): VisualizationCameraState {
+  const fitted = visualizationFitCameraState(coordinates, width, height, state.padding, options);
+  return constrainVisualizationCameraState({ ...fitted, centerX: state.centerX, centerY: state.centerY, zoom: clampVisualizationZoom(state.zoom) });
 }
 export const resizeVisualizationCamera = resizeVisualizationCameraState;
 
@@ -309,10 +373,43 @@ export function visualizationCameraFromState(state: VisualizationCameraState): V
 export const cameraFromVisualizationState = visualizationCameraFromState;
 export const visualizationPanZoomCamera = visualizationCameraFromState;
 
+/**
+ * Keep the rendered content from being dragged past the safe viewport edge.
+ * When the content is smaller than the drawable area it stays inside that
+ * area; when it is larger, the drawable area stays covered by the content.
+ * This is deliberately a pure state clamp, so drag and settled frames use
+ * exactly the same coordinate system.
+ */
+export function constrainVisualizationCameraState(state: VisualizationCameraState): VisualizationCameraState {
+  const bounds = state.contentBounds;
+  if (!bounds) return state;
+  const camera = visualizationCameraFromState(state);
+  const scale = Math.max(EPSILON, camera.scale);
+  const safePadding = Math.max(0, Math.min(state.padding, Math.min(camera.width, camera.height) / 2));
+  const renderedRadius = Math.max(0, Number.isFinite(state.renderedPointRadius) ? state.renderedPointRadius! : VISUALIZATION_HOVER_RING_RADIUS);
+  const clampAxis = (center: number, minimum: number, maximum: number, viewportSize: number): number => {
+    const contentMinimum = minimum - renderedRadius / scale;
+    const contentMaximum = maximum + renderedRadius / scale;
+    const halfDrawable = Math.max(0, (viewportSize / 2 - safePadding) / scale);
+    const contentSize = contentMaximum - contentMinimum;
+    const drawableSize = halfDrawable * 2;
+    const lower = contentSize <= drawableSize ? contentMaximum - halfDrawable : contentMinimum + halfDrawable;
+    const upper = contentSize <= drawableSize ? contentMinimum + halfDrawable : contentMaximum - halfDrawable;
+    if (!Number.isFinite(lower) || !Number.isFinite(upper)) return center;
+    if (lower <= upper) return Math.max(lower, Math.min(upper, center));
+    return (lower + upper) / 2;
+  };
+  return {
+    ...state,
+    centerX: clampAxis(state.centerX, bounds.minX, bounds.maxX, camera.width),
+    centerY: clampAxis(state.centerY, bounds.minY, bounds.maxY, camera.height),
+  };
+}
+
 /** Pan by screen pixels (dragging right moves the world right). */
 export function panVisualizationCamera(state: VisualizationCameraState, deltaX: number, deltaY: number): VisualizationCameraState {
   const camera = visualizationCameraFromState(state); const dx = Number.isFinite(deltaX) ? deltaX : 0; const dy = Number.isFinite(deltaY) ? deltaY : 0;
-  return { ...state, centerX: state.centerX - dx / camera.scale, centerY: state.centerY + dy / camera.scale };
+  return constrainVisualizationCameraState({ ...state, centerX: state.centerX - dx / camera.scale, centerY: state.centerY + dy / camera.scale });
 }
 export const panCamera = panVisualizationCamera;
 
@@ -321,7 +418,7 @@ export function zoomVisualizationCameraAt(state: VisualizationCameraState, scree
   const before = visualizationCameraFromState(state); const world = visualizationScreenToWorld(before, [screenX, screenY]);
   const zoom = clampVisualizationZoom(state.zoom * (Number.isFinite(factor) && factor > 0 ? factor : 1));
   const next = visualizationCameraFromState({ ...state, zoom }); const centerX = world[0] - (screenX - next.width / 2) / next.scale; const centerY = world[1] + (screenY - next.height / 2) / next.scale;
-  return { ...state, zoom, centerX, centerY };
+  return constrainVisualizationCameraState({ ...state, zoom, centerX, centerY });
 }
 export const zoomVisualizationCamera = zoomVisualizationCameraAt;
 export const zoomCameraAt = zoomVisualizationCameraAt;
@@ -494,6 +591,25 @@ export function visualizationLabelContrast(clusterColor: string): VisualizationL
 
 export interface VisualizationLabelLayoutOptions { margin?: number; gap?: number; labelHeight?: number; measureText?: (text: string) => number; }
 
+/** Measure the boxes that the current label renderer will draw. */
+export function measureVisualizationClusterLabelBoxes(
+  frontier: readonly VisualizationFrontierEntry[],
+  titles: Readonly<Record<string, string>> | undefined,
+  measureText: (text: string) => number = (text) => text.length * 7,
+  labelHeight = 20,
+): VisualizationLabelBox[] {
+  const height = Math.max(10, Number.isFinite(labelHeight) ? labelHeight : 20);
+  const boxes: VisualizationLabelBox[] = [];
+  for (const entry of frontier) {
+    const text = visualizationClusterLabelText(entry, titles);
+    if (!text) continue;
+    const measured = Number(measureText(text));
+    const textWidth = Math.max(1, Number.isFinite(measured) && measured > 0 ? measured : text.length * 7);
+    boxes.push({ width: textWidth + 16, height });
+  }
+  return boxes;
+}
+
 /**
  * Lay out labels for the current cloud frontier in screen coordinates.  The
  * candidate position is the centroid of the visible points (falling back to
@@ -517,11 +633,11 @@ export function layoutVisualizationClusterLabels(
     const text = visualizationClusterLabelText(entry, titles); if (!text) continue;
     const indices = (entry.pointIndices.length ? entry.pointIndices : entry.node.pointIndices).filter((index) => !!points[index] && points[index].every(Number.isFinite)); if (!indices.length) continue;
     const centerX = indices.reduce((sum, index) => sum + points[index][0], 0) / indices.length; const centerY = indices.reduce((sum, index) => sum + points[index][1], 0) / indices.length;
-    const textWidth = Math.max(1, Number(measure(text)) || text.length * 7); const boxWidth = textWidth + 16; const boxHeight = labelHeight; const minX = margin; const maxX = Math.max(minX, viewportWidth - margin - boxWidth); const minY = margin; const maxY = Math.max(minY, viewportHeight - margin - boxHeight);
-    const x = Math.max(minX, Math.min(maxX, centerX - boxWidth / 2)); let y = Math.max(minY, Math.min(maxY, centerY - boxHeight / 2));
-    const contrast = visualizationLabelContrast(colors.get(entry.node.id) || VISUALIZATION_NOISE_COLOR); const placement: VisualizationLabelPlacement = { id: entry.node.id, text, x, y, width: Math.min(boxWidth, Math.max(0, viewportWidth - margin * 2)), height: Math.min(boxHeight, Math.max(0, viewportHeight - margin * 2)), contrast };
+    const textWidth = Math.max(1, Number(measure(text)) || text.length * 7); const boxWidth = textWidth + 16; const boxHeight = labelHeight; const horizontalMargin = Math.min(margin, viewportWidth / 2); const verticalMargin = Math.min(margin, viewportHeight / 2); const renderedWidth = Math.min(boxWidth, Math.max(0, viewportWidth - horizontalMargin * 2)); const renderedHeight = Math.min(boxHeight, Math.max(0, viewportHeight - verticalMargin * 2)); const minX = horizontalMargin; const maxX = Math.max(minX, viewportWidth - horizontalMargin - renderedWidth); const minY = verticalMargin; const maxY = Math.max(minY, viewportHeight - verticalMargin - renderedHeight);
+    const x = Math.max(minX, Math.min(maxX, centerX - renderedWidth / 2)); let y = Math.max(minY, Math.min(maxY, centerY - renderedHeight / 2));
+    const contrast = visualizationLabelContrast(colors.get(entry.node.id) || VISUALIZATION_NOISE_COLOR); const placement: VisualizationLabelPlacement = { id: entry.node.id, text, x, y, width: renderedWidth, height: renderedHeight, contrast };
     // Try a deterministic sequence of vertical positions before accepting an overlap.
-    const candidates = [y, y - (boxHeight + gap), y + (boxHeight + gap), y - 2 * (boxHeight + gap), y + 2 * (boxHeight + gap)];
+    const candidates = [y, y - (renderedHeight + gap), y + (renderedHeight + gap), y - 2 * (renderedHeight + gap), y + 2 * (renderedHeight + gap)];
     const overlaps = (left: VisualizationLabelPlacement, top: number): boolean => left.x < placement.x + placement.width + gap && placement.x < left.x + left.width + gap && top < left.y + left.height + gap && left.y < top + placement.height + gap;
     for (const candidate of candidates) { const bounded = Math.max(minY, Math.min(maxY, candidate)); if (!placements.some((placed) => overlaps(placed, bounded))) { y = bounded; break; } }
     placement.y = y; placements.push(placement);

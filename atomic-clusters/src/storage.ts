@@ -2,7 +2,35 @@ import { normalizePath, Plugin, Vault } from "obsidian";
 import { CachedEmbedding, ClusterResult, EmbeddingRunLog, NoteRecord, normalizeExcludedPaths, normalizeVaultRelativePath, pathMatchesExcludedFolder } from "./types";
 // The SQLite store is exported from this legacy entry point so callers can
 // adopt the durable store without changing their storage import path.
-export { SqliteClusterStore, createSqliteStore, migrateLegacyJson, migrateLegacyAdapter, projectPca, embeddingHash, pcaModelHash, SQLITE_PATH, SQLITE_SCHEMA_VERSION } from "./sqlite-storage";
+export {
+  SqliteClusterStore,
+  createSqliteStore,
+  migrateLegacyJson,
+  migrateLegacyAdapter,
+  projectPca,
+  embeddingHash,
+  pcaModelHash,
+  normalizeClusterMemberPaths,
+  stableClusterFingerprint,
+  clusterFingerprint,
+  computeClusterFingerprint,
+  jaccardOverlap,
+  resolveClusterMigration,
+  generatedClusterSnapshots,
+  clusterSnapshotsForResult,
+  SQLITE_PATH,
+  SQLITE_SCHEMA_VERSION,
+  SQLITE_MANUAL_CORRECTIONS_SCHEMA_VERSION,
+  MANUAL_CORRECTIONS_SCHEMA_VERSION,
+} from "./sqlite-storage";
+export type {
+  ClusterTitleOverride,
+  NoteClusterPreference,
+  ManualClusterGroup,
+  FeedbackEvent,
+  GeneratedClusterSnapshot,
+  ManualCorrectionsState,
+} from "./types";
 
 interface CacheDocument { version: 1; embeddings: CachedEmbedding[]; }
 

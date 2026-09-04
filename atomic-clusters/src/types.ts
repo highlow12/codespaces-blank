@@ -307,6 +307,72 @@ export interface ClusterResult {
   incremental?: IncrementalRefreshMetadata;
 }
 
+/**
+ * A user-authored title is keyed by a cluster's member-path fingerprint, not
+ * by the ephemeral numeric node id produced by a rebuild.
+ *
+ * `orphaned` is omitted for an active override and is exposed when a cautious
+ * rebuild migration could not find one unambiguous successor cluster.
+ */
+export interface ClusterTitleOverride {
+  stableClusterKey: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  orphaned?: boolean;
+}
+
+export interface NoteClusterPreference {
+  notePath: string;
+  preferredClusterKey: string;
+  createdAt: string;
+}
+
+/** A view-only grouping; it never changes generated hierarchy data. */
+export interface ManualClusterGroup {
+  groupId: string;
+  title: string;
+  childClusterKeys: string[];
+  createdAt: string;
+  updatedAt: string;
+  orphanedChildClusterKeys?: string[];
+}
+
+export type FeedbackEventType =
+  | "too-broad"
+  | "general"
+  | "title-renamed"
+  | "title-reset"
+  | "note-preference-changed"
+  | "note-preference-cleared"
+  | "manual-group-created"
+  | "manual-group-deleted"
+  | string;
+
+export interface FeedbackEvent {
+  id: number;
+  type: FeedbackEventType;
+  stableClusterKey?: string;
+  notePath?: string;
+  message?: string;
+  details?: Record<string, unknown>;
+  createdAt: string;
+}
+
+/** Generated cluster evidence used to restore manual references after a rebuild. */
+export interface GeneratedClusterSnapshot {
+  stableClusterKey: string;
+  nodeId: number;
+  memberPaths: string[];
+}
+
+export interface ManualCorrectionsState {
+  titleOverrides: ClusterTitleOverride[];
+  notePreferences: NoteClusterPreference[];
+  groups: ManualClusterGroup[];
+  feedback: FeedbackEvent[];
+}
+
 export type WorkerRequest =
   | { type: "INIT"; version: 1 }
   | { type: "CLUSTER"; jobId: string; ids: string[]; embeddings: number[][]; config: ClusteringConfig }

@@ -18,6 +18,43 @@ import initSqlJs from "sql.js";
 // EmbeddingLogStore remains exported for legacy callers; runtime writes use
 // the SQLite embedding_logs table through SqliteClusterStore.
 
+export type ExclusionState = "direct" | "inherited" | "included";
+export type RenameBoundaryAction = "renamed" | "created" | "deleted" | "ignored";
+
+/** Classify the exclusion rule that applies to a vault path for a menu item. */
+export function getExclusionState(path: string, excludedFolders: readonly string[] = [], excludedNotes: readonly string[] = [], kind: "note" | "folder" = "note"): ExclusionState {
+  const normalizedPath = normalizeVaultRelativePath(path);
+  const folders = normalizeExcludedPaths(excludedFolders);
+  const direct = kind === "folder"
+    ? folders.includes(normalizedPath)
+    : normalizeExcludedPaths(excludedNotes).includes(normalizedPath);
+  const inherited = folders.some((folder) => folder !== normalizedPath && pathMatchesExcludedFolder(normalizedPath, folder));
+  return inherited ? "inherited" : direct ? "direct" : "included";
+}
+
+/** Return whether at least one Markdown path remains included by the rules. */
+export function hasIncludedMarkdownNotePaths(paths: readonly string[], excludedFolders: readonly string[] = [], excludedNotes: readonly string[] = []): boolean {
+  const folders = normalizeExcludedPaths(excludedFolders);
+  const notes = new Set(normalizeExcludedPaths(excludedNotes));
+  return paths.some((value) => {
+    const path = normalizeVaultRelativePath(value);
+    return path.toLowerCase().endsWith(".md") && !!path && !notes.has(path) && !folders.some((folder) => pathMatchesExcludedFolder(path, folder));
+  });
+}
+
+/** Classify a Markdown rename before it is placed on the automatic-refresh queue. */
+export function classifyRenameBoundary(from: string, to: string, excludedFolders: readonly string[] = [], excludedNotes: readonly string[] = [], automaticRefresh = true): RenameBoundaryAction {
+  if (!automaticRefresh) return "ignored";
+  const previousPath = normalizeVaultRelativePath(from);
+  const nextPath = normalizeVaultRelativePath(to);
+  const previousIncluded = previousPath.toLowerCase().endsWith(".md") && getExclusionState(previousPath, excludedFolders, excludedNotes, "note") === "included";
+  const nextIncluded = nextPath.toLowerCase().endsWith(".md") && getExclusionState(nextPath, excludedFolders, excludedNotes, "note") === "included";
+  if (previousIncluded && nextIncluded) return "renamed";
+  if (previousIncluded) return "deleted";
+  if (nextIncluded) return "created";
+  return "ignored";
+}
+
 const DEFAULT_SETTINGS: PluginSettings = {
   embeddingProvider: "gemini", geminiModel: "gemini-embedding-2", geminiSecretRef: "gemini-api-key",
   localModel: "multilingual-e5-small", localExecutionProvider: "auto", excludedFolders: [], excludedNotes: [], minClusterSize: 5, minSamples: 3,
@@ -319,12 +356,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private isExcludedNotePath(path: string): boolean { return new Set(normalizeExcludedPaths(this.settings.excludedNotes)).has(normalizeVaultRelativePath(path)); }
   private isExcludedPath(path: string): boolean { return this.isExcludedFolderPath(path) || this.isExcludedNotePath(path); }
   private hasIncludedMarkdownNotes(excludedFolders: string[], excludedNotes: string[]): boolean {
-    const folders = normalizeExcludedPaths(excludedFolders);
-    const notes = new Set(normalizeExcludedPaths(excludedNotes));
-    return this.app.vault.getMarkdownFiles().some((file) => {
-      const path = normalizeVaultRelativePath(file.path);
-      return !!path && !notes.has(path) && !folders.some((folder) => pathMatchesExcludedFolder(path, folder));
-    });
+    return hasIncludedMarkdownNotePaths(this.app.vault.getMarkdownFiles().map((file) => file.path), excludedFolders, excludedNotes);
   }
   private markdownPath(file: { path?: string; extension?: string }): string | null {
     const path = file.path || "";
@@ -361,13 +393,11 @@ export default class AtomicClustersPlugin extends Plugin {
       if (!this.pendingVaultChanges) return;
       const enqueueRename = (from: string, to: string): void => {
         const previouslyExcludedNote = this.isExcludedNotePath(from);
-        const carriedNoteExclusion = previouslyExcludedNote && !this.isExcludedNotePath(to) && this.rewriteExcludedNoteRename(from, to);
-        if (this.settings.automaticRefresh === false) return;
-        const previousIncluded = this.isMarkdownPath(from) && !this.isExcludedFolderPath(from) && !previouslyExcludedNote;
-        const nextIncluded = this.isMarkdownPath(to) && !this.isExcludedFolderPath(to) && !this.isExcludedNotePath(to) && !carriedNoteExclusion;
-        if (previousIncluded && nextIncluded) this.pendingVaultChanges!.enqueueRenamed(from, to);
-        else if (previousIncluded) this.pendingVaultChanges!.enqueueDeleted(from);
-        else if (nextIncluded) this.pendingVaultChanges!.enqueueCreated(to);
+        if (previouslyExcludedNote && !this.isExcludedNotePath(to)) this.rewriteExcludedNoteRename(from, to);
+        const action = classifyRenameBoundary(from, to, this.settings.excludedFolders, this.settings.excludedNotes, this.settings.automaticRefresh !== false);
+        if (action === "renamed") this.pendingVaultChanges!.enqueueRenamed(from, to);
+        else if (action === "deleted") this.pendingVaultChanges!.enqueueDeleted(from);
+        else if (action === "created") this.pendingVaultChanges!.enqueueCreated(to);
       };
       if (nextPath) { enqueueRename(previousPath, nextPath); this.publishPendingChangeCount(); return; }
       const folder = file as { path?: string; children?: unknown[] };
@@ -396,10 +426,10 @@ export default class AtomicClustersPlugin extends Plugin {
     if (file instanceof TFile) {
       if (!this.isMarkdownPath(path)) return;
       const directlyExcluded = this.isExcludedNotePath(path);
-      const coveredByParent = this.isExcludedFolderPath(path);
+      const state = getExclusionState(path, this.settings.excludedFolders, this.settings.excludedNotes, "note");
       menu.addSeparator();
       menu.addItem((item) => {
-        if (coveredByParent) {
+        if (state === "inherited") {
           item.setTitle("Excluded by parent folder").setIcon("eye-off").setDisabled(true);
           return;
         }
@@ -412,12 +442,12 @@ export default class AtomicClustersPlugin extends Plugin {
       return;
     }
     if (file instanceof TFolder) {
-      const directlyExcluded = normalizeExcludedPaths(this.settings.excludedFolders).includes(path);
-      const coveredByParent = this.isExcludedFolderPath(path) && !directlyExcluded;
+      const state = getExclusionState(path, this.settings.excludedFolders, this.settings.excludedNotes, "folder");
+      const directlyExcluded = state === "direct";
       menu.addSeparator();
       menu.addItem((item) => {
-        item.setTitle(directlyExcluded ? "Include folder in Atomic Clusters" : coveredByParent ? "Excluded by parent folder" : "Exclude folder").setIcon(directlyExcluded ? "folder-open" : "folder-minus");
-        if (coveredByParent) item.setDisabled(true);
+        item.setTitle(directlyExcluded ? "Include folder in Atomic Clusters" : state === "inherited" ? "Excluded by parent folder" : "Exclude folder").setIcon(directlyExcluded ? "folder-open" : "folder-minus");
+        if (state === "inherited") item.setDisabled(true);
         else item.onClick(() => { void this.setFolderExcluded(path, !directlyExcluded).catch((error) => new Notice(`Atomic Clusters could not update folder exclusion: ${safeRunError(error)}`)); });
       });
     }
@@ -428,6 +458,10 @@ export default class AtomicClustersPlugin extends Plugin {
     if (!normalized) return;
     const current = normalizeExcludedPaths(this.settings.excludedNotes);
     const next = normalizeExcludedPaths(excluded ? [...current, normalized] : current.filter((item) => item !== normalized));
+    if (excluded && getExclusionState(normalized, this.settings.excludedFolders, current, "note") === "inherited") {
+      new Notice("This Markdown note is already excluded by its parent folder.");
+      return;
+    }
     if (excluded && !this.hasIncludedMarkdownNotes(this.settings.excludedFolders, next)) {
       new Notice("Atomic Clusters must keep at least one Markdown note included. Restore another note or folder before excluding this one.");
       return;
@@ -443,7 +477,7 @@ export default class AtomicClustersPlugin extends Plugin {
     if (!normalized) return;
     const current = normalizeExcludedPaths(this.settings.excludedFolders);
     const next = normalizeExcludedPaths(excluded ? [...current, normalized] : current.filter((item) => item !== normalized));
-    if (excluded && !this.hasIncludedMarkdownNotes(next, this.settings.excludedNotes)) {
+    if (excluded && !this.hasIncludedMarkdownNotes(next, this.settings.excludedNotes || [])) {
       new Notice("Atomic Clusters must keep at least one Markdown note included. Restore another note or folder before excluding this folder.");
       return;
     }
@@ -515,7 +549,7 @@ export default class AtomicClustersPlugin extends Plugin {
       for (const note of notes) {
         if (inferredRenames.has(note.path)) continue;
         const old = previous.get(note.path);
-        if (!old) this.pendingVaultChanges.enqueueCreated(note.path);
+        if (!old || !this.latestResult.ids.includes(note.path)) this.pendingVaultChanges.enqueueCreated(note.path);
         else if (old.hash !== note.hash) this.pendingVaultChanges.enqueueModified(note.path);
       }
       for (const note of previous.values()) if (!current.has(note.path) && !inferredRenames.has(note.path)) this.pendingVaultChanges.enqueueDeleted(note.path);
@@ -593,7 +627,8 @@ export default class AtomicClustersPlugin extends Plugin {
       const source = [...renames.entries()].find(([, target]) => target === note.path)?.[0];
       const old = source ? previous.get(source) || previous.get(note.path) : previous.get(note.path);
       const eventForcesContentCheck = snapshot.created.has(note.path) || snapshot.modified.has(note.path);
-      if (!old || old.hash !== note.hash || eventForcesContentCheck && !savedHashes.has(note.path)) changedPaths.add(note.path);
+      const wasInSavedResult = resultPaths.has(note.path) || !!source && resultPaths.has(source);
+      if (!wasInSavedResult || !old || old.hash !== note.hash || eventForcesContentCheck && !savedHashes.has(note.path)) changedPaths.add(note.path);
     }
     for (const old of previous.values()) if (!current.has(old.path) && !renamedOld.has(old.path)) deletedPaths.add(old.path);
     for (const path of snapshot.deleted) if (!current.has(path) && !renamedOld.has(path) && result?.ids.includes(path)) deletedPaths.add(path);
