@@ -98,6 +98,38 @@ test("cluster fingerprints normalize, sort, and deduplicate member paths", async
   assert.equal(Storage.jaccardOverlap(["a", "b", "b"], ["a", "b", "c"]), 2 / 3);
 });
 
+test("renaming a note updates persisted compact result path metadata and survives reopen", async () => {
+  const Storage = await loadStorage();
+  const { store, adapter, SQL } = await openStore(Storage);
+  await seed(store, ["old.md", "keep.md"]);
+  const resultId = await store.saveResult({
+    ...oneClusterResult(["old.md", "keep.md"]),
+    incremental: { mode: "soft", generatedAt: "2026-09-04T00:00:00.000Z", changedPaths: ["old.md", "keep.md"], provisionalPaths: ["old.md"], outOfDistributionPaths: ["old.md"], fullRebuildRecommended: false, knnSupport: { "old.md": 0.8 }, knnDistance: { "old.md": 1.25 } },
+  }, { resultId: "rename-result" });
+  const compact = JSON.parse(store.query("SELECT result_json AS resultJson FROM results WHERE result_id=?", [resultId])[0].resultJson);
+  // The normal v6 writer omits row-aligned ids. Add the same legacy fields a
+  // partially migrated result can still carry so this exercises both shapes.
+  compact.ids = ["old.md", "keep.md"];
+  compact.provisionalPaths = ["old.md"];
+  compact.incremental = { ...compact.incremental, changedPaths: ["old.md", "keep.md"], provisionalPaths: ["old.md"], outOfDistributionPaths: ["old.md"], knnSupport: { "old.md": 0.8 }, knnDistance: { "old.md": 1.25 } };
+  await store.transaction((db) => db.run("UPDATE results SET result_json=? WHERE result_id=?", [JSON.stringify(compact), resultId]));
+
+  assert.equal(await store.renameNote("./old.md", "./renamed.md"), true);
+  const renamed = JSON.parse(store.query("SELECT result_json AS resultJson FROM results WHERE result_id=?", [resultId])[0].resultJson);
+  assert.deepEqual(renamed.ids, ["renamed.md", "keep.md"]);
+  assert.deepEqual(renamed.provisionalPaths, ["renamed.md"]);
+  assert.deepEqual(renamed.incremental.changedPaths, ["renamed.md", "keep.md"]);
+  assert.deepEqual(renamed.incremental.provisionalPaths, ["renamed.md"]);
+  assert.deepEqual(renamed.incremental.outOfDistributionPaths, ["renamed.md"]);
+  assert.deepEqual(renamed.incremental.knnSupport, { "renamed.md": 0.8 });
+  assert.deepEqual(renamed.incremental.knnDistance, { "renamed.md": 1.25 });
+
+  store.close();
+  const reopened = await new Storage.SqliteClusterStore(adapter, SQL).open();
+  assert.deepEqual((await reopened.getResult(resultId)).ids, ["renamed.md", "keep.md"]);
+  reopened.close();
+});
+
 test("manual title survives generated title replacement and reset restores the latest generated title", async () => {
   const Storage = await loadStorage();
   const { store } = await openStore(Storage);
@@ -121,24 +153,28 @@ test("manual title survives generated title replacement and reset restores the l
 test("exact and Jaccard-similar rebuilds migrate overrides and group child references", async () => {
   const Storage = await loadStorage();
   const { store } = await openStore(Storage);
-  const oldLeft = ["a.md", "b.md"];
-  const oldRight = ["c.md", "d.md"];
-  await seed(store, [...oldLeft, ...oldRight, "e.md", "f.md"]);
+  const oldLeft = ["a.md", "b.md", "c.md"];
+  const oldRight = ["d.md", "e.md", "f.md"];
+  await seed(store, [...oldLeft, ...oldRight, "g.md", "h.md"]);
   await store.saveResult(twoClusterResult(oldLeft, oldRight), { resultId: "old" });
   const oldLeftKey = Storage.stableClusterFingerprint(oldLeft);
   const oldRightKey = Storage.stableClusterFingerprint(oldRight);
   await store.saveClusterTitleOverride({ stableClusterKey: oldLeftKey, title: "Pinned left" });
+  await store.saveNoteClusterPreference("a.md", oldLeftKey);
+  await store.recordTooBroadFeedback(oldLeftKey, "The old left cluster is too broad");
   await store.createManualGroup({ groupId: "g1", title: "Combined", childClusterKeys: [oldLeftKey, oldRightKey] });
 
-  const newLeft = ["a.md", "b.md", "e.md"];
-  const newRight = ["c.md", "d.md", "f.md"];
+  const newLeft = ["a.md", "b.md", "c.md", "g.md"];
+  const newRight = ["d.md", "e.md", "f.md", "h.md"];
   await store.saveResult(twoClusterResult(newLeft, newRight), { resultId: "new" });
   const newLeftKey = Storage.stableClusterFingerprint(newLeft);
   const newRightKey = Storage.stableClusterFingerprint(newRight);
   const override = store.listClusterTitleOverrides()[0];
-  assert.equal(override.stableClusterKey, newLeftKey, "the unique 2/3-overlap successor is selected");
+  assert.equal(override.stableClusterKey, newLeftKey, "the unique 3/4-overlap successor is selected");
   assert.equal(override.title, "Pinned left");
   assert.equal(override.orphaned, undefined);
+  assert.equal(store.getNoteClusterPreference("a.md").preferredClusterKey, newLeftKey);
+  assert.equal(store.listFeedbackEvents("too-broad")[0].stableClusterKey, newLeftKey);
   assert.deepEqual(store.getManualGroup("g1").childClusterKeys, [newLeftKey, newRightKey]);
 
   const exact = Storage.stableClusterFingerprint(newRight);
@@ -182,6 +218,10 @@ test("preferences, groups, too-broad/general feedback, and rollback are durable 
   assert.deepEqual(store.listFeedbackEvents("too-broad").map((event) => event.message), ["The cluster is too broad"]);
   assert.deepEqual(store.listFeedbackEvents("general").map((event) => event.message), ["A general product note"]);
   assert.equal(store.query("SELECT value FROM metadata WHERE key='manual_corrections_schema_version'")[0].value, "1");
+  const corrections = store.loadManualCorrections();
+  assert.deepEqual(corrections.notePreferences.map((item) => item.notePath), ["folder/note.md"]);
+  assert.deepEqual(corrections.groups.map((item) => item.groupId), ["group"]);
+  assert.deepEqual(corrections.feedback.map((event) => event.type), ["note-preference-changed", "manual-group-created", "too-broad", "general"]);
   store.close();
 
   const reopened = await new Storage.SqliteClusterStore(adapter, SQL).open();
@@ -216,4 +256,3 @@ test("manual schema marker is added transactionally when opening a pre-foundatio
   assert.equal(reopened.query("SELECT value FROM metadata WHERE key='manual_corrections_schema_version'")[0].value, "1");
   reopened.close();
 });
-

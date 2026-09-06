@@ -56,6 +56,8 @@ export const SQLITE_SCHEMA_VERSION = 6;
  */
 export const SQLITE_MANUAL_CORRECTIONS_SCHEMA_VERSION = 1;
 export const MANUAL_CORRECTIONS_SCHEMA_VERSION = SQLITE_MANUAL_CORRECTIONS_SCHEMA_VERSION;
+/** Minimum overlap required before a manual cluster reference can migrate. */
+export const CLUSTER_MIGRATION_JACCARD_THRESHOLD = 0.7;
 
 const SCHEMA = `
 PRAGMA foreign_keys = ON;
@@ -423,13 +425,20 @@ export interface ClusterMigrationDecision {
 export function resolveClusterMigration(
   memberPaths: readonly string[],
   candidates: readonly Pick<GeneratedClusterSnapshot, "stableClusterKey" | "memberPaths">[],
-  threshold = 0.7,
+  threshold = CLUSTER_MIGRATION_JACCARD_THRESHOLD,
 ): ClusterMigrationDecision {
   const scored = candidates
     .map((candidate) => ({ stableClusterKey: candidate.stableClusterKey, memberPaths: normalizeClusterMemberPaths(candidate.memberPaths), overlap: jaccardOverlap(memberPaths, candidate.memberPaths) }))
     .filter((candidate) => candidate.memberPaths.length > 0)
     .sort((left, right) => right.overlap - left.overlap || (left.stableClusterKey < right.stableClusterKey ? -1 : left.stableClusterKey > right.stableClusterKey ? 1 : 0));
-  const qualifying = scored.filter((candidate) => candidate.overlap + 1e-12 >= threshold);
+  // Callers cannot weaken the product migration policy by passing a lower
+  // threshold. Exact member-set matches are preferred even when another
+  // candidate also happens to clear the similarity floor.
+  const requiredThreshold = Math.max(CLUSTER_MIGRATION_JACCARD_THRESHOLD, Number.isFinite(threshold) ? threshold : CLUSTER_MIGRATION_JACCARD_THRESHOLD);
+  const exact = scored.filter((candidate) => candidate.overlap + 1e-12 >= 1);
+  if (exact.length === 1) return { selected: exact[0], ambiguous: false, candidates: scored };
+  if (exact.length > 1) return { selected: null, ambiguous: true, candidates: scored };
+  const qualifying = scored.filter((candidate) => candidate.overlap + 1e-12 >= requiredThreshold);
   return { selected: qualifying.length === 1 ? qualifying[0] : null, ambiguous: qualifying.length > 1, candidates: scored };
 }
 
@@ -484,7 +493,58 @@ function jsonPaths(value: unknown): string[] {
 }
 
 function replaceStoredMemberPath(value: unknown, oldPath: string, newPath: string): string {
-  const paths = jsonPaths(value).map((path) => path === oldPath ? newPath : path); return JSON.stringify(normalizeClusterMemberPaths(paths));
+  const oldMemberPath = normalizeClusterMemberPaths([oldPath])[0] || "";
+  const newMemberPath = normalizeClusterMemberPaths([newPath])[0] || "";
+  const paths = jsonPaths(value).map((path) => path === oldMemberPath ? newMemberPath : path);
+  return JSON.stringify(normalizeClusterMemberPaths(paths));
+}
+
+function replacePathArray(value: unknown, oldPath: string, newPath: string): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const oldMemberPath = normalizeClusterMemberPaths([oldPath])[0] || "";
+  const newMemberPath = normalizeClusterMemberPaths([newPath])[0] || "";
+  const paths = value.map((path) => normalizeClusterMemberPaths([String(path)])[0] || "");
+  return paths.map((path) => path === oldMemberPath ? newMemberPath : path).filter(Boolean);
+}
+
+/** Update path-bearing fields in legacy/non-normalized result metadata. */
+function renameResultPaths(value: unknown, oldPath: string, newPath: string): string | undefined {
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return undefined;
+    const result = parsed as Record<string, unknown>;
+    const oldMemberPath = normalizeClusterMemberPaths([oldPath])[0] || "";
+    const newMemberPath = normalizeClusterMemberPaths([newPath])[0] || "";
+    if (!oldMemberPath || !newMemberPath || oldMemberPath === newMemberPath) return undefined;
+    let changed = false;
+    const updateArray = (object: Record<string, unknown>, field: string): void => {
+      const current = replacePathArray(object[field], oldPath, newPath);
+      if (!current) return;
+      if (JSON.stringify(current) !== JSON.stringify(object[field])) changed = true;
+      object[field] = current;
+    };
+    updateArray(result, "ids");
+    updateArray(result, "provisionalPaths");
+    const incremental = result.incremental;
+    if (incremental && typeof incremental === "object" && !Array.isArray(incremental)) {
+      const metadata = incremental as Record<string, unknown>;
+      for (const field of ["changedPaths", "provisionalPaths", "outOfDistributionPaths"]) updateArray(metadata, field);
+      for (const field of ["knnSupport", "knnDistance"]) {
+        const values = metadata[field];
+        if (!values || typeof values !== "object" || Array.isArray(values)) continue;
+        const keyed = values as Record<string, unknown>;
+        for (const key of Object.keys(keyed)) {
+          if (normalizeClusterMemberPaths([key])[0] !== oldMemberPath) continue;
+          keyed[newMemberPath] = keyed[key];
+          if (key !== newMemberPath) delete keyed[key];
+          changed = true;
+        }
+      }
+    }
+    return changed ? JSON.stringify(result) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function storedSnapshots(db: SqlDatabase, resultId?: string): GeneratedClusterSnapshot[] {
@@ -577,6 +637,21 @@ function reconcileManualReferences(db: SqlDatabase, newSnapshots: readonly Gener
     const orphaned = usable ? 0 : 1;
     db.run("UPDATE manual_title_overrides SET stable_cluster_key=?,member_paths_json=?,orphaned=?,updated_at=? WHERE stable_cluster_key=?", [nextKey, JSON.stringify(nextPaths), orphaned, now, resolution.oldKey]);
   });
+
+  // Note preferences and feedback events also point at generated stable keys.
+  // They do not own member-path evidence, so resolve them through the last
+  // generated snapshot just like an override; an ambiguous successor is left
+  // untouched rather than silently changing the user's hint.
+  for (const row of databaseQuery(db, "SELECT note_path AS notePath,preferred_cluster_key AS preferredClusterKey FROM note_cluster_preferences ORDER BY note_path")) {
+    const oldKey = String(row.preferredClusterKey);
+    const resolution = resolveManualReference(oldKey, [], oldSnapshots, newSnapshots);
+    if (resolution.target && resolution.target.stableClusterKey !== oldKey) db.run("UPDATE note_cluster_preferences SET preferred_cluster_key=? WHERE note_path=?", [resolution.target.stableClusterKey, row.notePath]);
+  }
+  for (const row of databaseQuery(db, "SELECT id,stable_cluster_key AS stableClusterKey FROM feedback_events WHERE stable_cluster_key IS NOT NULL ORDER BY id")) {
+    const oldKey = String(row.stableClusterKey);
+    const resolution = resolveManualReference(oldKey, [], oldSnapshots, newSnapshots);
+    if (resolution.target && resolution.target.stableClusterKey !== oldKey) db.run("UPDATE feedback_events SET stable_cluster_key=? WHERE id=?", [resolution.target.stableClusterKey, row.id]);
+  }
 
   const groups = databaseQuery(db, "SELECT group_id AS groupId,title,created_at AS createdAt,updated_at AS updatedAt FROM manual_groups ORDER BY group_id");
   for (const group of groups) {
@@ -687,38 +762,53 @@ export class SqliteClusterStore {
     let previousManualCorrectionsVersion = 0;
     try { previousVersion = Number(this.db.exec("SELECT value FROM metadata WHERE key='schema_version'")[0]?.values[0]?.[0]) || 0; } catch { /* pre-metadata database */ }
     try { previousManualCorrectionsVersion = Number(this.db.exec("SELECT value FROM metadata WHERE key='manual_corrections_schema_version'")[0]?.values[0]?.[0]) || 0; } catch { /* pre-foundation database */ }
-    this.db.run(SCHEMA);
-    // Databases created by an early development build did not carry the
-    // note-content column. Keep opening them safe and let the next write
-    // populate the richer immutable embedding records.
-    for (const statement of [
-      "ALTER TABLE notes ADD COLUMN content TEXT",
-      "ALTER TABLE notes ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
-      "ALTER TABLE assignments ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0",
-      "ALTER TABLE embeddings ADD COLUMN note_content_hash TEXT NOT NULL DEFAULT ''",
-      "ALTER TABLE embeddings ADD COLUMN vector_blob BLOB",
-      "ALTER TABLE pca_models ADD COLUMN mean_blob BLOB",
-      "ALTER TABLE pca_models ADD COLUMN components_blob BLOB",
-      "ALTER TABLE pca_models ADD COLUMN explained_variance_blob BLOB",
-      "ALTER TABLE pca_coordinates ADD COLUMN coordinate_blob BLOB",
-    ]) try { this.db.run(statement); } catch { /* idempotent migration */ }
-    // CREATE VIEW IF NOT EXISTS does not replace a view created by an older
-    // plugin build, so refresh the active-only cache view after adding the
-    // note activity flag.
-    try { this.db.run("DROP VIEW IF EXISTS v_current_embeddings"); this.db.run(SCHEMA); } catch { /* retain the already-open schema */ }
-    const requires = (table: string, columns: string[]): boolean => {
-      const info = this.db.exec(`PRAGMA table_info(${table})`)[0]?.values || [];
-      return info.some((row) => columns.includes(String(row[1])) && Number(row[3]) === 1);
-    };
-    this.embeddingJsonRequired = requires("embeddings", ["vector_json"]);
-    this.pcaJsonRequired = requires("pca_models", ["mean_json", "components_json", "explained_variance_json"]);
-    this.coordinateJsonRequired = requires("pca_coordinates", ["coordinates_json"]);
-    const migrateBlob = (table: string, key: string, jsonColumn: string, blobColumn: string, clearJson: boolean): void => {
-      const rows = this.db.exec(`SELECT ${key},${jsonColumn} FROM ${table} WHERE ${blobColumn} IS NULL AND ${jsonColumn} IS NOT NULL`)[0]?.values || [];
-      for (const row of rows) { try { this.db.run(`UPDATE ${table} SET ${blobColumn}=?${clearJson ? `,${jsonColumn}=NULL` : ""} WHERE ${key}=?`, [float32Blob(flattenJsonNumbers(JSON.parse(String(row[1])))), row[0]]); } catch { /* retain readable legacy JSON */ } }
-    };
+    const requiredSchemaObjects = [
+      "metadata", "notes", "embeddings", "pca_models", "pca_coordinates", "results",
+      "result_note_hashes", "assignments", "hierarchy_merges", "hierarchy_leaves", "leaf_order",
+      "visualization_points", "cluster_titles", "soft_memberships", "membership_rows", "hierarchy_nodes",
+      "hierarchy_children", "root_children", "hierarchy_placements", "embedding_logs", "migrations",
+      "generated_cluster_snapshots", "manual_title_overrides", "note_cluster_preferences", "manual_groups",
+      "manual_group_children", "feedback_events",
+    ];
+    const existingSchemaObjects = new Set((this.db.exec("SELECT name FROM sqlite_master WHERE type IN ('table','view')")[0]?.values || []).map((row) => String(row[0])));
+    const schemaIncomplete = !bytes || requiredSchemaObjects.some((name) => !existingSchemaObjects.has(name));
+    const needsFlush = schemaIncomplete || previousVersion < SQLITE_SCHEMA_VERSION || previousManualCorrectionsVersion < SQLITE_MANUAL_CORRECTIONS_SCHEMA_VERSION;
     try {
+      // Keep every schema change and data migration in the same transaction.
+      // The PRAGMA must be set before BEGIN because SQLite ignores changes to
+      // foreign_keys while a transaction is active.
+      this.db.run("PRAGMA foreign_keys = ON");
       this.db.run("BEGIN IMMEDIATE");
+      this.db.run(SCHEMA);
+      // Databases created by an early development build did not carry the
+      // note-content column. Keep opening them safe and let the next write
+      // populate the richer immutable embedding records.
+      for (const statement of [
+        "ALTER TABLE notes ADD COLUMN content TEXT",
+        "ALTER TABLE notes ADD COLUMN active INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE assignments ADD COLUMN provisional INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE embeddings ADD COLUMN note_content_hash TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE embeddings ADD COLUMN vector_blob BLOB",
+        "ALTER TABLE pca_models ADD COLUMN mean_blob BLOB",
+        "ALTER TABLE pca_models ADD COLUMN components_blob BLOB",
+        "ALTER TABLE pca_models ADD COLUMN explained_variance_blob BLOB",
+        "ALTER TABLE pca_coordinates ADD COLUMN coordinate_blob BLOB",
+      ]) try { this.db.run(statement); } catch { /* idempotent migration */ }
+      // CREATE VIEW IF NOT EXISTS does not replace a view created by an older
+      // plugin build, so refresh the active-only cache view after adding the
+      // note activity flag. This DDL is part of the same open transaction.
+      try { this.db.run("DROP VIEW IF EXISTS v_current_embeddings"); this.db.run(SCHEMA); } catch { /* retain the already-open schema */ }
+      const requires = (table: string, columns: string[]): boolean => {
+        const info = this.db.exec(`PRAGMA table_info(${table})`)[0]?.values || [];
+        return info.some((row) => columns.includes(String(row[1])) && Number(row[3]) === 1);
+      };
+      this.embeddingJsonRequired = requires("embeddings", ["vector_json"]);
+      this.pcaJsonRequired = requires("pca_models", ["mean_json", "components_json", "explained_variance_json"]);
+      this.coordinateJsonRequired = requires("pca_coordinates", ["coordinates_json"]);
+      const migrateBlob = (table: string, key: string, jsonColumn: string, blobColumn: string, clearJson: boolean): void => {
+        const rows = this.db.exec(`SELECT ${key},${jsonColumn} FROM ${table} WHERE ${blobColumn} IS NULL AND ${jsonColumn} IS NOT NULL`)[0]?.values || [];
+        for (const row of rows) { try { this.db.run(`UPDATE ${table} SET ${blobColumn}=?${clearJson ? `,${jsonColumn}=NULL` : ""} WHERE ${key}=?`, [float32Blob(flattenJsonNumbers(JSON.parse(String(row[1])))), row[0]]); } catch { /* retain readable legacy JSON */ } }
+      };
       if (bytes && previousVersion < SQLITE_SCHEMA_VERSION) {
         this.db.run("DELETE FROM results WHERE rowid NOT IN (SELECT rowid FROM results ORDER BY created_at DESC,rowid DESC LIMIT 1)");
         this.db.run("DELETE FROM embedding_logs WHERE id NOT IN (SELECT id FROM embedding_logs ORDER BY id DESC LIMIT 1)");
@@ -750,7 +840,9 @@ export class SqliteClusterStore {
       this.db.run("INSERT OR REPLACE INTO metadata(key,value) VALUES('schema_version',?)", [String(SQLITE_SCHEMA_VERSION)]);
       this.db.run("INSERT OR IGNORE INTO migrations(name,completed_at) VALUES(?,?)", ["schema-v6-normalized", this.now()]);
       this.db.run("COMMIT"); this.opened = true;
-      if (bytes && (previousVersion < SQLITE_SCHEMA_VERSION || previousManualCorrectionsVersion < SQLITE_MANUAL_CORRECTIONS_SCHEMA_VERSION)) await this.flush();
+      // A new store has to publish its schema too; otherwise a restart before
+      // the first note write would silently lose the database and markers.
+      if (needsFlush) await this.flush();
     } catch (error) {
       try { this.db.run("ROLLBACK"); } catch { /* preserve migration error */ }
       try { this.db.close(); } catch { /* preserve migration error */ }
@@ -838,30 +930,109 @@ export class SqliteClusterStore {
   }
   /** Move all path-keyed cache and result rows in one transaction. */
   async renameNote(oldPath: string, newPath: string): Promise<boolean> {
-    if (!oldPath || !newPath || oldPath === newPath) return oldPath === newPath;
+    const oldMemberPath = normalizeClusterMemberPaths([oldPath])[0] || "";
+    const newMemberPath = normalizeClusterMemberPaths([newPath])[0] || "";
+    if (!oldMemberPath || !newMemberPath || oldMemberPath === newMemberPath) return oldMemberPath === newMemberPath;
     return this.transaction((db) => {
-      const oldRows = db.exec(`SELECT path FROM notes WHERE path=${sqlQuote(oldPath)}`);
-      const newRows = db.exec(`SELECT path FROM notes WHERE path=${sqlQuote(newPath)}`);
+      const oldRows = databaseQuery(db, "SELECT path FROM notes WHERE path=?", [oldMemberPath]);
+      const newRows = databaseQuery(db, "SELECT path FROM notes WHERE path=?", [newMemberPath]);
       // A previous refresh may have moved the normalized rows successfully
       // and failed only while publishing the compact result. Treat the same
       // rename as already applied so the queued event can be retried safely.
-      if (!oldRows[0]?.values.length) return !!newRows[0]?.values.length;
-      if (newRows[0]?.values.length) return false;
+      if (!oldRows.length) return newRows.length > 0;
+      if (newRows.length) return false;
+
+      // Compute the generated-key changes before moving any rows. Stable keys
+      // are fingerprints of member paths, so a rename can legitimately
+      // change them. Keep a mapping only when every occurrence is
+      // unambiguous; manual references with no path evidence can then follow
+      // the generated snapshot without guessing.
+      const generatedRows = databaseQuery(db, "SELECT result_id AS resultId,stable_cluster_key AS stableClusterKey,node_id AS nodeId,member_paths_json AS memberPaths FROM generated_cluster_snapshots ORDER BY result_id,node_id,stable_cluster_key");
+      const generatedUpdates = generatedRows.map((row) => {
+        const oldKey = String(row.stableClusterKey);
+        const oldPaths = jsonPaths(row.memberPaths);
+        const nextPaths = jsonPaths(replaceStoredMemberPath(row.memberPaths, oldMemberPath, newMemberPath));
+        return { resultId: String(row.resultId), nodeId: Number(row.nodeId), oldKey, oldPaths, nextPaths, nextKey: nextPaths.length ? stableClusterFingerprint(nextPaths) : oldKey };
+      });
+      const generatedKeyTargets = new Map<string, string>();
+      const ambiguousGeneratedKeys = new Set<string>();
+      for (const row of generatedUpdates) {
+        const previous = generatedKeyTargets.get(row.oldKey);
+        if (previous !== undefined && previous !== row.nextKey) ambiguousGeneratedKeys.add(row.oldKey);
+        else if (!ambiguousGeneratedKeys.has(row.oldKey)) generatedKeyTargets.set(row.oldKey, row.nextKey);
+      }
+      const generatedKeyFor = (key: string): string | undefined => ambiguousGeneratedKeys.has(key) ? undefined : generatedKeyTargets.get(key);
+
+      // A second preference for the destination path would otherwise violate
+      // its primary key. Refuse the rename so callers can resolve the
+      // conflict without dropping either hint.
+      if (databaseQuery(db, "SELECT 1 AS present FROM note_cluster_preferences WHERE note_path=?", [newMemberPath]).length) return false;
+
       // Child rows must move before the referenced parent row while foreign
       // keys are enabled. The target was checked above, so each update keeps
       // its table's primary key unique.
-      for (const table of ["embeddings", "pca_coordinates", "result_note_hashes", "assignments", "visualization_points", "soft_memberships", "membership_rows", "hierarchy_placements"]) db.run(`UPDATE ${table} SET path=? WHERE path=?`, [newPath, oldPath]);
-      db.run("UPDATE note_cluster_preferences SET note_path=? WHERE note_path=?", [newPath, oldPath]);
-      for (const row of databaseQuery(db, "SELECT stable_cluster_key AS stableClusterKey,member_paths_json AS memberPaths FROM manual_title_overrides")) {
-        const paths = replaceStoredMemberPath(row.memberPaths, oldPath, newPath); if (paths !== String(row.memberPaths)) db.run("UPDATE manual_title_overrides SET member_paths_json=? WHERE stable_cluster_key=?", [paths, row.stableClusterKey]);
+      for (const table of ["embeddings", "pca_coordinates", "result_note_hashes", "assignments", "visualization_points", "soft_memberships", "membership_rows", "hierarchy_placements"]) db.run(`UPDATE ${table} SET path=? WHERE path=?`, [newMemberPath, oldMemberPath]);
+
+      const preferenceRows = databaseQuery(db, "SELECT note_path AS notePath,preferred_cluster_key AS preferredClusterKey FROM note_cluster_preferences WHERE note_path=?", [oldMemberPath]);
+      for (const row of preferenceRows) {
+        const preferredKey = generatedKeyFor(String(row.preferredClusterKey)) || String(row.preferredClusterKey);
+        db.run("UPDATE note_cluster_preferences SET note_path=?,preferred_cluster_key=? WHERE note_path=?", [newMemberPath, preferredKey, oldMemberPath]);
       }
-      for (const row of databaseQuery(db, "SELECT group_id AS groupId,ordinal,member_paths_json AS memberPaths FROM manual_group_children")) {
-        const paths = replaceStoredMemberPath(row.memberPaths, oldPath, newPath); if (paths !== String(row.memberPaths)) db.run("UPDATE manual_group_children SET member_paths_json=? WHERE group_id=? AND ordinal=?", [paths, row.groupId, row.ordinal]);
+
+      for (const row of databaseQuery(db, "SELECT result_id AS resultId,result_json AS resultJson FROM results")) {
+        const renamed = renameResultPaths(row.resultJson, oldMemberPath, newMemberPath);
+        if (renamed) db.run("UPDATE results SET result_json=? WHERE result_id=?", [renamed, row.resultId]);
       }
-      for (const row of databaseQuery(db, "SELECT result_id AS resultId,stable_cluster_key AS stableClusterKey,member_paths_json AS memberPaths FROM generated_cluster_snapshots")) {
-        const paths = replaceStoredMemberPath(row.memberPaths, oldPath, newPath); if (paths !== String(row.memberPaths)) db.run("UPDATE generated_cluster_snapshots SET member_paths_json=? WHERE result_id=? AND stable_cluster_key=?", [paths, row.resultId, row.stableClusterKey]);
+
+      // Reinsert snapshots when a fingerprint changes so the primary-key and
+      // per-result node uniqueness constraints are handled atomically. INSERT
+      // OR IGNORE protects against the exceptionally rare case where a rename
+      // makes two stale generated sets converge on one fingerprint.
+      if (generatedUpdates.some((row) => row.nextKey !== row.oldKey || JSON.stringify(row.nextPaths) !== JSON.stringify(row.oldPaths))) {
+        db.run("DELETE FROM generated_cluster_snapshots");
+        for (const row of generatedUpdates) db.run("INSERT OR IGNORE INTO generated_cluster_snapshots(result_id,stable_cluster_key,node_id,member_paths_json) VALUES(?,?,?,?)", [row.resultId, row.nextKey, row.nodeId, JSON.stringify(row.nextPaths)]);
       }
-      db.run("UPDATE notes SET path=? WHERE path=?", [newPath, oldPath]);
+
+      const titleRows = databaseQuery(db, "SELECT stable_cluster_key AS stableClusterKey,title,created_at AS createdAt,updated_at AS updatedAt,member_paths_json AS memberPaths,orphaned FROM manual_title_overrides ORDER BY stable_cluster_key");
+      const originalTitleKeys = new Set(titleRows.map((row) => String(row.stableClusterKey)));
+      const titleCandidateCounts = new Map<string, number>();
+      const titleUpdates = titleRows.map((row) => {
+        const oldKey = String(row.stableClusterKey);
+        const nextPaths = jsonPaths(replaceStoredMemberPath(row.memberPaths, oldMemberPath, newMemberPath));
+        const nextKey = nextPaths.length ? stableClusterFingerprint(nextPaths) : generatedKeyFor(oldKey) || oldKey;
+        titleCandidateCounts.set(nextKey, (titleCandidateCounts.get(nextKey) || 0) + 1);
+        return { oldKey, nextKey, nextPaths, row };
+      });
+      const titleKeysInUse = new Set<string>();
+      const resolvedTitleUpdates = titleUpdates.map((item) => {
+        const collision = item.nextKey !== item.oldKey && (originalTitleKeys.has(item.nextKey) || (titleCandidateCounts.get(item.nextKey) || 0) > 1 || titleKeysInUse.has(item.nextKey));
+        const stableClusterKey = collision ? item.oldKey : item.nextKey;
+        titleKeysInUse.add(stableClusterKey);
+        return { ...item, stableClusterKey, orphaned: collision ? 1 : Number(item.row.orphaned) };
+      });
+      if (resolvedTitleUpdates.some((item) => item.stableClusterKey !== item.oldKey || JSON.stringify(item.nextPaths) !== JSON.stringify(jsonPaths(item.row.memberPaths)) || item.orphaned !== Number(item.row.orphaned))) {
+        db.run("DELETE FROM manual_title_overrides");
+        for (const item of resolvedTitleUpdates) db.run("INSERT INTO manual_title_overrides(stable_cluster_key,title,created_at,updated_at,member_paths_json,orphaned) VALUES(?,?,?,?,?,?)", [item.stableClusterKey, item.row.title, item.row.createdAt, item.row.updatedAt, JSON.stringify(item.nextPaths), item.orphaned]);
+      }
+
+      let changedGroupIds = new Set<string>();
+      for (const row of databaseQuery(db, "SELECT group_id AS groupId,ordinal,stable_cluster_key AS stableClusterKey,member_paths_json AS memberPaths,orphaned FROM manual_group_children")) {
+        const oldKey = String(row.stableClusterKey);
+        const nextPaths = jsonPaths(replaceStoredMemberPath(row.memberPaths, oldMemberPath, newMemberPath));
+        const nextKey = nextPaths.length ? stableClusterFingerprint(nextPaths) : generatedKeyFor(oldKey) || oldKey;
+        if (nextKey !== oldKey || JSON.stringify(nextPaths) !== JSON.stringify(jsonPaths(row.memberPaths))) {
+          db.run("UPDATE manual_group_children SET stable_cluster_key=?,member_paths_json=? WHERE group_id=? AND ordinal=?", [nextKey, JSON.stringify(nextPaths), row.groupId, row.ordinal]);
+          changedGroupIds.add(String(row.groupId));
+        }
+      }
+      for (const groupId of changedGroupIds) db.run("UPDATE manual_groups SET updated_at=? WHERE group_id=?", [this.now(), groupId]);
+
+      db.run("UPDATE feedback_events SET note_path=? WHERE note_path=?", [newMemberPath, oldMemberPath]);
+      for (const row of databaseQuery(db, "SELECT id,stable_cluster_key AS stableClusterKey FROM feedback_events WHERE stable_cluster_key IS NOT NULL")) {
+        const nextKey = generatedKeyFor(String(row.stableClusterKey));
+        if (nextKey && nextKey !== String(row.stableClusterKey)) db.run("UPDATE feedback_events SET stable_cluster_key=? WHERE id=?", [nextKey, row.id]);
+      }
+      db.run("UPDATE notes SET path=? WHERE path=?", [newMemberPath, oldMemberPath]);
       return true;
     });
   }
@@ -1084,8 +1255,21 @@ export class SqliteClusterStore {
   }
   async resetClusterTitle(stableClusterKey: string): Promise<boolean> { return this.resetClusterTitleOverride(stableClusterKey); }
   async deleteClusterTitleOverride(stableClusterKey: string): Promise<boolean> { return this.resetClusterTitleOverride(stableClusterKey); }
+  /** Read the generated title for the current result without consulting manual overrides. */
+  getGeneratedClusterTitle(stableClusterKey: string): string | undefined {
+    this.requireOpen();
+    const key = stableClusterKey.trim();
+    if (!key) return undefined;
+    const latest = databaseQuery(this.db, "SELECT result_id AS resultId FROM results ORDER BY created_at DESC,rowid DESC LIMIT 1")[0]?.resultId;
+    if (latest == null) return undefined;
+    const snapshot = storedSnapshots(this.db, String(latest)).find((candidate) => candidate.stableClusterKey === key);
+    if (!snapshot) return undefined;
+    const row = databaseQuery(this.db, "SELECT title FROM cluster_titles WHERE result_id=? AND node_id=?", [latest, snapshot.nodeId])[0];
+    return row?.title == null ? undefined : String(row.title);
+  }
   getEffectiveClusterTitle(stableClusterKey: string, generatedTitle?: string): string | undefined {
-    const override = this.getClusterTitleOverride(stableClusterKey); return override && !override.orphaned ? override.title : generatedTitle;
+    const fallback = generatedTitle === undefined ? this.getGeneratedClusterTitle(stableClusterKey) : generatedTitle;
+    const override = this.getClusterTitleOverride(stableClusterKey); return override && !override.orphaned ? override.title : fallback;
   }
   resolveClusterTitle(stableClusterKey: string, generatedTitle?: string): string | undefined { return this.getEffectiveClusterTitle(stableClusterKey, generatedTitle); }
   applyClusterTitleOverrides(generatedTitles: Readonly<Record<string, string>>): Record<string, string> {
@@ -1151,11 +1335,14 @@ export class SqliteClusterStore {
     return this.transaction((db) => {
       const group = databaseQuery(db, "SELECT group_id AS groupId,title,created_at AS createdAt,updated_at AS updatedAt FROM manual_groups WHERE group_id=?", [id])[0]; if (!group) throw new Error(`Manual group ${id} not found`);
       const title = patch.title === undefined ? String(group.title) : String(patch.title).trim(); if (!title) throw new Error("A manual group title cannot be empty");
-      const now = this.now(); db.run("UPDATE manual_groups SET title=?,updated_at=? WHERE group_id=?", [title, now, id]);
+      const now = this.now(); let childClusterKeys = databaseQuery(db, "SELECT stable_cluster_key AS stableClusterKey FROM manual_group_children WHERE group_id=? ORDER BY ordinal", [id]).map((row) => String(row.stableClusterKey));
+      db.run("UPDATE manual_groups SET title=?,updated_at=? WHERE group_id=?", [title, now, id]);
       if (patch.childClusterKeys) {
         const keys = [...new Set(patch.childClusterKeys.map((key) => String(key || "").trim()).filter(Boolean))]; if (keys.length < 2) throw new Error("A manual group requires at least two child clusters");
         const snapshots = new Map(this.currentGeneratedSnapshots(db).map((snapshot) => [snapshot.stableClusterKey, snapshot])); db.run("DELETE FROM manual_group_children WHERE group_id=?", [id]); keys.forEach((key, ordinal) => db.run("INSERT INTO manual_group_children(group_id,ordinal,stable_cluster_key,member_paths_json,orphaned) VALUES(?,?,?,?,0)", [id, ordinal, key, JSON.stringify(snapshots.get(key)?.memberPaths || [])]));
+        childClusterKeys = keys;
       }
+      insertFeedback(db, { type: "manual-group-updated", message: title, details: { groupId: id, childClusterKeys } }, now);
       const result = databaseQuery(db, "SELECT group_id AS groupId,title,created_at AS createdAt,updated_at AS updatedAt FROM manual_groups WHERE group_id=?", [id])[0]; return publicGroup(databaseQuery(db, "SELECT stable_cluster_key AS stableClusterKey,orphaned FROM manual_group_children WHERE group_id=? ORDER BY ordinal", [id]), result);
     });
   }

@@ -44,7 +44,6 @@ function baseResult() {
     visualization: { coordinates: [[0, 0], [1, 0], [100, 100]], labels: [0, 1, -1], leafOrdering: [0, 1], memberships: [[0.91, 0.09], [0.2, 0.8], [0, 0]], configuration: {} },
     provisionalPaths: ["beta.md"],
     incremental: { mode: "soft", generatedAt: "2026-09-03T00:00:00.000Z", changedPaths: ["beta.md"], provisionalPaths: ["beta.md"], fullRebuildRecommended: false },
-    manualPreferredClusters: { "alpha.md": "1" },
     pca: { selected: 2 },
     timings: {},
   };
@@ -55,10 +54,11 @@ const notes = [
   { path: "beta.md", title: "Beta", content: "beta note", mtime: 2, hash: "b" },
   { path: "noise.md", title: "Noise", content: "noise note", mtime: 3, hash: "n" },
 ];
+const manualCorrections = { titleOverrides: [], notePreferences: [{ notePath: "alpha.md", preferredClusterKey: "1", createdAt: "2026-09-03T00:00:00.000Z" }], groups: [], feedback: [] };
 
 test("note detail derives hierarchy, confidence, state, preference fallback, keywords, and related notes", async () => {
   const { buildNoteDetail } = await loadNoteDetail();
-  const detail = buildNoteDetail(baseResult(), notes, "alpha.md");
+  const detail = buildNoteDetail(baseResult(), notes, "alpha.md", manualCorrections);
   assert.equal(detail.title, "Alpha");
   assert.equal(detail.path, "alpha.md");
   assert.deepEqual(detail.automaticLeaf, { id: 0, title: "Alpha cluster" });
@@ -84,6 +84,32 @@ test("note detail marks noise/residual and gracefully falls back when selection 
   assert.equal(detail.manualPreferredCluster, null);
   assert.deepEqual(detail.ancestors.map((item) => item.title), ["All notes", "Parent topic"]);
   assert.equal(buildNoteDetail(baseResult(), notes, "missing.md"), null);
+});
+
+test("preferred-cluster candidates are relevant, use effective titles, and stay capped at five", async () => {
+  const { getPreferredClusterCandidates } = await loadNoteDetail();
+  const leafCount = 7;
+  const result = {
+    schemaVersion: 6,
+    ids: Array.from({ length: leafCount }, (_, index) => `candidate-${index}.md`),
+    leafLabels: Array.from({ length: leafCount }, (_, index) => index),
+    probabilities: Array.from({ length: leafCount }, () => 1),
+    outlierProxy: Array.from({ length: leafCount }, () => 0),
+    leafOrder: Array.from({ length: leafCount }, (_, index) => index),
+    hierarchy: { leaves: Array.from({ length: leafCount }, (_, index) => index), merges: [], root: 0 },
+    memberships: [[0.1, 0.9, 0.8, 0.7, 0.6, 0.5, 0.4]],
+    titles: Object.fromEntries(Array.from({ length: leafCount }, (_, index) => [String(index), `Generated ${index}`])),
+    pca: { selected: 2 },
+  };
+  const selected = "candidate-0.md";
+  const first = getPreferredClusterCandidates(result, selected);
+  assert.equal(first.length, 5);
+  assert.deepEqual(first.map((candidate) => candidate.leafId), [1, 2, 3, 4, 5]);
+  const corrected = getPreferredClusterCandidates(result, selected, {
+    titleOverrides: [{ stableClusterKey: first[0].key, title: "Manual candidate", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z" }],
+    notePreferences: [], groups: [], feedback: [],
+  });
+  assert.equal(corrected[0].title, "Manual candidate");
 });
 
 test("Explorer exposes a keyboard-accessible selected-note detail panel and Open note action", async () => {

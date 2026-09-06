@@ -28,6 +28,9 @@
 .atomic-clusters-note-detail-badge.is-warning { background: var(--background-modifier-error); color: var(--text-error); }
 .atomic-clusters-note-detail-section { margin-top: 10px; }
 .atomic-clusters-note-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 4px 10px; font-size: var(--font-ui-small); }
+.atomic-clusters-note-preference { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; font-size: var(--font-ui-small); }
+.atomic-clusters-note-preference label { color: var(--text-muted); }
+.atomic-clusters-note-preference select { min-width: 0; max-width: 100%; }
 .atomic-clusters-note-detail-ancestors, .atomic-clusters-note-detail-memberships { margin: 0; padding-left: 22px; font-size: var(--font-ui-small); }
 .atomic-clusters-note-detail-keywords { display: flex; flex-wrap: wrap; gap: 4px; }
 .atomic-clusters-note-detail-keywords span { padding: 2px 6px; border: 1px solid var(--background-modifier-border); border-radius: 999px; color: var(--text-accent); font-size: var(--font-ui-small); }
@@ -41,6 +44,15 @@
 .atomic-clusters-excluded-notes-empty { color: var(--text-muted); font-size: var(--font-ui-small); }
 .atomic-clusters-node { border: 1px solid var(--background-modifier-border); border-left: 4px solid var(--atomic-cluster-color, var(--background-modifier-border)); border-radius: 6px; padding: 8px; margin: 6px 0; }
 .atomic-clusters-node button { margin: 2px 4px 2px 0; }
+.atomic-clusters-generated-title { color: var(--text-muted); font-size: var(--font-ui-small); margin: 2px 0 4px; }
+.atomic-clusters-correction-actions { display: flex; flex-wrap: wrap; gap: 2px; margin-top: 4px; }
+.atomic-clusters-correction-actions button { font-size: var(--font-ui-small); }
+.atomic-clusters-manual-groups { flex: 0 0 auto; max-height: 10rem; overflow: auto; margin: 0 0 8px; padding: 8px; border: 1px solid var(--background-modifier-border); border-radius: 8px; background: var(--background-secondary); }
+.atomic-clusters-manual-groups-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-bottom: 5px; }
+.atomic-clusters-manual-group { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 8px; align-items: center; padding: 5px 0; border-top: 1px solid var(--background-modifier-border); }
+.atomic-clusters-manual-group.is-search-target { outline: 2px solid var(--interactive-accent); outline-offset: 2px; border-radius: 4px; background: var(--background-primary-alt); }
+.atomic-clusters-manual-group .atomic-clusters-status { grid-column: 1; margin: 0; font-size: var(--font-ui-small); overflow-wrap: anywhere; }
+.atomic-clusters-manual-group button { grid-column: 2; grid-row: 1 / span 2; }
 .atomic-clusters-tree-panel { order: 2; flex: 0 1 auto; max-height: 38%; min-height: 0; margin-top: 4px; overflow: auto; }
 .atomic-clusters-tree-panel > summary { cursor: pointer; color: var(--text-muted); padding: 6px 2px; user-select: none; }
 .atomic-clusters-tree { padding-bottom: 8px; }

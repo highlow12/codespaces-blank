@@ -131,3 +131,31 @@ test("PCA preservation reuses its prefix row workspace across candidate widths",
   assert.equal(new Set(normalizedInputs.slice(0, 1)).size, 1);
   assert.equal(new Set(normalizedInputs.slice(1)).size, 1);
 });
+
+test("TypeScript fallback limit is enforced at the fallback boundary only", async () => {
+  const { discoverPcaFeatures, ClusteringCapabilityError, TYPESCRIPT_FALLBACK_MAX_ROWS } = await loadClustering();
+  const rows = Array.from({ length: TYPESCRIPT_FALLBACK_MAX_ROWS + 1 }, (_, row) => [row % 17, (row * 3) % 19]);
+
+  await assert.rejects(
+    () => discoverPcaFeatures(rows, { minClusterSize: 5 }, {}),
+    (error) => error instanceof ClusteringCapabilityError && /TypeScript clustering fallback is limited to 511 rows/.test(error.message) && /WASM/.test(error.message)
+  );
+
+  const customProvider = {
+    fit(input) { return { labels: input.map(() => -1), probabilities: input.map(() => 0) }; }
+  };
+  const customResult = await discoverPcaFeatures(rows, { minClusterSize: 5 }, { hdbscan: customProvider });
+  assert.equal(customResult.labels.length, rows.length);
+  assert.equal(customResult.probabilities.length, rows.length);
+
+  const customKernel = {
+    normalize(input) { return input; },
+    pca(input, components) { return { projected: input.map((row) => row.slice(0, components)), explained: Array(components).fill(1) }; },
+    cosineDistances() { return []; },
+    exactKnn() { return []; },
+    mst() { throw new Error("fallback MST should not be reached"); },
+    hdbscan(input) { return { labels: input.map(() => -1), probabilities: input.map(() => 0) }; }
+  };
+  const wasmLikeResult = await discoverPcaFeatures(rows, { minClusterSize: 5 }, { kernel: customKernel });
+  assert.equal(wasmLikeResult.labels.length, rows.length);
+});

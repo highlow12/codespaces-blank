@@ -1,4 +1,4 @@
-import type { ClusterResult, NoteRecord } from "./types";
+import type { ClusterResult, GeneratedClusterSnapshot, ManualCorrectionsState, NoteRecord } from "./types";
 
 export type SearchFilter = "all" | "current-cluster" | "noise" | "provisional" | "manually-adjusted" | "recently-changed";
 
@@ -13,6 +13,9 @@ export interface SearchDocument {
   leafLabel?: number;
   provisional?: boolean;
   manuallyAdjusted?: boolean;
+  manualPreferredClusterKey?: string;
+  stableClusterKeys?: string[];
+  manualGroupIds?: string[];
   mtime?: number;
 }
 
@@ -21,6 +24,8 @@ export interface SearchClusterDocument {
   title: string;
   keywords?: string[];
   parentId?: string;
+  stableClusterKey?: string;
+  manualGroupId?: string;
 }
 
 export interface SearchFilters {
@@ -127,9 +132,66 @@ function metadataFromNote(note: NoteRecord): { tags: string[]; aliases: string[]
   return { tags: frontmatterList(note.content || "", "tags"), aliases: frontmatterList(note.content || "", "aliases") };
 }
 
-function clusterHierarchy(result: ClusterResult): { clusters: SearchClusterDocument[]; parents: Map<string, string> } {
+function normalizeMemberPaths(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => String(value || "").normalize("NFKC").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "").replace(/\/{2,}/g, "/").replace(/\/+$/, "").trim()).filter(Boolean))].sort();
+}
+
+function stableClusterFingerprint(memberPaths: readonly string[]): string {
+  const canonical = JSON.stringify(normalizeMemberPaths(memberPaths));
+  let hash = 2166136261;
+  for (let index = 0; index < canonical.length; index++) { hash ^= canonical.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `cluster-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+/** Derive the same generated evidence used by SQLite without changing the result. */
+export function generatedSearchClusterSnapshots(result: ClusterResult): GeneratedClusterSnapshot[] {
+  const membersById = new Map<number, Set<string>>();
+  const add = (id: number, paths: Iterable<string>): void => {
+    const members = membersById.get(id) || new Set<string>();
+    for (const path of paths) { const normalized = normalizeMemberPaths([path])[0]; if (normalized) members.add(normalized); }
+    membersById.set(id, members);
+  };
+  result.leafLabels.forEach((label, index) => { if (Number.isSafeInteger(label) && label >= 0) add(label, [result.ids[index]]); });
+  for (const node of result.hierarchy.nodes || []) add(node.id, node.descendantLeaves.flatMap((leaf) => [...(membersById.get(leaf) || [])]));
+  const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge]));
+  const visiting = new Set<number>();
+  const visit = (id: number): Set<string> => {
+    const existing = membersById.get(id); if (existing?.size) return existing;
+    if (visiting.has(id)) return new Set();
+    const merge = merges.get(id); if (!merge) return existing || new Set();
+    visiting.add(id); const paths = new Set<string>([...visit(merge.left), ...visit(merge.right)]); visiting.delete(id); membersById.set(id, paths); return paths;
+  };
+  for (const merge of result.hierarchy.merges) visit(merge.id);
+  const ids = new Set<number>([...(result.hierarchy.leaves || []), ...result.hierarchy.merges.map((merge) => merge.id), ...(result.hierarchy.nodes || []).map((node) => node.id)]);
+  const unique = new Map<string, GeneratedClusterSnapshot>();
+  for (const nodeId of [...ids].sort((left, right) => left - right)) {
+    const memberPaths = normalizeMemberPaths([...(membersById.get(nodeId) || [])]);
+    if (!memberPaths.length) continue;
+    const stableClusterKey = stableClusterFingerprint(memberPaths);
+    if (!unique.has(stableClusterKey)) unique.set(stableClusterKey, { stableClusterKey, nodeId, memberPaths });
+  }
+  return [...unique.values()];
+}
+
+const EMPTY_MANUAL_CORRECTIONS: ManualCorrectionsState = { titleOverrides: [], notePreferences: [], groups: [], feedback: [] };
+
+function effectiveTitles(result: ClusterResult, manualCorrections: ManualCorrectionsState): Record<string, string> {
+  const titles = { ...(result.titles || {}) };
+  const snapshots = generatedSearchClusterSnapshots(result);
+  const nodesByKey = new Map(snapshots.map((snapshot) => [snapshot.stableClusterKey, snapshot.nodeId]));
+  for (const override of manualCorrections.titleOverrides || []) {
+    const nodeId = nodesByKey.get(override.stableClusterKey);
+    if (nodeId !== undefined && !override.orphaned && override.title.trim()) titles[String(nodeId)] = override.title.trim();
+  }
+  return titles;
+}
+
+function clusterHierarchy(result: ClusterResult, manualCorrections: ManualCorrectionsState = EMPTY_MANUAL_CORRECTIONS): { clusters: SearchClusterDocument[]; parents: Map<string, string>; snapshots: GeneratedClusterSnapshot[]; nodeKeys: Map<string, string>; titles: Record<string, string> } {
   const parents = new Map<string, string>();
   const nodes = result.hierarchy.nodes || [];
+  const snapshots = generatedSearchClusterSnapshots(result);
+  const nodeKeys = new Map(snapshots.map((snapshot) => [String(snapshot.nodeId), snapshot.stableClusterKey]));
+  const titles = effectiveTitles(result, manualCorrections);
   for (const node of nodes) for (const child of node.children) parents.set(String(child), String(node.id));
   const clusters: SearchClusterDocument[] = [];
   const ids = new Set<number>([
@@ -140,13 +202,18 @@ function clusterHierarchy(result: ClusterResult): { clusters: SearchClusterDocum
   for (const id of [...ids].sort((left, right) => left - right)) {
     clusters.push({
       id: String(id),
-      title: result.titles?.[String(id)] || `Cluster ${id}`,
+      title: titles[String(id)] || `Cluster ${id}`,
       keywords: result.titleGeneration?.scores?.[String(id)]?.map((item) => item.keyword) || [],
       parentId: parents.get(String(id)),
+      stableClusterKey: nodeKeys.get(String(id)),
     });
   }
   clusters.push({ id: "root", title: "All notes", keywords: [] });
-  return { clusters, parents };
+  for (const group of manualCorrections.groups || []) {
+    if (!group.title.trim()) continue;
+    clusters.push({ id: `manual-group:${group.groupId}`, title: group.title, keywords: [], manualGroupId: group.groupId });
+  }
+  return { clusters, parents, snapshots, nodeKeys, titles };
 }
 
 function ancestorIds(id: string, parents: ReadonlyMap<string, string>): string[] {
@@ -159,11 +226,14 @@ function ancestorIds(id: string, parents: ReadonlyMap<string, string>): string[]
 }
 
 /** Build searchable note/cluster metadata from the currently persisted result. */
-export function buildSearchDocuments(notes: readonly NoteRecord[], result: ClusterResult): { documents: SearchDocument[]; clusters: SearchClusterDocument[] } {
-  const { clusters, parents } = clusterHierarchy(result);
+export function buildSearchDocuments(notes: readonly NoteRecord[], result: ClusterResult, suppliedManualCorrections?: ManualCorrectionsState): { documents: SearchDocument[]; clusters: SearchClusterDocument[] } {
+  const manualCorrections = suppliedManualCorrections || EMPTY_MANUAL_CORRECTIONS;
+  const { clusters, parents, snapshots, nodeKeys, titles } = clusterHierarchy(result, manualCorrections);
   const notesByPath = new Map(notes.map((note) => [note.path, note] as const));
   const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []);
-  const manualAdjustments = (result as ClusterResult & { manualAdjustments?: Record<string, unknown> }).manualAdjustments || {};
+  const overrideKeys = new Set((manualCorrections.titleOverrides || []).filter((override) => !override.orphaned).map((override) => override.stableClusterKey));
+  const preferences = new Map((manualCorrections.notePreferences || []).map((preference) => [preference.notePath, preference.preferredClusterKey]));
+  const groups = (manualCorrections.groups || []).filter((group) => group.title.trim());
   const documents = result.ids.map((path, index) => {
     const note = notesByPath.get(path);
     const placement = result.hierarchyPlacements?.[index];
@@ -172,10 +242,22 @@ export function buildSearchDocuments(notes: readonly NoteRecord[], result: Clust
     const clusterIds = terminal === "root" ? ["root"] : ancestorIds(terminal, parents);
     if (leaf >= 0 && !clusterIds.includes(String(leaf))) clusterIds.unshift(...ancestorIds(String(leaf), parents));
     const metadata = note ? metadataFromNote(note) : { tags: [], aliases: [] };
+    const stableClusterKeys = [...new Set(clusterIds.map((id) => nodeKeys.get(id)).filter((key): key is string => !!key))];
+    const manualPreferredClusterKey = preferences.get(path);
+    const manualGroupIds = groups.filter((group) => group.childClusterKeys.some((key) => stableClusterKeys.includes(key))).map((group) => group.groupId);
     const clusterTerms = clusterIds.flatMap((id) => {
       const cluster = clusters.find((item) => item.id === id);
       return cluster ? [cluster.title, ...(cluster.keywords || [])] : [];
     });
+    const preferredSnapshot = manualPreferredClusterKey ? snapshots.find((snapshot) => snapshot.stableClusterKey === manualPreferredClusterKey) : undefined;
+    const legacyPreferredNodeId = manualPreferredClusterKey && /^-?\d+$/.test(manualPreferredClusterKey) ? Number(manualPreferredClusterKey) : undefined;
+    const preferredTitle = preferredSnapshot ? titles[String(preferredSnapshot.nodeId)] : legacyPreferredNodeId === undefined ? undefined : titles[String(legacyPreferredNodeId)];
+    if (preferredTitle && !clusterTerms.some((term) => term.toLocaleLowerCase() === preferredTitle.toLocaleLowerCase())) clusterTerms.push(preferredTitle);
+    for (const groupId of manualGroupIds) {
+      const group = groups.find((item) => item.groupId === groupId);
+      if (group) clusterTerms.push(group.title);
+    }
+    const manuallyAdjusted = !!manualPreferredClusterKey || stableClusterKeys.some((key) => overrideKeys.has(key)) || manualGroupIds.length > 0;
     return {
       path,
       title: note?.title || path.split("/").pop()?.replace(/\.md$/i, "") || path,
@@ -186,10 +268,17 @@ export function buildSearchDocuments(notes: readonly NoteRecord[], result: Clust
       clusterTerms,
       leafLabel: leaf,
       provisional: provisional.has(path),
-      manuallyAdjusted: Boolean(manualAdjustments[path]),
+      manuallyAdjusted,
+      ...(manualPreferredClusterKey ? { manualPreferredClusterKey } : {}),
+      ...(stableClusterKeys.length ? { stableClusterKeys } : {}),
+      ...(manualGroupIds.length ? { manualGroupIds } : {}),
       mtime: note?.mtime,
     } satisfies SearchDocument;
   });
+  for (const group of groups) {
+    const cluster = clusters.find((item) => item.manualGroupId === group.groupId);
+    if (cluster) cluster.keywords = group.childClusterKeys.slice();
+  }
   return { documents, clusters };
 }
 

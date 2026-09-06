@@ -40,7 +40,7 @@ async function loadMainPolicies() {
     function normalizeExcludedPaths(value) { return [...new Set((Array.isArray(value) ? value : []).map(normalizeVaultRelativePath).filter(Boolean))].sort((a, b) => a.localeCompare(b)); }
     function pathMatchesExcludedFolder(path, folder) { const p = normalizeVaultRelativePath(path); const f = normalizeVaultRelativePath(folder); return !!p && !!f && (p === f || p.startsWith(f + "/")); }
   `;
-  source += `\nexport { AtomicClustersPlugin as default, getExclusionState, hasIncludedMarkdownNotePaths, classifyRenameBoundary };\n`;
+  source += `\nexport { AtomicClustersPlugin as default, TFile };\n`;
   const result = await transform(`${stubs}\n${source}`, { loader: "ts", format: "esm", target: "es2020" });
   return import(`data:text/javascript;base64,${Buffer.from(result.code).toString("base64")}`);
 }
@@ -94,7 +94,7 @@ test("NoteStore excludes individual notes without changing vault content", async
 });
 
 test("context-menu state distinguishes direct, inherited, and included notes", async () => {
-  const { default: AtomicClustersPlugin, getExclusionState } = await loadMainPolicies();
+  const { default: AtomicClustersPlugin, getExclusionState, TFile } = await loadMainPolicies();
   assert.equal(getExclusionState("direct.md", [], ["direct.md"], "note"), "direct");
   assert.equal(getExclusionState("Archive/note.md", ["Archive"], [], "note"), "inherited");
   assert.equal(getExclusionState("Archive/direct.md", ["Archive"], ["Archive/direct.md"], "note"), "inherited");
@@ -103,7 +103,7 @@ test("context-menu state distinguishes direct, inherited, and included notes", a
   const plugin = Object.create(AtomicClustersPlugin.prototype);
   plugin.settings = { excludedFolders: ["Archive"], excludedNotes: ["Archive/direct.md", "direct.md"] };
   const inheritedItems = [];
-  plugin.addFileContextMenuItems(menuFor(inheritedItems), new (await loadMainPolicies()).default.__TFile?.("Archive/direct.md"));
+  plugin.addFileContextMenuItems(menuFor(inheritedItems), new TFile("Archive/direct.md"));
 });
 
 test("context-menu actions are disabled only for inherited notes", async () => {
@@ -125,6 +125,30 @@ test("context-menu actions are disabled only for inherited notes", async () => {
   assert.equal(module.getExclusionState("direct.md", ["Archive"], ["direct.md"], "note"), "direct");
   assert.equal(module.getExclusionState("new.md", ["Archive"], [], "note"), "included");
   void plugin; void makeFile;
+});
+
+test("Markdown note menus preserve exclusion actions and expose Explorer preference actions", async () => {
+  const { default: AtomicClustersPlugin, TFile } = await loadMainPolicies();
+  const plugin = Object.create(AtomicClustersPlugin.prototype);
+  plugin.settings = { excludedFolders: [], excludedNotes: [] };
+  plugin.manualCorrections = { titleOverrides: [], notePreferences: [], groups: [], feedback: [] };
+  plugin.latestResult = { ids: ["Folder/note.md"] };
+  const opened = [];
+  plugin.openExplorer = async (path) => { opened.push(path); };
+  const items = [];
+  plugin.addFileContextMenuItems(menuFor(items), new TFile("./Folder\\note.md"));
+  assert.deepEqual(items.map((item) => item.title), ["Exclude from Atomic Clusters", "Prefer another cluster"]);
+  await items[1].onClickHandler();
+  assert.deepEqual(opened, ["Folder/note.md"]);
+
+  plugin.manualCorrections.notePreferences = [{ notePath: "Folder/note.md", preferredClusterKey: "cluster-test", createdAt: "now" }];
+  let cleared;
+  plugin.clearNoteClusterPreference = async (path) => { cleared = path; };
+  const withPreference = [];
+  plugin.addFileContextMenuItems(menuFor(withPreference), new TFile("Folder/note.md"));
+  assert.deepEqual(withPreference.map((item) => item.title), ["Exclude from Atomic Clusters", "Prefer another cluster", "Clear preferred cluster"]);
+  await withPreference[2].onClickHandler();
+  assert.equal(cleared, "Folder/note.md");
 });
 
 test("final-note policy and rename boundary actions are behaviorally enforced", async () => {

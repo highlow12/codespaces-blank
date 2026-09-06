@@ -167,3 +167,14 @@ test("vault rename handling preserves excluded-boundary and folder child changes
   assert.match(main, /const markdownChildren =/);
   assert.match(main, /childPaths = markdownChildren\(folder\)/);
 });
+
+test("incremental, full rebuild, and title publication reload persisted manual corrections", async () => {
+  const main = await readFile(new URL("../src/main.ts", import.meta.url), "utf8");
+  assert.match(main, /sqlite\.saveResult\(currentResult/);
+  assert.match(main, /sqlite\.saveResult\(soft\.result/);
+  assert.match(main, /sqlite\.patchResultTitles/);
+  assert.match(main, /sqlite\.loadManualCorrections\(\)/);
+  assert.match(main, /view\.setSearchNotes\(this\.explorerSearchNotes\)/);
+  assert.match(main, /view\.setManualCorrections\(this\.manualCorrections\)/);
+  assert.match(main, /view\.setResult\(result\)/);
+});

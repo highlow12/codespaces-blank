@@ -346,6 +346,7 @@ export type FeedbackEventType =
   | "note-preference-changed"
   | "note-preference-cleared"
   | "manual-group-created"
+  | "manual-group-updated"
   | "manual-group-deleted"
   | string;
 

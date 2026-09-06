@@ -2,8 +2,8 @@ import { App, Menu, Modal, Notice, Plugin, TAbstractFile, TFile, TFolder } from 
 import { configureLocalOrtAssets, disposeLocalOrtAssets, EmbeddingProvider, GeminiEmbeddingProvider, LocalEmbeddingProvider, LocalModelManager, LocalRuntimeDiagnostics, LocalRuntimeProgress, LOCAL_ORT_MJS_ASSET, LOCAL_ORT_WASM_ASSET, LOCAL_ORT_WEBGPU_MJS_ASSET, LOCAL_ORT_WEBGPU_WASM_ASSET, SecretResolver, VaultLocalModelStorage } from "./embedding";
 import { createSqliteStore, migrateLegacyAdapter, SqliteClusterStore, KeywordTitleLogStore, NoteStore } from "./storage";
 import { AtomicClustersSettingTab, ClusterRunControls, LocalRuntimeTest } from "./settings";
-import { ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
-import { CachedEmbedding, ClusteringConfig, ClusterResult, ClusterVisualization, EmbeddingLogEntry, EmbeddingRunLog, normalizeExcludedPaths, normalizeVaultRelativePath, NoteRecord, pathMatchesExcludedFolder, PluginSettings } from "./types";
+import { ClusterExplorerActions, ClusterExplorerView, VIEW_TYPE_CLUSTER_EXPLORER } from "./view";
+import { CachedEmbedding, ClusteringConfig, ClusterResult, ClusterVisualization, EmbeddingLogEntry, EmbeddingRunLog, ManualCorrectionsState, normalizeExcludedPaths, normalizeVaultRelativePath, NoteRecord, pathMatchesExcludedFolder, PluginSettings } from "./types";
 import { VaultChangeQueue, PendingVaultChanges, buildSoftRefresh, createPendingVaultChanges, decideIncrementalRefresh, markFullRebuildResult, renameClusterResultPaths } from "./incremental";
 import { BrowserClusteringWorker, InProcessClusteringWorker, NodeClusteringWorker } from "./worker-client";
 import workerSource from "./worker-source";
@@ -90,6 +90,7 @@ export default class AtomicClustersPlugin extends Plugin {
   private sqliteStore: SqliteClusterStore | null = null;
   private latestResultId: string | null = null;
   private explorerSearchNotes: NoteRecord[] = [];
+  private manualCorrections: ManualCorrectionsState = { titleOverrides: [], notePreferences: [], groups: [], feedback: [] };
   private resultRevision = 0;
   private readonly visualizationPromises = new WeakMap<readonly string[], Promise<ClusterVisualization>>();
   private pendingVaultChanges: VaultChangeQueue | null = null;
@@ -113,13 +114,14 @@ export default class AtomicClustersPlugin extends Plugin {
       this.latestResult = await sqlite.getResult();
       this.latestResultId = await sqlite.getLatestResultId();
       this.explorerSearchNotes = await sqlite.listNotes(true);
+      this.manualCorrections = sqlite.loadManualCorrections();
     }
     catch (error) { new Notice(`Atomic Clusters SQLite storage unavailable: ${safeRunError(error)}`); }
     this.localModelManager = new LocalModelManager(new VaultLocalModelStorage(this.app.vault.adapter));
     this.pendingVaultChanges = new VaultChangeQueue({ delayMs: this.refreshDelayMs(), maxDelayMs: 60000, onReady: () => { void this.processPendingVaultChanges(); } });
     this.registerVaultChangeListeners();
     this.registerFileContextMenus();
-    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters(), this.latestResult, (result) => this.ensureVisualization(result), this.explorerSearchNotes));
+    this.registerView(VIEW_TYPE_CLUSTER_EXPLORER, (leaf) => new ClusterExplorerView(leaf, () => this.buildClusters(), this.latestResult, (result) => this.ensureVisualization(result), this.explorerSearchNotes, this.manualCorrections, this.explorerCorrectionActions()));
     this.registerHoverLinkSource(VIEW_TYPE_CLUSTER_EXPLORER, { display: "Atomic Clusters", defaultMod: false });
     this.addRibbonIcon("scatter-chart", "Open Cluster Explorer", () => void this.openExplorer());
     this.addCommand({ id: "build-note-clusters", name: "Build note clusters", callback: () => void this.buildClusters() });
@@ -439,6 +441,7 @@ export default class AtomicClustersPlugin extends Plugin {
           .setWarning(!directlyExcluded)
           .onClick(() => { void this.setNoteExcluded(path, !directlyExcluded).catch((error) => new Notice(`Atomic Clusters could not update note exclusion: ${safeRunError(error)}`)); });
       });
+      this.addNoteCorrectionContextMenuItems(menu, path);
       return;
     }
     if (file instanceof TFolder) {
@@ -449,6 +452,19 @@ export default class AtomicClustersPlugin extends Plugin {
         item.setTitle(directlyExcluded ? "Include folder in Atomic Clusters" : state === "inherited" ? "Excluded by parent folder" : "Exclude folder").setIcon(directlyExcluded ? "folder-open" : "folder-minus");
         if (state === "inherited") item.setDisabled(true);
         else item.onClick(() => { void this.setFolderExcluded(path, !directlyExcluded).catch((error) => new Notice(`Atomic Clusters could not update folder exclusion: ${safeRunError(error)}`)); });
+      });
+    }
+  }
+
+  private addNoteCorrectionContextMenuItems(menu: Menu, path: string): void {
+    const preference = (this.manualCorrections?.notePreferences || []).find((item) => item.notePath === path);
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item.setTitle("Prefer another cluster").setIcon("target").onClick(() => { void this.openExplorer(path); });
+    });
+    if (preference) {
+      menu.addItem((item) => {
+        item.setTitle("Clear preferred cluster").setIcon("reset").onClick(() => { void this.clearNoteClusterPreference(path); });
       });
     }
   }
@@ -494,6 +510,15 @@ export default class AtomicClustersPlugin extends Plugin {
     this.settings.excludedNotes = normalizeExcludedPaths(current.map((path) => path === oldNormalized ? newNormalized : path));
     void this.saveSettings().catch(() => undefined);
     return true;
+  }
+
+  private async clearNoteClusterPreference(path: string): Promise<void> {
+    try {
+      await (await this.getSqliteStore()).clearNoteClusterPreference(path);
+      await this.publishManualCorrections();
+    } catch (error) {
+      new Notice(`Atomic Clusters could not clear the preferred cluster: ${safeRunError(error)}`);
+    }
   }
 
   private async refreshAfterExclusionChange(): Promise<void> {
@@ -753,13 +778,70 @@ export default class AtomicClustersPlugin extends Plugin {
     }
     return completed;
   }
-  private async openExplorer(): Promise<void> { const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false); if (!leaf) return; await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true }); this.app.workspace.revealLeaf(leaf); if (!this.latestResult) { const loaded = await (await this.getSqliteStore()).getResult(); if (loaded) this.setLatestResult(loaded); } if (this.latestResult) (leaf.view as ClusterExplorerView).setResult(this.latestResult); }
+  private explorerCorrectionActions(): ClusterExplorerActions {
+    return {
+      renameClusterTitle: async (stableClusterKey, title, memberPaths) => { await (await this.getSqliteStore()).renameClusterTitle(stableClusterKey, title, memberPaths); await this.publishManualCorrections(); },
+      resetClusterTitle: async (stableClusterKey) => { await (await this.getSqliteStore()).resetClusterTitle(stableClusterKey); await this.publishManualCorrections(); },
+      saveNoteClusterPreference: async (notePath, preferredClusterKey) => { await (await this.getSqliteStore()).saveNoteClusterPreference(notePath, preferredClusterKey); await this.publishManualCorrections(); },
+      clearNoteClusterPreference: async (notePath) => { await (await this.getSqliteStore()).clearNoteClusterPreference(notePath); await this.publishManualCorrections(); },
+      createManualGroup: async (title, childClusterKeys) => { await (await this.getSqliteStore()).createManualGroup(title, childClusterKeys); await this.publishManualCorrections(); },
+      ungroupManualGroup: async (groupId) => { await (await this.getSqliteStore()).ungroupManualGroup(groupId); await this.publishManualCorrections(); },
+      recordTooBroadFeedback: async (stableClusterKey, message) => { await (await this.getSqliteStore()).recordTooBroadFeedback(stableClusterKey, message || "This cluster is too broad"); await this.publishManualCorrections(); },
+    };
+  }
+  private async publishManualCorrections(): Promise<void> {
+    try {
+      const sqlite = await this.getSqliteStore();
+      this.manualCorrections = sqlite.loadManualCorrections();
+      for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setManualCorrections(this.manualCorrections);
+    } catch (error) {
+      new Notice(`Atomic Clusters could not publish manual corrections: ${safeRunError(error)}`);
+    }
+  }
+  private async openExplorer(notePath?: string): Promise<void> {
+    const normalizedNotePath = notePath ? normalizeVaultRelativePath(notePath) : "";
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER); const leaf = leaves[0] || this.app.workspace.getRightLeaf(false);
+    if (!leaf) { if (normalizedNotePath) new Notice("Atomic Clusters Explorer is unavailable."); return; }
+    try {
+      await leaf.setViewState({ type: VIEW_TYPE_CLUSTER_EXPLORER, active: true });
+      await this.app.workspace.revealLeaf(leaf);
+    } catch (error) {
+      new Notice(`Atomic Clusters could not open Explorer: ${safeRunError(error)}`);
+      return;
+    }
+    try {
+      const sqlite = await this.getSqliteStore();
+      if (!this.latestResult) { const loaded = await sqlite.getResult(); if (loaded) this.setLatestResult(loaded); }
+      this.explorerSearchNotes = await sqlite.listNotes(true);
+      this.manualCorrections = sqlite.loadManualCorrections();
+    } catch (error) { new Notice(`Atomic Clusters could not refresh Explorer state: ${safeRunError(error)}`); }
+    const view = leaf.view as ClusterExplorerView;
+    view.setSearchNotes(this.explorerSearchNotes);
+    view.setManualCorrections(this.manualCorrections);
+    if (this.latestResult) view.setResult(this.latestResult);
+    if (!normalizedNotePath) return;
+    if (!this.latestResult) { new Notice("No saved cluster result is available; build clusters first."); return; }
+    if (!this.latestResult.ids.includes(normalizedNotePath)) { new Notice(`The note is not included in the saved cluster result: ${normalizedNotePath}`); return; }
+    if (!view.focusNote(normalizedNotePath)) new Notice(`Could not select the note in Explorer: ${normalizedNotePath}`);
+  }
   private async openEmbeddingLog(): Promise<void> {
     try { const log = await (await this.getSqliteStore()).loadLatestEmbeddingLog(); if (!log) { new Notice("No embedding log is available yet."); return; } const modal = new Modal(this.app); modal.titleEl.setText("Embedding log"); modal.contentEl.createEl("pre", { text: JSON.stringify(log, null, 2) }); modal.open(); }
     catch (error) { new Notice(`Could not open embedding log: ${safeRunError(error instanceof Error ? error.message : String(error))}`); }
   }
   private setLatestResult(result: ClusterResult): void { this.latestResult = result; this.resultRevision++; }
-  private async publishResult(result: ClusterResult): Promise<void> { try { this.explorerSearchNotes = await (await this.getSqliteStore()).listNotes(true); } catch { } for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) { const view = leaf.view as ClusterExplorerView; view.setSearchNotes(this.explorerSearchNotes); view.setResult(result); } }
+  private async publishResult(result: ClusterResult): Promise<void> {
+    try {
+      const sqlite = await this.getSqliteStore();
+      this.explorerSearchNotes = await sqlite.listNotes(true);
+      this.manualCorrections = sqlite.loadManualCorrections();
+    } catch { }
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) {
+      const view = leaf.view as ClusterExplorerView;
+      view.setSearchNotes(this.explorerSearchNotes);
+      view.setManualCorrections(this.manualCorrections);
+      view.setResult(result);
+    }
+  }
   private publishPendingChangeCount(): void { const count = this.pendingVaultChanges?.size || 0; for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER)) (leaf.view as ClusterExplorerView).setPendingChangeCount(count); }
   private updateProgress(phase: string, progress: number): void { this.app.workspace.getLeavesOfType(VIEW_TYPE_CLUSTER_EXPLORER).forEach((leaf) => { const view = leaf.view as ClusterExplorerView; view.contentEl.setAttribute("aria-label", `${phase} ${Math.round(progress * 100)}%`); view.setProgress(phase, progress); }); }
   private async saveSettings(): Promise<void> { await this.saveData(this.settings); }

@@ -72,3 +72,27 @@ test("buildSearchDocuments extracts optional frontmatter and ancestor context", 
   assert.deepEqual(built.documents[0].clusterIds.sort(), ["0", "1", "root"]);
   assert.ok(built.documents[0].clusterTerms.includes("Product"));
 });
+
+test("buildSearchDocuments keeps generated titles separate while indexing persisted corrections", async () => {
+  const { buildSearchDocuments, SearchIndex } = await loadSearch();
+  const result = {
+    ids: ["note.md"], leafLabels: [0], probabilities: [1], outlierProxy: [0], schemaVersion: 6, pca: { selected: 2 }, timings: {},
+    hierarchy: { leaves: [0], merges: [], root: 0, nodes: [{ id: 0, children: [], descendantLeaves: [0], distance: 0, mass: 1 }], rootChildren: [0], splitMethod: "distance-knee-2-5" },
+    hierarchyPlacements: [{ kind: "leaf", nodeId: 0, confidence: 1 }], titles: { "0": "Generated title" },
+  };
+  const notes = [{ path: "note.md", title: "Note", mtime: 1, hash: "hash", content: "body" }];
+  const generated = buildSearchDocuments(notes, result);
+  const stableKey = generated.clusters.find((cluster) => cluster.id === "0").stableClusterKey;
+  const corrected = buildSearchDocuments(notes, result, {
+    titleOverrides: [{ stableClusterKey: stableKey, title: "Manual title", createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z" }],
+    notePreferences: [{ notePath: "note.md", preferredClusterKey: stableKey, createdAt: "2026-09-04T00:00:00.000Z" }],
+    groups: [{ groupId: "group", title: "Manual group", childClusterKeys: [stableKey], createdAt: "2026-09-04T00:00:00.000Z", updatedAt: "2026-09-04T00:00:00.000Z" }],
+    feedback: [],
+  });
+  assert.equal(result.titles["0"], "Generated title");
+  assert.equal(corrected.clusters.find((cluster) => cluster.id === "0").title, "Manual title");
+  assert.equal(corrected.documents[0].manuallyAdjusted, true);
+  assert.equal(corrected.documents[0].manualPreferredClusterKey, stableKey);
+  assert.ok(corrected.documents[0].clusterTerms.includes("Manual group"));
+  assert.ok(new SearchIndex(corrected.documents, corrected.clusters).search("manual title").notePaths.includes("note.md"));
+});

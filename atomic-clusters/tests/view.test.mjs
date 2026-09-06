@@ -8,6 +8,7 @@ class MockClassList {
   add(...names) { names.forEach((name) => this.values.add(name)); }
   remove(...names) { names.forEach((name) => this.values.delete(name)); }
   contains(name) { return this.values.has(name); }
+  toggle(name, force) { const next = force === undefined ? !this.values.has(name) : force; if (next) this.values.add(name); else this.values.delete(name); return next; }
 }
 
 class MockElement {
@@ -31,8 +32,10 @@ class MockElement {
   removeEventListener(type, callback) { this.listeners.set(type, (this.listeners.get(type) || []).filter((item) => item !== callback)); }
   dispatchEvent(event) { if (!event.target) event.target = this; for (const callback of this.listeners.get(event.type) || []) callback(event); if (event.bubbles !== false && this.parentElement) this.parentElement.dispatchEvent(event); return true; }
   querySelector(selector) { if ((selector.startsWith(".") && this.classList.contains(selector.slice(1))) || this.tagName.toLowerCase() === selector.toLowerCase()) return this; for (const child of this.children) { const found = child.querySelector(selector); if (found) return found; } return null; }
+  querySelectorAll(selector) { const matches = []; const visit = (element) => { if ((selector.startsWith(".") && element.classList.contains(selector.slice(1))) || element.tagName.toLowerCase() === selector.toLowerCase()) matches.push(element); for (const child of element.children) visit(child); }; visit(this); return matches; }
   getBoundingClientRect() { return { left: 0, top: 0, width: globalThis.__mockViewport?.width ?? this.clientWidth, height: globalThis.__mockViewport?.height ?? this.clientHeight }; }
-  focus() {}
+  focus(options) { this.focusOptions = options; globalThis.__focusedElement = this; }
+  scrollIntoView(options) { this.scrollIntoViewOptions = options; globalThis.__scrolledElement = this; }
   setText(text) { this.textContent = text; }
 }
 
@@ -112,6 +115,97 @@ test("Explorer renders local search, combinable filters, and focus controls", as
   assert.match(view, /searchIndexedNotes/);
   assert.match(css, /\.atomic-clusters-search-panel/);
   assert.match(css, /\.atomic-clusters-search-dimmed/);
+});
+
+test("Explorer exposes bounded manual correction actions and generated-title provenance", async () => {
+  const view = await readFile(new URL("../src/view.ts", import.meta.url), "utf8");
+  const css = await readFile(new URL("../styles.css", import.meta.url), "utf8");
+  assert.match(view, /composeEffectiveClusterTitles/);
+  assert.match(view, /Rename title/);
+  assert.match(view, /Reset title/);
+  assert.match(view, /Too broad/);
+  assert.match(view, /Create manual group/);
+  assert.match(view, /Ungroup/);
+  assert.match(view, /preferredClusterCandidates\.slice\(0, 5\)/);
+  assert.match(view, /Clear preference/);
+  assert.match(view, /Generated:/);
+  assert.match(css, /\.atomic-clusters-correction-actions/);
+  assert.match(css, /\.atomic-clusters-manual-groups/);
+});
+
+test("Explorer focuses a context-menu note and makes its preferred-cluster picker available", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["__focusedElement", globalThis.__focusedElement], ["__scrolledElement", globalThis.__scrolledElement]]);
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  try {
+    const { ClusterExplorerView } = await loadView();
+    const result = { schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], outlierProxy: [0, 0], titles: { "0": "One cluster", "1": "Two cluster" }, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } };
+    const view = new ClusterExplorerView({});
+    view.setSearchNotes([{ path: "one.md", title: "One", mtime: 1, hash: "one", content: "one" }, { path: "two.md", title: "Two", mtime: 1, hash: "two", content: "two" }]);
+    view.setManualCorrections({ titleOverrides: [], notePreferences: [{ notePath: "two.md", preferredClusterKey: "orphan-preference", createdAt: "2026-09-06T00:00:00.000Z" }], groups: [], feedback: [] });
+    assert.equal(view.focusNote("missing.md"), false);
+    view.setResult(result);
+    assert.equal(view.focusNote("two.md"), true);
+    assert.equal(view.contentEl.querySelector(".atomic-clusters-note-detail-path").textContent, "two.md");
+    const preference = view.contentEl.querySelector(".atomic-clusters-note-preference");
+    const picker = preference.querySelector("select");
+    assert.ok(picker);
+    assert.equal(picker.children.length, 4, "automatic placement, saved orphan preference, and the two available candidates");
+    assert.equal(picker.value, "orphan-preference");
+    assert.equal(picker.children.filter((option) => option.value === "orphan-preference").length, 1, "saved preference is represented exactly once");
+    const candidateKey = picker.children.find((option) => option.value && option.textContent.includes("automatic")).value;
+    view.setManualCorrections({ titleOverrides: [], notePreferences: [{ notePath: "two.md", preferredClusterKey: candidateKey, createdAt: "2026-09-06T00:00:00.000Z" }], groups: [], feedback: [] });
+    const candidatePicker = view.contentEl.querySelector(".atomic-clusters-note-preference").querySelector("select");
+    assert.equal(candidatePicker.children.length, 3, "a current candidate must not be duplicated");
+    assert.equal(candidatePicker.value, candidateKey);
+    assert.equal(candidatePicker.children.filter((option) => option.value === candidateKey).length, 1);
+    assert.equal(view.focusNote("missing.md"), false);
+    assert.equal(view.contentEl.querySelector(".atomic-clusters-note-detail-path").textContent, "two.md");
+    await view.onClose();
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
+  }
+});
+
+test("manual-group search results reveal the group row for click and Enter without invalid focus", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["__focusedElement", globalThis.__focusedElement], ["__scrolledElement", globalThis.__scrolledElement]]);
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  try {
+    const { ClusterExplorerView } = await loadView();
+    const result = { schemaVersion: 4, ids: ["one.md"], leafLabels: [0], leafOrdering: [0], memberships: [[1]], probabilities: [1], outlierProxy: [0], titles: { "0": "One cluster" }, hierarchy: { leaves: [0], merges: [], root: 0 }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0]], labels: [0], leafOrdering: [0], memberships: [[1]], configuration: {} } };
+    const view = new ClusterExplorerView({});
+    view.setSearchNotes([{ path: "one.md", title: "One", mtime: 1, hash: "one", content: "one" }]);
+    view.setManualCorrections({ titleOverrides: [], notePreferences: [], groups: [{ groupId: "group-1", title: "Research group", childClusterKeys: ["missing-child"], createdAt: "2026-09-06T00:00:00.000Z", updatedAt: "2026-09-06T00:00:00.000Z" }], feedback: [] });
+    view.setResult(result);
+
+    let input = view.contentEl.querySelector(".atomic-clusters-search-input");
+    input.value = "research group";
+    input.dispatchEvent({ type: "input", target: input, bubbles: false });
+    await new Promise((resolve) => setTimeout(resolve, 90));
+    let button = view.contentEl.querySelector(".atomic-clusters-search-result-cluster");
+    const row = view.contentEl.querySelector(".atomic-clusters-manual-group");
+    assert.ok(button);
+    assert.ok(row);
+    button.dispatchEvent({ type: "click", target: button, bubbles: false });
+    assert.equal(view.focusNodeId, null, "manual group must not become a visualization node");
+    assert.equal(globalThis.__scrolledElement, row);
+    assert.equal(globalThis.__focusedElement, row);
+    assert.equal(row.classList.contains("is-search-target"), true);
+
+    input = view.contentEl.querySelector(".atomic-clusters-search-input");
+    globalThis.__focusedElement = null; globalThis.__scrolledElement = null;
+    input.dispatchEvent({ type: "keydown", key: "Enter", target: input, bubbles: false, preventDefault() {}, stopPropagation() {} });
+    assert.equal(view.focusNodeId, null, "Enter must use the same manual-group activation path");
+    assert.equal(globalThis.__scrolledElement, row);
+    assert.equal(globalThis.__focusedElement, row);
+    assert.equal(row.classList.contains("is-search-target"), true);
+    await view.onClose();
+  } finally {
+    for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; }
+  }
 });
 
 test("restored explorer views can render the persisted result on first open", async () => {
@@ -207,6 +301,35 @@ test("resize observer defers expensive density work until resize settles", async
   } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
 });
 
+test("renderer measures labels and recomputes camera padding after resize", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle], ["ResizeObserver", globalThis.ResizeObserver], ["__mockViewport", globalThis.__mockViewport]]);
+  let observerCallback = null;
+  class MeasuringCanvas extends MockCanvas {
+    getContext() {
+      const context = super.getContext();
+      context.measureText = () => ({ width: 180 });
+      return context;
+    }
+  }
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MeasuringCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MeasuringCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" }); globalThis.__mockViewport = { width: 500, height: 300 };
+  globalThis.ResizeObserver = class { constructor(callback) { observerCallback = callback; } observe() {} disconnect() {} };
+  try {
+    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
+    view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: { "0": "A long measured title" }, hierarchy: { leaves: [0, 1], merges: [{ id: 2, left: 0, right: 1, distance: 1, mass: 2 }], root: 2 }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [100, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
+    assert.ok(view.visualizationCameraState.padding > 18);
+    const initialPadding = view.visualizationCameraState.padding;
+    globalThis.__mockViewport = { width: 200, height: 160 }; observerCallback([{ contentRect: { width: 200, height: 160 } }]);
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    assert.equal(view.visualizationCameraState.width, 200); assert.equal(view.visualizationCameraState.height, 160); assert.equal(view.visualizationCameraState.padding, 80);
+    globalThis.__mockViewport = { width: 700, height: 420 }; observerCallback([{ contentRect: { width: 700, height: 420 } }]);
+    await new Promise((resolve) => setTimeout(resolve, 125));
+    assert.equal(view.visualizationCameraState.width, 700); assert.equal(view.visualizationCameraState.height, 420); assert.equal(view.visualizationCameraState.padding, initialPadding);
+    await view.onClose();
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
+});
+
 test("gesture camera pans without opening a note, debounces density, and cleans up listeners", async () => {
   const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
   let imageDataCalls = 0; let prevented = false;
@@ -222,6 +345,65 @@ test("gesture camera pans without opening a note, debounces density, and cleans 
     await new Promise((resolve) => setTimeout(resolve, 125)); assert.ok(imageDataCalls > initialCalls);
     const afterDrag = imageDataCalls; layer.dispatchEvent({ type: "wheel", deltaY: -120, clientX: 250, clientY: 150, preventDefault: () => { prevented = true; }, bubbles: true }); assert.equal(prevented, true); assert.equal(imageDataCalls, afterDrag); await new Promise((resolve) => setTimeout(resolve, 125)); assert.ok(imageDataCalls > afterDrag);
     const afterWheel = imageDataCalls; await view.onClose(); await new Promise((resolve) => setTimeout(resolve, 125)); assert.equal(imageDataCalls, afterWheel);
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
+});
+
+test("gesture event handling keeps the camera bounded across 20 rapid drags and zooms", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  try {
+    const { ClusterExplorerView } = await loadView(); const view = new ClusterExplorerView({});
+    view.setResult({ schemaVersion: 4, ids: ["a.md", "b.md", "c.md", "d.md"], leafLabels: [0, 1, 2, 3], leafOrdering: [0, 1, 2, 3], memberships: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], probabilities: [1, 1, 1, 1], titles: {}, hierarchy: { leaves: [0, 1, 2, 3], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[-100, -50], [100, -50], [-100, 50], [100, 50]], labels: [0, 1, 2, 3], leafOrdering: [0, 1, 2, 3], memberships: [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], configuration: {} } });
+    const layer = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer");
+    const assertStateIsFinite = () => { const state = view.visualizationCameraState; assert.ok(state); assert.ok(Number.isFinite(state.centerX) && Number.isFinite(state.centerY)); assert.ok(state.zoom >= .5 && state.zoom <= 16); assert.ok(state.width > 0 && state.height > 0); assert.ok(state.padding >= 0 && state.padding <= Math.min(state.width, state.height) / 2); };
+    const zoomDeltas = [-700, 420, -1000, 650, -320]; const drags = [[1000, 700], [-1200, -800], [900, -650], [-1100, 550]];
+    for (let index = 0; index < 20; index++) {
+      const startX = 250 + (index % 3) * 3; const startY = 150 + (index % 2) * 3; const [deltaX, deltaY] = drags[index % drags.length];
+      layer.dispatchEvent({ type: "pointerdown", button: 0, clientX: startX, clientY: startY, pointerId: 1, bubbles: true });
+      layer.dispatchEvent({ type: "pointermove", button: 0, clientX: startX + deltaX, clientY: startY + deltaY, pointerId: 1, bubbles: true });
+      layer.dispatchEvent({ type: "pointerup", button: 0, clientX: startX + deltaX, clientY: startY + deltaY, pointerId: 1, bubbles: true });
+      assertStateIsFinite();
+      layer.dispatchEvent({ type: "wheel", deltaY: zoomDeltas[index % zoomDeltas.length], clientX: 30 + (index * 97) % 440, clientY: 20 + (index * 61) % 260, preventDefault: () => {}, bubbles: true });
+      assertStateIsFinite();
+    }
+    await view.onClose();
+  } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
+});
+
+test("hover clears immediately on empty space, pointerleave, pointercancel, and drag", async () => {
+  const previous = new Map([["MockElement", globalThis.MockElement], ["HTMLElement", globalThis.HTMLElement], ["HTMLCanvasElement", globalThis.HTMLCanvasElement], ["document", globalThis.document], ["window", globalThis.window], ["getComputedStyle", globalThis.getComputedStyle]]);
+  globalThis.MockElement = MockElement; globalThis.HTMLElement = MockElement; globalThis.HTMLCanvasElement = MockCanvas;
+  globalThis.document = { createElement: (tag) => tag === "canvas" ? new MockCanvas() : new MockElement(tag) };
+  globalThis.window = { devicePixelRatio: 1, matchMedia: () => ({ matches: false }) }; globalThis.getComputedStyle = () => ({ color: "#fff", getPropertyValue: () => "transparent" });
+  try {
+    const { ClusterExplorerView } = await loadView();
+    const view = new ClusterExplorerView({}); let hoverEvents = 0;
+    view.app = { workspace: { trigger: () => { hoverEvents++; } } };
+    view.setResult({ schemaVersion: 4, ids: ["one.md", "two.md"], leafLabels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], probabilities: [1, 1], titles: {}, hierarchy: { leaves: [0, 1], merges: [], root: null }, pca: { selected: 2 }, visualization: { coordinates: [[0, 0], [10, 0]], labels: [0, 1], leafOrdering: [0, 1], memberships: [[1, 0], [0, 1]], configuration: {} } });
+    const layer = view.contentEl.querySelector(".atomic-clusters-umap-visual-layer"); const point = view.visualizationPoints[0];
+    const dispatchAtPoint = (type, x = point[0], y = point[1]) => layer.dispatchEvent({ type, clientX: x, clientY: y, pointerId: 1, bubbles: true });
+    dispatchAtPoint("pointermove");
+    assert.equal(view.hoveredVisualizationPoint, 0);
+    assert.equal(hoverEvents, 1);
+    dispatchAtPoint("pointermove", 5, 5);
+    assert.equal(view.hoveredVisualizationPoint, null);
+    dispatchAtPoint("pointermove"); dispatchAtPoint("pointerleave");
+    assert.equal(view.hoveredVisualizationPoint, null);
+    dispatchAtPoint("pointermove"); dispatchAtPoint("pointercancel");
+    assert.equal(view.hoveredVisualizationPoint, null);
+    dispatchAtPoint("pointermove");
+    layer.dispatchEvent({ type: "pointerdown", button: 0, clientX: point[0], clientY: point[1], pointerId: 1, bubbles: true });
+    const hit = view.visualizationHitElements[0];
+    hit.dispatchEvent({ type: "mouseenter", clientX: point[0], clientY: point[1], pointerId: 1, bubbles: false });
+    assert.equal(view.hoveredVisualizationPoint, null);
+    layer.dispatchEvent({ type: "pointermove", button: 0, clientX: point[0] + 40, clientY: point[1] + 30, pointerId: 1, bubbles: true });
+    assert.equal(view.hoveredVisualizationPoint, null);
+    assert.match(layer.style.transform, /translate/);
+    layer.dispatchEvent({ type: "pointercancel", pointerId: 1, bubbles: true });
+    assert.equal(view.hoveredVisualizationPoint, null);
+    await view.onClose();
   } finally { for (const [name, value] of previous) { if (value === undefined) delete globalThis[name]; else globalThis[name] = value; } }
 });
 

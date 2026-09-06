@@ -93,6 +93,18 @@ function throttledProgress(callback: ClusterProgress): ClusterProgress {
   };
 }
 
+/** The exact TypeScript density-graph fallback is intentionally bounded. */
+export const TYPESCRIPT_FALLBACK_MAX_ROWS = 511;
+
+export class ClusteringCapabilityError extends Error {
+  readonly code = "TYPESCRIPT_FALLBACK_LIMIT";
+
+  constructor(rowCount: number) {
+    super(`The TypeScript clustering fallback is limited to ${TYPESCRIPT_FALLBACK_MAX_ROWS} rows; ${rowCount} rows require the packaged WASM kernel.`);
+    this.name = "ClusteringCapabilityError";
+  }
+}
+
 const jsKernel: NumericKernel = {
   normalize, pca: jsPca, cosineDistances, exactKnn,
   mst: (rows, k) => minimumSpanningTree(rows, k)
@@ -133,6 +145,8 @@ export async function projectVisualization(pcaFeatures: number[][], labels: numb
   const umap = new UMAP({ nComponents: 2, nNeighbors, minDist, spread, random: visualizationRandom(seed) });
   if (varyingLabels) umap.setSupervisedProjection(labels, { targetWeight: 0.01, targetNNeighbors: nNeighbors });
   progress("visualization", 0);
+  await yieldToEventLoop();
+  checkCancelled(options);
   const started = Date.now();
   const reduced = await umap.fitAsync(pcaFeatures, (epoch) => {
     progress("visualization", Math.min(1, epoch / Math.max(1, pcaFeatures.length * 5)));
@@ -157,6 +171,7 @@ export async function projectVisualization(pcaFeatures: number[][], labels: numb
 
 export async function clusterEmbeddings(ids: string[], input: number[][], config: ClusteringConfig = {}, options: ClusterOptions = {}): Promise<ClusterResult> {
   if (!input.length || input.some((row) => row.length !== input[0].length)) throw new Error("Embeddings must be a non-empty rectangular matrix.");
+  checkCancelled(options);
   if (input.length < 3) {
     const leafLabels = input.map(() => -1);
     const memberships = input.map(() => [] as number[]);
@@ -192,6 +207,8 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   const normalized = kernel.normalize(input);
   checkCancelled(options);
   progress("pca", 0.05);
+  await yieldToEventLoop();
+  checkCancelled(options);
   const sampleSize = Math.min(config.pcaSampleSize || 2000, normalized.length);
   const sample = deterministicSample(normalized, sampleSize, config.seed ?? 42);
   const maxComponents = Math.min(config.pcaMaxComponents || 512, normalized[0].length, normalized.length);
@@ -200,6 +217,7 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   // deliberately avoids re-running randomized PCA at every candidate width.
   const pilotComponents = Math.min(maxComponents, Math.max(minComponents, config.pcaKneeProbeComponents ?? 256));
   const probe = kernel.pca(sample, pilotComponents);
+  checkCancelled(options);
   const selectedPca = selectPcaByPreservation(sample, probe.projected, candidateComponents(pilotComponents, minComponents), sampleSize, config.pcaVarianceTarget ?? 0.9, kernel);
   const pca = kernel.pca(normalized, selectedPca.selected);
   const fitted = pca.mean && pca.components ? { mean: pca.mean, components: pca.components } : jsPca(normalized, selectedPca.selected);
@@ -208,20 +226,29 @@ export async function clusterEmbeddings(ids: string[], input: number[][], config
   selectedPca.explainedVariance = explainedFraction(pca.explained, selectedPca.selected, selectedPca.totalVariance);
   selectedPca.model = { modelHash, inputDimension: normalized[0].length, outputDimension: selectedPca.selected, normalization: "l2", mean: fitted.mean, components: fitted.components, explainedVariance: pca.explained.slice(0, selectedPca.selected) };
   checkCancelled(options);
+  progress("pca", 0.2);
   progress("umap", 0.2);
   const discovery = await discoverPcaFeatures(pca.projected, config, { ...options, onProgress: progress });
   const hdbscan = discovery;
   /* The external Python reference uses this same boundary after fitting its
    * authoritative PCA. Keeping discovery separate makes the JS callback a
    * real, testable replacement for Python's optional UMAP/HDBSCAN imports. */
-  progress("hdbscan", 0.78);
+  checkCancelled(options);
+  await yieldToEventLoop();
+  checkCancelled(options);
+  progress("hdbscan", 0.84);
+  progress("hierarchy", 0.86);
+  await yieldToEventLoop();
+  checkCancelled(options);
   const hierarchy = buildHierarchy(pca.projected, hdbscan.labels, hdbscan.probabilities, kernel, config.minClusterSize || 1);
+  checkCancelled(options);
   progress("hierarchy", 0.86);
   const visualization = config.deferVisualization ? undefined : await projectVisualization(pca.projected, hdbscan.labels, {
     seed: config.seed ?? 42,
     signal: options.signal,
     onProgress: (phase, value) => progress(phase, 0.86 + value * 0.1)
   });
+  checkCancelled(options);
   progress("complete", 1);
   const leafOrder = hierarchy.leaves.slice();
   const clusterCount = leafOrder.length;
@@ -278,6 +305,8 @@ export async function discoverPcaFeatures(pcaFeatures: number[][], config: Clust
   const progress = throttledProgress(options.onProgress || (() => undefined));
   checkCancelled(options);
   progress("umap", 0.2);
+  await yieldToEventLoop();
+  checkCancelled(options);
   // umap-js initializes its simplicial-set embedding from this seeded random
   // source; this matches the production umap-learn route's random init.
   const random = seededRandom(config.seed ?? 42);
@@ -293,11 +322,15 @@ export async function discoverPcaFeatures(pcaFeatures: number[][], config: Clust
   });
   checkCancelled(options);
   progress("hdbscan", 0.78);
+  await yieldToEventLoop();
+  checkCancelled(options);
   const minClusterSize = config.minClusterSize || 5;
   // This is intentionally distinct from minClusterSize: the authoritative
   // Python PCA -> UMAP -> HDBSCAN route uses min_samples=3.
   const minSamples = config.minSamples ?? 3;
   const hdbscan = (options.hdbscan || new DeterministicHdbscanProvider()).fit(reduced, minClusterSize, minSamples, kernel);
+  checkCancelled(options);
+  progress("hdbscan", 0.84);
   const umapConfiguration: DiscoveryResult["umapConfiguration"] = {
     runtime: "umap-js",
     inputDimension: pcaFeatures[0].length,
@@ -590,8 +623,9 @@ export function applyHierarchyPlacementMasses(hierarchy: HierarchyTree, placemen
 }
 
 function hdbscanFallback(rows: number[][], minClusterSize: number, minSamples: number, kernel: NumericKernel): { labels: number[]; probabilities: number[] } {
-  const n = rows.length; if (n < minClusterSize * 2) return { labels: new Array(n).fill(-1), probabilities: new Array(n).fill(0) };
-  if (n >= 512) throw new Error("The exact JavaScript HDBSCAN fallback is limited to fewer than 512 rows; use the packaged WASM kernel.");
+  const n = rows.length;
+  if (n > TYPESCRIPT_FALLBACK_MAX_ROWS) throw new ClusteringCapabilityError(n);
+  if (n < minClusterSize * 2) return { labels: new Array(n).fill(-1), probabilities: new Array(n).fill(0) };
   const k = Math.max(2, Math.min(minSamples, n - 1));
   // The production HDBSCAN provider consumes the WASM MST. This deterministic
   // fallback uses its edge weights as a density graph when the asset is absent.
@@ -650,6 +684,15 @@ function minimumSpanningTree(rows: number[][], k: number): Array<[number, number
 function deterministicSample(rows: number[][], size: number, seed: number): number[][] { const indices = Array.from({ length: rows.length }, (_, i) => i); let state = seed >>> 0; for (let i = indices.length - 1; i > 0; i--) { state = Math.imul(state ^ (state >>> 16), 2246822519) >>> 0; const j = state % (i + 1); [indices[i], indices[j]] = [indices[j], indices[i]]; } return indices.slice(0, size).map((i) => rows[i]); }
 function seededRandom(seed: number): () => number { let state = seed >>> 0; return () => { state = (Math.imul(1664525, state) + 1013904223) >>> 0; return state / 4294967296; }; }
 function checkCancelled(options: ClusterOptions): void { if (options.signal?.cancelled) throw new Error("Clustering cancelled"); }
+
+function yieldToEventLoop(): Promise<void> {
+  if (typeof MessageChannel === "function") return new Promise((resolve) => {
+    const channel = new MessageChannel();
+    channel.port1.onmessage = () => { channel.port1.close(); channel.port2.close(); resolve(); };
+    channel.port2.postMessage(undefined);
+  });
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 function jsPca(rows: number[][], components: number): { projected: number[][]; explained: number[]; mean: number[]; components: number[][] } {
   const n = rows.length; const dimensions = rows[0].length; const means = new Array(dimensions).fill(0); rows.forEach((row) => row.forEach((value, i) => means[i] += value / n));

@@ -1,6 +1,6 @@
 # Atomic Clusters 제품화 계획
 
-기준일: 2026-09-03
+기준일: 2026-09-05
 
 이 문서는 Atomic Clusters MVP를 실제로 계속 사용할 수 있는 제품으로 다듬기 위한 구현 계획이다. 현재 핵심 흐름인 `Vault → embedding → clustering → hierarchy → keyword titles → Explorer`는 동작하므로, 이후 개발은 새로운 연구 기능을 넓히기보다 사용 중 반복해서 발생하는 비용과 실패 지점을 줄이는 데 집중한다.
 
@@ -31,16 +31,17 @@
 
 - **#2 — per-note/folder exclusion (plan §2.6): 구현됨.** note context
   menu와 folder context menu에서 Atomic Clusters 대상 제외/복구를 하고,
-  설정에 vault-relative exclusion을 저장한다. 이는 사용자 수정과 피드백
-  전체가 구현되었다는 뜻이 아니다. 수동 cluster title 수정/reset, note
-  preference, manual group, feedback log는 아직 구현하지 않았다.
-  상위 폴더 상속 메뉴와 마지막 활성 노트 제외 처리는 리뷰 후속 작업으로
-  `0.2`에 기록했으며, 해당 경계 조건의 수정·회귀 검증은 아직 남아 있다.
+  설정에 vault-relative exclusion을 저장한다. 2026-09-03 당시에는 수동
+  cluster title 수정/reset, note preference, manual group, feedback log가
+  미구현이었으며, 해당 기능은 아래 `0.3`의 Milestone C에서 후속 구현했다.
+  상위 폴더 상속 메뉴와 마지막 활성 노트 제외 처리도 2026-09-04에 수정했고,
+  context menu·rename·automatic refresh 경계의 회귀 테스트를 추가했다.
 - **#3 — Note detail panel (plan §3.6): 구현됨.** 선택한 note의 path/title,
   automatic leaf, hierarchy, membership/probability와 관련 note 정보를
   확인하고 원본 note를 여는 detail panel을 구현했다. Search & Focus는 이전에
   구현되어 있던 범위이며 이번 번호 작업의 구현 완료로 다시 주장하지 않는다.
-  manual preferred cluster/note preference는 아직 구현하지 않았다.
+  manual preferred cluster/note preference는 2026-09-05 Milestone C 통합에서
+  구현했다.
 - **작업 5 — Large Vault hardening: 부분 완료.** 계측 runner, renderer memory
   preflight, persistent Notice heartbeat, cancellation/progress/RSS 계측과
   release WASM 검증을 구현했다. 2026-09-03 실제 Gemini 3,000-record 입력의
@@ -59,10 +60,10 @@
 상세 raw 결과는 `/tmp/atomic-clusters-large-vault-hardening-final-2026-09-03/`
 및 `atomic-clusters/docs/large-vault-hardening-report.md`에 있다.
 
-## 0.2 리뷰 후속 작업 — exclusion 경계 조건
+## 0.2 리뷰 후속 작업 — exclusion 경계 조건 (완료)
 
-2026-09-03 코드 리뷰에서 노트 제외 기능의 두 경계 조건을 확인했다. 아래
-항목은 다음 exclusion 수정 작업의 필수 acceptance 조건이다.
+2026-09-03 코드 리뷰에서 확인한 두 경계 조건은 2026-09-04 수정과 회귀
+테스트를 완료했다. 아래 항목은 유지해야 할 acceptance 조건으로 남긴다.
 
 - **상위 폴더 제외 상속을 파일 메뉴에 반영한다.** 노트가 `excludedFolders`의
   하위에 있으면 이미 제외된 상태이므로 파일 메뉴에 중복 `Exclude`를 제공하지
@@ -75,6 +76,38 @@
   제외된 노트가 이전 Explorer 결과에 계속 표시되어서는 안 된다.
 - 두 경우 모두 context menu, 설정 복구, rename, automatic refresh on/off 상태를
   회귀 테스트한다.
+
+## 0.3 2026-09-05 구현 상태
+
+현재 소스와 전체 회귀 테스트를 기준으로 제품화 마일스톤을 다시 판정한다.
+
+- **Milestone A — Explorer 신뢰성: 구현됨.** pan camera constraint를 interaction
+  중 적용하고, label bounding box·hover radius·resize를 반영한 safe padding과
+  pointerleave/pointercancel/drag hover clear를 구현했다. 빠른 drag 20회와 여러
+  zoom, resize, 빈 공간 hover 회귀 테스트를 추가했다.
+- **Milestone B — Search & Focus: 구현됨.** 상세 acceptance 상태는
+  `atomic-clusters/docs/search-focus-plan.md`에 기록되어 있다.
+- **Milestone C — Manual corrections: 구현됨.** stable member fingerprint,
+  Jaccard 0.7 기반의 보수적 rebuild 승계, manual title rename/reset, note
+  preference, view-level manual group/ungroup, too-broad feedback와 로컬 feedback
+  log를 SQLite에 저장한다. Explorer와 note context menu에서 수정할 수 있고,
+  Search의 `Manually adjusted` 필터와 note detail이 실제 저장 상태를 사용한다.
+  generated title과 manual title은 별도 데이터로 유지한다.
+- **Milestone D — Automatic incremental refresh: 구현됨.** Vault event queue,
+  debounce, create/modify/delete/rename, changed-only embedding, no-op/soft/full
+  정책, provisional placement, 자동 refresh 설정, atomic result publication과
+  재시작 복구가 구현되어 있다. rename 시 manual correction의 note path와
+  stable cluster reference도 함께 보존한다.
+- **Milestone E — Large Vault hardening: 부분 완료 유지.** memory preflight,
+  heartbeat, cancellation 경계, release-WASM 검증과 TypeScript fallback 제한을
+  구현했다. 동기 PCA/HDBSCAN 구간 전후에는 event-loop yield와 cancellation
+  check를 수행하지만 연산 도중 취소 가능성을 과장하지 않는다. 실제 데이터가
+  3,000행뿐이므로 5,000/10,000 실측은 계속 `unavailable`이다.
+
+2026-09-05 검증 결과는 plugin Node test 27/27, repository Python test 132/132,
+TypeScript `--noEmit`, plugin build 통과다. Gemini 3,000-record 입력의 고정
+seed 100행 fast smoke fit도 성공했다. 실제 Obsidian에서 manual-correction
+interaction과 layout을 확인하는 수동 smoke test는 별도로 남아 있다.
 
 ### 제품화 원칙
 

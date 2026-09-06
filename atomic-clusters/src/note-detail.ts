@@ -1,4 +1,4 @@
-import type { ClusterResult, NoteRecord } from "./types";
+import type { ClusterResult, GeneratedClusterSnapshot, ManualCorrectionsState, NoteRecord } from "./types";
 import { buildVisualizationTree, visualizationNoteTerminalPath, visualizationTopMemberships } from "./visualization";
 
 export interface NoteDetailMembership {
@@ -18,6 +18,14 @@ export interface NoteDetailRelatedNote {
   similarity: number;
 }
 
+export interface NoteDetailPreferredCandidate {
+  key: string;
+  title: string;
+  value: number;
+  leafId: number;
+  automatic: boolean;
+}
+
 export interface NoteDetailModel {
   path: string;
   title: string;
@@ -30,46 +38,75 @@ export interface NoteDetailModel {
   residual: boolean;
   provisional: boolean;
   manualPreferredCluster: { key: string; title: string } | null;
+  preferredClusterCandidates: NoteDetailPreferredCandidate[];
   relatedNotes: NoteDetailRelatedNote[];
   clusterKeywords: string[];
 }
 
-interface PreferenceCarrier {
-  manualPreferredClusters?: Readonly<Record<string, unknown>>;
-  manualPreferred?: Readonly<Record<string, unknown>>;
-  manualPreferences?: Readonly<Record<string, unknown>>;
-  notePreferences?: Readonly<Record<string, unknown>>;
-  manualAdjustments?: Readonly<Record<string, unknown>>;
-}
-
-function resultWithOptionalPreferences(result: ClusterResult): ClusterResult & PreferenceCarrier {
-  return result as ClusterResult & PreferenceCarrier;
-}
+const EMPTY_MANUAL_CORRECTIONS: ManualCorrectionsState = { titleOverrides: [], notePreferences: [], groups: [], feedback: [] };
 
 function fallbackNoteTitle(path: string): string {
   return path.split("/").pop()?.replace(/\.md$/i, "") || path;
 }
 
-function nodeTitle(result: ClusterResult, id: string): string {
-  if (id === "root") return "All notes";
-  return result.titles?.[id.replace(/^node:/, "")]?.trim() || `Cluster ${id.replace(/^node:/, "")}`;
+function normalizeMemberPaths(values: readonly string[]): string[] {
+  return [...new Set(values.map((value) => String(value || "").normalize("NFKC").trim().replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/^\/+/, "").replace(/\/{2,}/g, "/").replace(/\/+$/, "").trim()).filter(Boolean))].sort();
 }
 
-function preferenceKey(value: unknown): string | null {
-  if (typeof value === "string") return value.trim() || null;
-  if (!value || typeof value !== "object") return null;
-  const object = value as { preferredClusterKey?: unknown; clusterKey?: unknown; key?: unknown };
-  for (const candidate of [object.preferredClusterKey, object.clusterKey, object.key]) if (typeof candidate === "string" && candidate.trim()) return candidate.trim();
-  return null;
+function stableClusterFingerprint(memberPaths: readonly string[]): string {
+  const canonical = JSON.stringify(normalizeMemberPaths(memberPaths));
+  let hash = 2166136261;
+  for (let index = 0; index < canonical.length; index++) { hash ^= canonical.charCodeAt(index); hash = Math.imul(hash, 16777619); }
+  return `cluster-${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-function preferredClusterFor(result: ClusterResult, path: string): string | null {
-  const carrier = resultWithOptionalPreferences(result);
-  for (const source of [carrier.manualPreferredClusters, carrier.manualPreferred, carrier.notePreferences, carrier.manualPreferences, carrier.manualAdjustments]) {
-    const key = preferenceKey(source?.[path]);
-    if (key) return key;
+function generatedSnapshots(result: ClusterResult): GeneratedClusterSnapshot[] {
+  const membersById = new Map<number, Set<string>>();
+  const add = (id: number, paths: Iterable<string>): void => {
+    const members = membersById.get(id) || new Set<string>();
+    for (const path of paths) { const normalized = normalizeMemberPaths([path])[0]; if (normalized) members.add(normalized); }
+    membersById.set(id, members);
+  };
+  result.leafLabels.forEach((label, index) => { if (Number.isSafeInteger(label) && label >= 0) add(label, [result.ids[index]]); });
+  for (const node of result.hierarchy.nodes || []) add(node.id, node.descendantLeaves.flatMap((leaf) => [...(membersById.get(leaf) || [])]));
+  const merges = new Map(result.hierarchy.merges.map((merge) => [merge.id, merge]));
+  const visiting = new Set<number>();
+  const visit = (id: number): Set<string> => {
+    const existing = membersById.get(id); if (existing?.size) return existing;
+    if (visiting.has(id)) return new Set();
+    const merge = merges.get(id); if (!merge) return existing || new Set();
+    visiting.add(id); const paths = new Set<string>([...visit(merge.left), ...visit(merge.right)]); visiting.delete(id); membersById.set(id, paths); return paths;
+  };
+  for (const merge of result.hierarchy.merges) visit(merge.id);
+  const ids = new Set<number>([...(result.hierarchy.leaves || []), ...result.hierarchy.merges.map((merge) => merge.id), ...(result.hierarchy.nodes || []).map((node) => node.id)]);
+  const unique = new Map<string, GeneratedClusterSnapshot>();
+  for (const nodeId of [...ids].sort((left, right) => left - right)) {
+    const memberPaths = normalizeMemberPaths([...(membersById.get(nodeId) || [])]);
+    if (!memberPaths.length) continue;
+    const stableClusterKey = stableClusterFingerprint(memberPaths);
+    if (!unique.has(stableClusterKey)) unique.set(stableClusterKey, { stableClusterKey, nodeId, memberPaths });
   }
-  return null;
+  return [...unique.values()];
+}
+
+function effectiveTitleMap(result: ClusterResult, manualCorrections: ManualCorrectionsState): { titles: Record<string, string>; snapshots: GeneratedClusterSnapshot[] } {
+  const snapshots = generatedSnapshots(result);
+  const titles = { ...(result.titles || {}) };
+  const nodeByKey = new Map(snapshots.map((snapshot) => [snapshot.stableClusterKey, snapshot.nodeId]));
+  for (const override of manualCorrections.titleOverrides || []) {
+    const nodeId = nodeByKey.get(override.stableClusterKey);
+    if (nodeId !== undefined && !override.orphaned && override.title.trim()) titles[String(nodeId)] = override.title.trim();
+  }
+  return { titles, snapshots };
+}
+
+function nodeTitle(result: ClusterResult, id: string, titleMap: { titles: Record<string, string>; snapshots: GeneratedClusterSnapshot[] }): string {
+  if (id === "root") return "All notes";
+  return titleMap.titles[id.replace(/^node:/, "")]?.trim() || `Cluster ${id.replace(/^node:/, "")}`;
+}
+
+function preferredClusterFor(manualCorrections: ManualCorrectionsState, path: string): string | null {
+  return manualCorrections.notePreferences.find((preference) => preference.notePath === path)?.preferredClusterKey || null;
 }
 
 function finiteProbability(value: unknown): number | null {
@@ -124,19 +161,42 @@ function ancestorPath(result: ClusterResult, index: number): string[] {
   }
 }
 
-function clusterKeywords(result: ClusterResult, ancestors: readonly NoteDetailAncestor[]): string[] {
+function clusterKeywords(result: ClusterResult, ancestors: readonly NoteDetailAncestor[], titleMap: { titles: Record<string, string>; snapshots: GeneratedClusterSnapshot[] }): string[] {
   const keywords: string[] = [];
   const add = (value: string): void => { const normalized = value.trim(); if (normalized && !keywords.some((item) => item.toLocaleLowerCase() === normalized.toLocaleLowerCase())) keywords.push(normalized); };
   for (const ancestor of ancestors) {
     const id = ancestor.id.replace(/^node:/, "");
     for (const score of result.titleGeneration?.scores?.[id] || []) add(score.keyword);
   }
-  if (!keywords.length) for (const ancestor of ancestors) if (ancestor.id !== "root") for (const word of (result.titles?.[ancestor.id.replace(/^node:/, "")] || "").split(" · ")) add(word);
+  if (!keywords.length) for (const ancestor of ancestors) if (ancestor.id !== "root") for (const word of (titleMap.titles[ancestor.id.replace(/^node:/, "")] || "").split(" · ")) add(word);
   return keywords.slice(0, 12);
 }
 
+function preferredClusterCandidates(result: ClusterResult, selectedPath: string, limit: number, titleMap: { titles: Record<string, string>; snapshots: GeneratedClusterSnapshot[] }): NoteDetailPreferredCandidate[] {
+  const index = result.ids.indexOf(selectedPath);
+  if (index < 0) return [];
+  const ordering = result.leafOrdering || result.leafOrder || result.hierarchy.leaves;
+  const row = result.memberships?.[index] || result.softMemberships?.[index] || [];
+  const snapshotsByNode = new Map(titleMap.snapshots.map((snapshot) => [snapshot.nodeId, snapshot]));
+  const automaticLeaf = Number.isSafeInteger(result.leafLabels[index]) ? result.leafLabels[index] : -1;
+  const candidates = ordering.map((leafId, column) => {
+    const snapshot = snapshotsByNode.get(leafId);
+    if (!snapshot) return null;
+    const value = Number.isFinite(row[column]) ? Math.max(0, Math.min(1, Number(row[column]))) : leafId === automaticLeaf ? 1 : 0;
+    return { key: snapshot.stableClusterKey, title: titleMap.titles[String(leafId)]?.trim() || `Cluster ${leafId}`, value, leafId, automatic: leafId === automaticLeaf } satisfies NoteDetailPreferredCandidate;
+  }).filter((candidate): candidate is NoteDetailPreferredCandidate => !!candidate);
+  return candidates.sort((left, right) => right.value - left.value || Number(right.automatic) - Number(left.automatic) || left.leafId - right.leafId).slice(0, Math.min(5, Math.max(1, Math.trunc(limit))));
+}
+
+/** Return at most five relevant leaf candidates for a persisted note preference picker. */
+export function getPreferredClusterCandidates(result: ClusterResult, selectedPath: string, manualCorrections: ManualCorrectionsState = EMPTY_MANUAL_CORRECTIONS, limit = 5): NoteDetailPreferredCandidate[] {
+  return preferredClusterCandidates(result, selectedPath, Math.min(5, Math.max(1, Math.trunc(limit))), effectiveTitleMap(result, manualCorrections));
+}
+
 /** Build a read-only detail model from the saved result and in-memory metadata. */
-export function buildNoteDetail(result: ClusterResult, notes: readonly NoteRecord[], selectedPath: string, relatedLimit = 5): NoteDetailModel | null {
+export function buildNoteDetail(result: ClusterResult, notes: readonly NoteRecord[], selectedPath: string, relatedLimitOrCorrections: number | ManualCorrectionsState = 5, suppliedManualCorrections?: ManualCorrectionsState): NoteDetailModel | null {
+  const relatedLimit = typeof relatedLimitOrCorrections === "number" ? relatedLimitOrCorrections : 5;
+  const manualCorrections = typeof relatedLimitOrCorrections === "number" ? suppliedManualCorrections || EMPTY_MANUAL_CORRECTIONS : relatedLimitOrCorrections;
   const index = result.ids.indexOf(selectedPath);
   if (index < 0) return null;
   const note = notes.find((item) => item.path === selectedPath);
@@ -147,14 +207,18 @@ export function buildNoteDetail(result: ClusterResult, notes: readonly NoteRecor
   const residual = placement?.kind === "residual";
   const provisional = new Set(result.provisionalPaths || result.incremental?.provisionalPaths || []).has(selectedPath);
   const pathIds = ancestorPath(result, index);
-  const ancestors = pathIds.map((id) => ({ id, title: nodeTitle(result, id) }));
-  const memberships = visualizationTopMemberships(result, index, 5).map((item) => ({ leafId: item.leafId, title: item.title, value: Math.max(0, Math.min(1, item.value)) }));
-  const preferredKey = preferredClusterFor(result, selectedPath);
-  const preferredTitle = preferredKey ? nodeTitle(result, preferredKey.startsWith("node:") ? preferredKey : `node:${preferredKey}`) : "";
+  const titleMap = effectiveTitleMap(result, manualCorrections);
+  const ancestors = pathIds.map((id) => ({ id, title: nodeTitle(result, id, titleMap) }));
+  const displayResult = { ...result, titles: titleMap.titles };
+  const memberships = visualizationTopMemberships(displayResult, index, 5).map((item) => ({ leafId: item.leafId, title: item.title, value: Math.max(0, Math.min(1, item.value)) }));
+  const preferredKey = preferredClusterFor(manualCorrections, selectedPath);
+  const preferredSnapshot = preferredKey ? titleMap.snapshots.find((snapshot) => snapshot.stableClusterKey === preferredKey) : undefined;
+  const preferredNodeId = preferredSnapshot?.nodeId ?? (/^-?\d+$/.test(preferredKey || "") ? Number(preferredKey) : undefined);
+  const preferredTitle = preferredNodeId === undefined ? preferredKey || "" : titleMap.titles[String(preferredNodeId)] || preferredKey || "";
   return {
     path: selectedPath,
     title,
-    automaticLeaf: leafId === null ? null : { id: leafId, title: nodeTitle(result, `node:${leafId}`) },
+    automaticLeaf: leafId === null ? null : { id: leafId, title: nodeTitle(result, `node:${leafId}`, titleMap) },
     ancestors,
     probability: finiteProbability(result.probabilities[index]),
     strongestMembership: memberships[0]?.value ?? null,
@@ -163,7 +227,8 @@ export function buildNoteDetail(result: ClusterResult, notes: readonly NoteRecor
     residual,
     provisional,
     manualPreferredCluster: preferredKey ? { key: preferredKey, title: preferredTitle || preferredKey } : null,
+    preferredClusterCandidates: getPreferredClusterCandidates(result, selectedPath, manualCorrections, 5),
     relatedNotes: relatedNotes(result, notes, index, relatedLimit),
-    clusterKeywords: clusterKeywords(result, ancestors),
+    clusterKeywords: clusterKeywords(result, ancestors, titleMap),
   };
 }

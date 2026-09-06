@@ -21,11 +21,13 @@ test("installed plugin exposes persistent progress for model and clustering flow
   assert.match(main, /status: embeddingError \? "failed" : "completed"/);
   assert.match(main, /stage: "clustering"/);
   assert.match(main, /open-embedding-log/);
-  assert.match(main, /shell\.openPath/);
-  assert.match(main, /getBasePath/);
-  assert.match(main, /embedding-log\.json/);
+  assert.match(main, /loadLatestEmbeddingLog/);
+  assert.match(main, /new Modal\(this\.app\)/);
+  assert.match(main, /JSON\.stringify\(log, null, 2\)/);
   assert.match(main, /No embedding log is available yet/);
   assert.match(main, /Could not open embedding log/);
+  assert.doesNotMatch(main, /shell\.openPath/);
+  assert.match(main, /getBasePath/);
   assert.match(main, /readBinary/);
   assert.match(main, /createObjectURL/);
   assert.match(main, /prepareLocalOrtRendererModule/);

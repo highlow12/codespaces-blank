@@ -61,6 +61,43 @@ test("cluster label helpers choose titles, contrast, bounds, and non-overlapping
   assert.ok(separate[1].y >= separate[0].y + separate[0].height || separate[0].y >= separate[1].y + separate[1].height);
 });
 
+test("camera fit and resize preserve label-box and hover-radius edge padding", async () => {
+  const { buildVisualizationTree, visualizationFrontier, measureVisualizationClusterLabelBoxes, layoutVisualizationClusterLabels, visualizationFitCameraState, visualizationCameraFromState, visualizationWorldToScreen, resizeVisualizationCameraState, VISUALIZATION_POINT_PADDING } = await loadVisualization();
+  const tree = buildVisualizationTree({ leaves: [0, 1], merges: [{ id: 2, left: 0, right: 1, distance: 1, mass: 2 }], root: 2 }, [0, 1]);
+  const frontier = visualizationFrontier(tree, ["root"], [[1, 0], [0, 1]], [0, 1]);
+  const titles = { "0": "A deliberately long cluster title" };
+  const measureText = (text) => text.length * 8;
+  const labelBoxes = measureVisualizationClusterLabelBoxes(frontier, titles, measureText, 24);
+  const labelMargin = 12;
+  const hoverPointRadius = 28;
+  const options = { pointRadius: 4, hoverPointRadius, labelBoxes, labelMargin };
+  const labelPadding = Math.max(...labelBoxes.map((box) => Math.max(box.width / 2, box.height / 2))) + labelMargin;
+  const fit = visualizationFitCameraState([[0, 0], [100, 0]], 480, 320, VISUALIZATION_POINT_PADDING, options);
+  assert.ok(labelPadding > VISUALIZATION_POINT_PADDING);
+  assert.ok(labelPadding > hoverPointRadius);
+  assert.equal(fit.padding, labelPadding);
+  assert.equal(fit.renderedPointRadius, hoverPointRadius);
+
+  const fitCamera = visualizationCameraFromState(fit);
+  const fitPoints = [[0, 0], [100, 0]].map((point) => visualizationWorldToScreen(fitCamera, point));
+  const fitLabels = layoutVisualizationClusterLabels(frontier, fitPoints, titles, new Map([["node:0", "#111111"], ["node:1", "#eeeeee"]]), fit.width, fit.height, { margin: fit.padding, labelHeight: 24, measureText });
+  assert.ok(fitLabels.every((label) => label.x >= fit.padding && label.y >= fit.padding && label.x + label.width <= fit.width - fit.padding && label.y + label.height <= fit.height - fit.padding));
+
+  const narrow = resizeVisualizationCameraState(fit, [[0, 0], [100, 0]], 260, 180, options);
+  assert.equal(narrow.width, 260);
+  assert.equal(narrow.height, 180);
+  assert.equal(narrow.padding, 90);
+  assert.equal(narrow.renderedPointRadius, hoverPointRadius);
+  const narrowCamera = visualizationCameraFromState(narrow);
+  const narrowPoints = [[0, 0], [100, 0]].map((point) => visualizationWorldToScreen(narrowCamera, point));
+  const narrowLabels = layoutVisualizationClusterLabels(frontier, narrowPoints, titles, new Map([["node:0", "#111111"], ["node:1", "#eeeeee"]]), narrow.width, narrow.height, { margin: narrow.padding, labelHeight: 24, measureText });
+  assert.ok(narrowLabels.every((label) => label.x >= narrow.padding && label.y >= narrow.padding && label.x + label.width <= narrow.width - narrow.padding && label.y + label.height <= narrow.height - narrow.padding));
+
+  const expanded = resizeVisualizationCameraState(narrow, [[0, 0], [100, 0]], 600, 400, options);
+  assert.equal(expanded.padding, labelPadding);
+  assert.equal(expanded.renderedPointRadius, hoverPointRadius);
+});
+
 test("hierarchy palette spaces three top-level clusters and varies descendants in HSL", async () => {
   const { buildVisualizationTree, visualizationColorScheme } = await loadVisualization();
   const hierarchy = { leaves: [0, 1, 2, 3, 6], merges: [{ id: 4, left: 0, right: 1, distance: 1, mass: 2 }, { id: 5, left: 2, right: 3, distance: 1, mass: 2 }], root: 9, children: { "9": [4, 5, 6] } };
